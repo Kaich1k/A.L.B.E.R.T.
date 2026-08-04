@@ -1,0 +1,39 @@
+{
+  "name": "albert-companion",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@expo-google-fonts/orbitron": "^0.4.2",
+    "@expo-google-fonts/rajdhani": "^0.4.1",
+    "@expo-google-fonts/share-tech-mono": "^0.4.1",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "expo": "~57.0.9",
+    "expo-asset": "~57.0.8",
+    "expo-clipboard": "~8.0.0",
+    "expo-constants": "~57.0.8",
+    "expo-file-system": "~57.0.1",
+    "expo-font": "~57.0.1",
+    "expo-secure-store": "~57.0.1",
+    "expo-speech": "^57.0.1",
+    "expo-speech-recognition": "^56.0.1",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.2",
+    "react-native-safe-area-context": "~5.7.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "eas-cli": "^21.4.0",
+    "typescript": "~5.9.2"
+  },
+  "scripts": {
+    "start": "EXPO_NO_METRO_WORKSPACE_ROOT=1 expo start --clear",
+    "android": "EXPO_NO_METRO_WORKSPACE_ROOT=1 expo start --android --clear",
+    "ios": "EXPO_NO_METRO_WORKSPACE_ROOT=1 expo start --ios --clear",
+    "web": "EXPO_NO_METRO_WORKSPACE_ROOT=1 expo start --web --clear",
+    "typecheck": "tsc --noEmit",
+    "build:ios": "eas build --platform ios --profile production",
+    "submit:ios": "eas submit --platform ios --profile production"
+  },
+  "private": true
+}

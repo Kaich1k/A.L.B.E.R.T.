@@ -1,0 +1,10 @@
+{
+  "name": "A.L.B.E.R.T. Companion",
+  "short_name": "ALBERT",
+  "description": "Phone chat for A.L.B.E.R.T. with memory sync to your Mac",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0c",
+  "theme_color": "#0a0a0c",
+  "icons": []
+}

@@ -1,0 +1,52 @@
+{
+  "name": "albert",
+  "productName": "ALBERT",
+  "version": "0.1.0",
+  "description": "A.L.B.E.R.T. — Artificial Logical Brain and Expressive Remote Terminal",
+  "main": "./out/main/index.js",
+  "author": "Kai",
+  "license": "MIT",
+  "scripts": {
+    "dev": "ELECTRON_RUN_AS_NODE= electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "ELECTRON_RUN_AS_NODE= electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "postinstall": "electron-builder install-app-deps",
+    "rebuild:native": "electron-builder install-app-deps",
+    "pack": "npm run build && electron-builder --mac dir --publish never",
+    "dist": "npm run build && electron-builder --mac dmg --publish never",
+    "install:app": "bash scripts/install-app.sh",
+    "update:app": "bash scripts/install-app.sh",
+    "companion:dev": "npm --prefix companion run dev",
+    "companion:install": "npm --prefix companion install",
+    "mobile:start": "npm --prefix mobile run start",
+    "mobile:ios": "npm --prefix mobile run ios",
+    "mobile:build:ios": "npm --prefix mobile exec eas-cli -- build --platform ios --profile production"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@huggingface/transformers": "^4.2.0",
+    "better-sqlite3": "^11.9.1",
+    "expo": "^57.0.9",
+    "kokoro-js": "^1.2.1",
+    "onnxruntime-node": "^1.27.0",
+    "openai": "^4.104.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "uuid": "^11.1.0",
+    "zod": "^3.24.2",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/react": "^19.0.12",
+    "@types/react-dom": "^19.0.4",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^35.1.2",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^3.1.0",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.3"
+  }
+}

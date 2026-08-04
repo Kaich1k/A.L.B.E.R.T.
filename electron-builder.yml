@@ -1,0 +1,53 @@
+appId: com.albert.assistant
+# Electron cannot resolve Helper apps when productName contains periods.
+# Keep the filesystem bundle as ALBERT.app; show A.L.B.E.R.T. in the Dock via CFBundleDisplayName.
+productName: ALBERT
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out/**/*
+  - package.json
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!scripts/*'
+  - '!electron.vite.config.*'
+  - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json,tsconfig.*.tsbuildinfo}'
+  - '!dist/*'
+asar: true
+asarUnpack:
+  - '**/*.node'
+  - '**/better-sqlite3/**'
+  - '**/onnxruntime-node/**'
+  - '**/@huggingface/transformers/**'
+  - '**/kokoro-js/**'
+  - '**/phonemizer/**'
+extraResources:
+  - from: resources/icon.png
+    to: icon.png
+  - from: src/main/voice/kokoro-worker.cjs
+    to: kokoro-worker.cjs
+  - from: src/main/voice/whisper-worker.cjs
+    to: whisper-worker.cjs
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dir
+      arch:
+        - arm64
+    - target: dmg
+      arch:
+        - arm64
+  # Unsigned local builds (fine for personal use). First open: right-click → Open.
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: A.L.B.E.R.T. needs microphone access for voice conversations.
+    NSAppleEventsUsageDescription: A.L.B.E.R.T. needs Automation access to control apps and browser tabs.
+    CFBundleDisplayName: A.L.B.E.R.T.
+    CFBundleName: ALBERT
+npmRebuild: true
