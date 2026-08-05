@@ -75,13 +75,39 @@ Fallback web UI (optional): `npm run companion:dev` → `http://<mac-ip>:5174`.
 | `npm run pack` | Package `.app` into `dist/` only |
 | `npm run dist` | Build a `.dmg` installer into `dist/` |
 | `npm run typecheck` | TypeScript checks |
+| `npm run test:voice` | Deterministic voice reliability regressions |
+| `npm run test:providers` | Live Groq/Ollama availability, latency, streaming, and tool smoke test |
 
 ## Setup / keys
 
-Paste your **Anthropic** key in **Systems** (or set `ANTHROPIC_API_KEY` in `.env` for dev).  
+Paste an **Anthropic** key for Haiku/Opus and/or a **Groq** key for the free QUICK cloud route in
+**Systems**. Ollama can run on-device with no service key.
 Dashboard: https://platform.claude.com/dashboard
 
+The currently configured Groq Llama bridge retires on August 16, 2026. Enable GPT-OSS 20B (preferred)
+or another current model in Groq organization limits before then, or select local Ollama for QUICK.
+
 Global shortcut: **⌘⇧A**.
+
+## Operations system
+
+Open **Operations** to manage persistent missions, steps, approval checkpoints, routines, universal
+captures, Focus Mode, and operational health. Use **⌘K** for the global command deck. Albert can also
+create and update missions or routines naturally through Comm.
+
+Albert opens with a skippable, session-only system initialization sequence. Choose Minimal, Balanced,
+or Cinematic HUD density under **Systems**, and replay or disable the intro there. Use **⌘1–⌘6** to
+jump between panels and **⌘⇧Space** for Universal Capture.
+
+Architecture, safety behavior, recovery, and supported schedules are documented in
+[`docs/OPERATIONS_SYSTEM.md`](docs/OPERATIONS_SYSTEM.md).
+The startup, unified core states, HUD density, motion behavior, and shortcuts are documented in
+[`docs/JARVIS_INTERFACE.md`](docs/JARVIS_INTERFACE.md).
+
+The voice failure/recovery contract and regression command are in
+[`docs/VOICE_RELIABILITY.md`](docs/VOICE_RELIABILITY.md). The current free/fast model research,
+quotas, deprecations, and recommended routing stack are in
+[`docs/FREE_AI_ROUTING.md`](docs/FREE_AI_ROUTING.md).
 
 ## Auto-updates later
 
@@ -96,3 +122,4 @@ That needs a public/private GitHub repo and release publishing — worth doing o
 ## License
 
 MIT
+# A.L.B.E.R.T.
