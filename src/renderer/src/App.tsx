@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Sidebar } from './components/Sidebar'
 import { HomePanel } from './components/HomePanel'
 import { ConversationPanel } from './components/ConversationPanel'
+import { MissionsPanel } from './components/MissionsPanel'
 import { MemoryPanel } from './components/MemoryPanel'
 import { ActivityPanel } from './components/ActivityPanel'
+import { CommandPalette } from './components/CommandPalette'
+import { StartupSequence } from './components/StartupSequence'
+import { SystemStatusRail } from './components/SystemStatusRail'
 import { SettingsPanel } from './components/SettingsPanel'
 import { ClaudeVoiceSession } from './voice/claudeVoiceSession'
 import { isWakeWordSupported, WakeWordListener } from './voice/wakeWord'
@@ -20,6 +24,7 @@ export default function App(): React.JSX.Element {
   const setStreamingText = useAlbertStore((s) => s.setStreamingText)
   const appendStreamingText = useAlbertStore((s) => s.appendStreamingText)
   const setBusy = useAlbertStore((s) => s.setBusy)
+  const busy = useAlbertStore((s) => s.busy)
   const setError = useAlbertStore((s) => s.setError)
   const setVoiceState = useAlbertStore((s) => s.setVoiceState)
   const setVoiceStatus = useAlbertStore((s) => s.setVoiceStatus)
@@ -32,10 +37,20 @@ export default function App(): React.JSX.Element {
   const wakeRef = useRef<WakeWordListener | null>(null)
   const startingVoiceRef = useRef(false)
   const startVoiceRef = useRef<() => Promise<void>>(async () => undefined)
+  const [systemEvent, setSystemEvent] = useState<{ text: string; tone: 'normal' | 'ok' | 'warn' } | null>(null)
+  const [settingsReady, setSettingsReady] = useState(false)
+  const systemEventTimer = useRef(0)
+
+  function flashSystemEvent(text: string, tone: 'normal' | 'ok' | 'warn' = 'normal'): void {
+    window.clearTimeout(systemEventTimer.current)
+    setSystemEvent({ text, tone })
+    systemEventTimer.current = window.setTimeout(() => setSystemEvent(null), 3600)
+  }
 
   useEffect(() => {
     document.body.classList.toggle('perf-mode', settings.performanceMode !== false)
-  }, [settings.performanceMode])
+    document.body.dataset.hudDensity = settings.hudDensity || 'cinematic'
+  }, [settings.performanceMode, settings.hudDensity])
 
   useEffect(() => {
     const onVis = (): void => {
@@ -51,10 +66,12 @@ export default function App(): React.JSX.Element {
     if (sessionRef.current) return
 
     const current = useAlbertStore.getState().settings
+    // Local Ollama needs no API key — only the daemon + a model
     const hasBrain = Boolean(
       current.anthropicApiKey?.trim() ||
         current.ollamaApiKey?.trim() ||
-        current.groqApiKey?.trim()
+        current.groqApiKey?.trim() ||
+        current.localProvider === 'ollama'
     )
     if (!hasBrain) {
       setError('Add an Anthropic, Groq, or Ollama API key under Systems to talk.')
@@ -103,7 +120,7 @@ export default function App(): React.JSX.Element {
       const nested = message.match(/Error invoking remote method[^:]+: Error: ([\s\S]+)$/)
       if (nested?.[1]) message = nested[1]
       setError(message)
-      setVoiceStatus('')
+      setVoiceStatus(`Voice startup fault · ${message}`)
       setVoiceState('idle')
       sessionRef.current = null
       setPanel('conversation')
@@ -145,11 +162,17 @@ export default function App(): React.JSX.Element {
       const nested = message.match(/Error invoking remote method[^:]+: Error: ([\s\S]+)$/)
       if (nested?.[1]) message = nested[1]
       setError(message)
-      setVoiceStatus('')
+      setVoiceStatus(`Voice startup fault · ${message}`)
       setVoiceState('idle')
       sessionRef.current = null
     }
   }
+
+  useEffect(() => {
+    const toggle = (): void => { void toggleVoice() }
+    window.addEventListener('albert:voice-toggle', toggle)
+    return () => window.removeEventListener('albert:voice-toggle', toggle)
+  }, [voiceState, startVoice, stopVoice])
 
   useEffect(() => {
     // Populate TTS voice list (Chrome/Electron loads async)
@@ -170,14 +193,17 @@ export default function App(): React.JSX.Element {
         setActivity(activity)
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setSettingsReady(true)
       }
     })()
 
     const off = window.albert.onChatEvent((event) => {
       if (event.type === 'route') {
         const tier =
-          event.tier === 'power' ? 'POWER' : event.tier === 'local' ? 'LOCAL' : 'FAST'
+          event.tier === 'power' ? 'POWER' : event.tier === 'local' ? 'QUICK' : 'FAST'
         setRouteInfo(`${tier} · ${event.model}${event.reason ? ` — ${event.reason}` : ''}`)
+        flashSystemEvent(`ROUTING INTELLIGENCE / ${tier} / ${event.model || 'MODEL READY'}`)
         if (event.reason?.toLowerCase().includes('locked')) {
           void window.albert.getSettings().then(setSettings)
         }
@@ -191,6 +217,12 @@ export default function App(): React.JSX.Element {
           setStreamingText('')
         }
       } else if (event.type === 'tool_start' || event.type === 'tool_end') {
+        flashSystemEvent(
+          event.type === 'tool_start'
+            ? `EXECUTING PROTOCOL / ${(event.toolName || 'TOOL').replaceAll('_', ' ').toUpperCase()}`
+            : `${event.ok === false ? 'PROTOCOL FAULT' : 'PROTOCOL COMPLETE'} / ${(event.toolName || 'TOOL').replaceAll('_', ' ').toUpperCase()}`,
+          event.type === 'tool_end' ? (event.ok === false ? 'warn' : 'ok') : 'normal'
+        )
         void window.albert.listActivity().then(setActivity)
         if (event.type === 'tool_start' && event.toolName?.startsWith('computer_')) {
           void window.albert.showComputer()
@@ -201,6 +233,10 @@ export default function App(): React.JSX.Element {
       } else if (event.type === 'chat_cleared') {
         setMessages([])
         setStreamingText('')
+      } else if (event.type === 'chat_synced') {
+        void window.albert.getChatHistory().then((history) => {
+          setMessages(history.filter((message) => message.role === 'user' || message.role === 'assistant'))
+        }).catch((err) => setError(err instanceof Error ? err.message : String(err)))
       } else if (event.type === 'done') {
         setBusy(false)
         setStreamingText('')
@@ -213,6 +249,7 @@ export default function App(): React.JSX.Element {
 
     return () => {
       off()
+      window.clearTimeout(systemEventTimer.current)
       void sessionRef.current?.stop()
       // Do NOT stop wake here — React StrictMode remounts this effect on launch
       // and aborting SpeechRecognition causes the macOS mic indicator to flicker.
@@ -252,6 +289,12 @@ export default function App(): React.JSX.Element {
             setError(
               'Wake word needs the microphone. Allow mic for A.L.B.E.R.T. in System Settings → Privacy & Security → Microphone.'
             )
+          } else if (detail?.startsWith('heard:')) {
+            // Brief diagnostic so it’s obvious the mic/Whisper path is alive
+            const heard = detail.slice('heard:'.length).trim()
+            if (heard && useAlbertStore.getState().voiceState === 'idle') {
+              setVoiceStatus(`Wake heard: “${heard}”`)
+            }
           }
         }
       )
@@ -264,8 +307,9 @@ export default function App(): React.JSX.Element {
       armTimer = window.setTimeout(() => {
         if (!wakeRef.current) return
         if (useAlbertStore.getState().voiceState !== 'idle' || sessionRef.current) return
+        // start() is idempotent; resume() alone missed teardown races after standby
         wakeRef.current.start()
-      }, 500)
+      }, 350)
     } else {
       wakeRef.current.pause()
     }
@@ -287,7 +331,30 @@ export default function App(): React.JSX.Element {
   }, [])
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell system-${voiceState} ${busy ? 'system-busy' : ''} ${settingsReady ? 'app-ready' : 'app-hydrating'}`}>
+      {settingsReady && settings.startupAnimationEnabled !== false ? (
+        <StartupSequence
+          performanceMode={settings.performanceMode !== false}
+          operatorName="sir"
+          brainConfigured={Boolean(
+            settings.anthropicApiKey?.trim() ||
+            settings.ollamaApiKey?.trim() ||
+            settings.groqApiKey?.trim() ||
+            settings.localProvider === 'ollama'
+          )}
+        />
+      ) : null}
+      <div className="hud-atmosphere" aria-hidden="true">
+        <div className="hud-grid-plane" />
+        <div className="hud-scan-beam" />
+        <div className="hud-vignette" />
+        <span className="hud-corner top-left" />
+        <span className="hud-corner top-right" />
+        <span className="hud-corner bottom-left" />
+        <span className="hud-corner bottom-right" />
+      </div>
+      <CommandPalette />
+      {systemEvent ? <div className={`system-event ${systemEvent.tone}`} role="status"><i />{systemEvent.text}</div> : null}
       <div className="drag-bar" />
       <Sidebar />
       <main className="main">
@@ -295,13 +362,15 @@ export default function App(): React.JSX.Element {
         {panel === 'conversation' ? (
           <ConversationPanel
             onTalk={() => void toggleVoice()}
-            onStandby={() => void stopVoice()}
+            onStandby={stopVoice}
           />
         ) : null}
+        {panel === 'missions' ? <MissionsPanel /> : null}
         {panel === 'memory' ? <MemoryPanel /> : null}
         {panel === 'activity' ? <ActivityPanel /> : null}
         {panel === 'settings' ? <SettingsPanel /> : null}
       </main>
+      <SystemStatusRail />
     </div>
   )
 }

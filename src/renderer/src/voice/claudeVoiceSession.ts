@@ -6,7 +6,7 @@ import {
   PERSONALITY_META
 } from '../../../shared/personality'
 import { useAlbertStore } from '../store'
-import { decodeBlobToMono16k } from './audio'
+import { decodeBlobToMono16k, trimSilence } from './audio'
 import { LiveKeywordMonitor } from './liveKeywords'
 import { speakText, stopSpeaking, StreamingTtsQueue } from './tts'
 import {
@@ -27,63 +27,132 @@ function splitAt(text: string, index: number): { speak: string; rest: string } {
   if (index <= 0) return { speak: '', rest: text }
   if (index >= text.length) return { speak: text, rest: '' }
   return {
-    speak: text.slice(0, index).replace(/\s+$/g, ''),
+    speak: text.slice(0, index).replace(/^\s+|\s+$/g, ''),
     rest: text.slice(index).replace(/^\s+/g, '')
   }
 }
 
+/** Trailing title / latin abbrev — not a real sentence end. */
+function endsWithAbbreviation(candidate: string): boolean {
+  return /(?:^|[\s("'])(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|vs|etc|e\.g|i\.e)\.?["')\]]?$/i.test(
+    candidate.trim()
+  )
+}
+
 /**
  * Pull speakable text from a streaming buffer.
- * Cuts only at completed sentence ends (or final flush) — never mid-phrase.
- * Returns the *first* finished sentence so TTS can start ASAP while more tokens
- * still arrive; gapless Web Audio joins follow-up sentences without dead air.
+ * Cuts at completed sentence ends so TTS can start on sentence 1 while tokens
+ * (and later synth of sentence 2+) continue. Eager mode allows a soft clause
+ * cut for the first audio of a turn when no period has landed yet.
+ *
+ * Markdown bullet lines rarely end with periods — treat newlines / next-bullet
+ * markers as boundaries so long lists don’t become one giant skipped clip.
  */
 export function takeSpeakableUnits(
   buffer: string,
   final: boolean,
-  _eager = false
+  eager = false
 ): { speak: string; rest: string } {
   const text = buffer
   if (!text.trim()) return { speak: '', rest: '' }
+
+  // Scan every terminator — skip "Mr." / short crumbs, keep looking
+  const re = /[.!?]["')\]]?(?:\s+|$)/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text))) {
+    const end = m.index + m[0].length
+    const candidate = text.slice(0, end).replace(/\s+/g, ' ').trim()
+    if (!candidate) continue
+    if (endsWithAbbreviation(candidate)) continue
+    // Single-letter initial ("A.") — keep scanning
+    if (/^[A-Za-z]\.$/.test(candidate)) continue
+    // "Yes sir." is 8 chars — must fire early (old min of 12 blocked Albert openers)
+    if (candidate.length >= 5) return splitAt(text, end)
+  }
+
+  // List / paragraph breaks (common in parts lists — often no trailing period)
+  const lineRe = /\n+\s*(?:[-*•]\s+|\d+\.\s+)?/g
+  let lineMatch: RegExpExecArray | null
+  while ((lineMatch = lineRe.exec(text))) {
+    const end = lineMatch.index
+    const candidate = text.slice(0, end).replace(/\s+/g, ' ').trim()
+    // Need a real line of content before the break (skip leading blank / marker-only)
+    if (candidate.length >= 12 && end > 0) {
+      return splitAt(text, lineMatch.index + lineMatch[0].length)
+    }
+  }
+
+  // First audio of the turn: start synth on a clause while the LLM still streams
+  if (eager && !final) {
+    const trimmed = text.replace(/\s+/g, ' ').trim()
+    if (trimmed.length >= 48) {
+      const window = text.slice(0, Math.min(text.length, 110))
+      const soft = Math.max(
+        window.lastIndexOf(', '),
+        window.lastIndexOf('; '),
+        window.lastIndexOf(' — '),
+        window.lastIndexOf(': ')
+      )
+      if (soft >= 24) return splitAt(text, soft + 1)
+    }
+    if (trimmed.length >= 90) {
+      const cut = text.lastIndexOf(' ', Math.min(text.length, 80))
+      if (cut >= 36) return splitAt(text, cut)
+    }
+  }
+
+  // Hard cap — never hand Kokoro a novel-sized unit (silent truncation / skips)
+  if (text.replace(/\s+/g, ' ').trim().length >= 420) {
+    const window = text.slice(0, Math.min(text.length, 400))
+    let cut = Math.max(
+      window.lastIndexOf('. '),
+      window.lastIndexOf('! '),
+      window.lastIndexOf('? '),
+      window.lastIndexOf('\n'),
+      window.lastIndexOf(', ')
+    )
+    if (cut < 80) cut = window.lastIndexOf(' ')
+    if (cut >= 80) return splitAt(text, cut + 1)
+  }
 
   if (final) {
     return { speak: text.replace(/\s+/g, ' ').trim(), rest: '' }
   }
 
-  // First completed sentence only — earliest start without word-crumbs
-  const re = /[.!?]["')\]]?(?:\s+|$)/g
-  const m = re.exec(text)
-  if (m) {
-    const end = m.index + m[0].length
-    if (end >= 12) return splitAt(text, end)
-  }
-
   return { speak: '', rest: text }
 }
 
-/** Drain every finished sentence currently buffered (each becomes one synth job). */
+/**
+ * Drain finished sentences into separate synth jobs.
+ * Final flush still splits by sentence so sentence N+1 can synthesize while N plays.
+ */
 export function drainSpeakableUnits(
   buffer: string,
   final: boolean,
-  _eagerFirst = false
+  eagerFirst = false
 ): { units: string[]; rest: string } {
-  if (final) {
-    const next = takeSpeakableUnits(buffer, true)
-    return next.speak ? { units: [next.speak], rest: '' } : { units: [], rest: '' }
-  }
-
   const units: string[] = []
   let rest = buffer
-  for (let i = 0; i < 24; i++) {
-    const next = takeSpeakableUnits(rest, false)
+  let eager = eagerFirst
+
+  for (let i = 0; i < 32; i++) {
+    const next = takeSpeakableUnits(rest, false, eager)
     if (!next.speak) {
       rest = next.rest
       break
     }
     units.push(next.speak)
     rest = next.rest
+    eager = false
     if (!rest) break
   }
+
+  if (final) {
+    const tail = rest.replace(/\s+/g, ' ').trim()
+    if (tail) units.push(tail)
+    return { units, rest: '' }
+  }
+
   return { units, rest }
 }
 
@@ -106,6 +175,8 @@ export class ClaudeVoiceSession {
   private timerId = 0
   private silenceMs = 0
   private spokeMs = 0
+  /** Wall-clock: last time mic was clearly above speech threshold */
+  private lastSpeechAt = 0
   private recording = false
   private speaking = false
   private bargeIn = false
@@ -114,14 +185,20 @@ export class ClaudeVoiceSession {
   private liveKeywords: LiveKeywordMonitor | null = null
   private muteWatchRecorder: MediaRecorder | null = null
   private muteWatchBusy = false
+  private muteWatchBusyGen = 0
   private muteWatchGen = 0
   private muteWatchTimer = 0
-  private muteWatchPending: Blob | null = null
+  private muteWatchPending: { blob: Blob; generation: number } | null = null
   private bargeHoldMs = 0
+  private voiceTurnNote: string | null = null
+  private lifecycleGen = 0
+  private standbyInFlight = false
   private readonly ttsQueue = new StreamingTtsQueue()
   private readonly pollQuietMs = 80
   private readonly pollActiveMs = 40
   private readonly speechRms = 0.05
+  /** Drop below this to count as silence (hysteresis — stops noise flicker resetting the 3s timer) */
+  private readonly silenceRms = 0.032
   /** Lower bar while Albert talks — AEC often attenuates the user. */
   private readonly bargeRms = 0.022
   /** Need sustained voice so TTS bleed doesn’t false-trigger barge-in */
@@ -144,6 +221,7 @@ export class ClaudeVoiceSession {
 
   async start(): Promise<void> {
     if (this.running) await this.stop()
+    const generation = ++this.lifecycleGen
     this.onState('connecting')
     this.onStatus('Preparing local speech engine…')
 
@@ -154,12 +232,16 @@ export class ClaudeVoiceSession {
         window.albert.warmKokoro().catch(() => false)
       ])
     } catch (err) {
+      if (generation !== this.lifecycleGen) return
       const message = err instanceof Error ? err.message : String(err)
       throw new Error(`Could not start speech engine: ${message}`)
     }
 
+    if (generation !== this.lifecycleGen) return
+
+    let stream: MediaStream
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
@@ -167,11 +249,18 @@ export class ClaudeVoiceSession {
         }
       })
     } catch {
+      if (generation !== this.lifecycleGen) return
       throw new Error(
         'Microphone access denied. Allow mic for A.L.B.E.R.T. in System Settings → Privacy & Security → Microphone.'
       )
     }
 
+    if (generation !== this.lifecycleGen) {
+      stream.getTracks().forEach((track) => track.stop())
+      return
+    }
+
+    this.stream = stream
     this.running = true
     this.muted = false
     this.onStatus('Listening — say “standby” to end, “mute” to cut him off, “hide”/“show” for the window')
@@ -179,6 +268,7 @@ export class ClaudeVoiceSession {
   }
 
   async stop(): Promise<void> {
+    this.lifecycleGen += 1
     const wasRunning = this.running
     this.running = false
     this.busy = false
@@ -228,7 +318,11 @@ export class ClaudeVoiceSession {
     }
   }
 
-  private startLiveKeywords(): void {
+  /**
+   * @param allowStandby — false while Thinking. Web Speech / Whisper often
+   * hallucinate “bye”/“sleep” on silence and were killing the session before TTS.
+   */
+  private startLiveKeywords(allowStandby = true): void {
     this.stopLiveKeywords()
     this.liveKeywords = new LiveKeywordMonitor((key) => {
       if (key === 'mute') {
@@ -249,7 +343,7 @@ export class ClaudeVoiceSession {
         void this.engageStandbyFromLive()
       }
     })
-    this.liveKeywords.start()
+    this.liveKeywords.start({ allowStandby })
   }
 
   private stopLiveKeywords(): void {
@@ -257,14 +351,15 @@ export class ClaudeVoiceSession {
     this.liveKeywords = null
   }
 
-  /** True while we should listen for “mute” (thinking or speaking). */
+  /** The Whisper watchdog is CPU-heavy, so reserve it for live playback. */
   private muteWatchWanted(): boolean {
-    return this.running && !this.muted && (this.speaking || this.busy)
+    return this.running && !this.muted && this.speaking
   }
 
   /**
    * Whisper mute watchdog — Web Speech is unreliable in Electron while we hold
-   * getUserMedia (same class of bug as wake). Runs during thinking + speaking.
+   * getUserMedia (same class of bug as wake). Runs only while speaking so it
+   * cannot compete with Kokoro synthesis during the thinking handoff.
    */
   private startMuteWatch(): void {
     this.stopMuteWatch()
@@ -298,7 +393,7 @@ export class ClaudeVoiceSession {
     recorder.onstop = () => {
       if (this.muteWatchRecorder === recorder) this.muteWatchRecorder = null
       const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' })
-      void this.checkMuteWatchChunk(blob)
+      void this.checkMuteWatchChunk(blob, gen)
       if (gen === this.muteWatchGen && this.muteWatchWanted()) {
         this.muteWatchTimer = window.setTimeout(() => this.armMuteWatchSlice(gen), 30)
       }
@@ -336,23 +431,28 @@ export class ClaudeVoiceSession {
     }
     this.muteWatchRecorder = null
     this.muteWatchBusy = false
+    this.muteWatchBusyGen = this.muteWatchGen
   }
 
-  private async checkMuteWatchChunk(blob: Blob): Promise<void> {
-    if (this.muted || !this.muteWatchWanted()) return
+  private async checkMuteWatchChunk(blob: Blob, generation: number): Promise<void> {
+    if (generation !== this.muteWatchGen || this.muted || !this.muteWatchWanted()) return
     if (blob.size < 1200) return
 
     if (this.muteWatchBusy) {
-      this.muteWatchPending = blob
+      this.muteWatchPending = { blob, generation }
       return
     }
 
     this.muteWatchBusy = true
+    this.muteWatchBusyGen = generation
     try {
       const audio = await decodeBlobToMono16k(blob)
       if (audio.length < 1800) return
       const raw = (await window.albert.transcribeAudio(audio)).trim()
+      if (generation !== this.muteWatchGen || !this.muteWatchWanted()) return
       const text = correctTranscript(raw)
+      if (!text || isLikelyHallucination(text) || isLikelyHallucination(raw)) return
+
       if (
         isMuteCommand(text) ||
         isMuteCommand(raw) ||
@@ -362,17 +462,31 @@ export class ClaudeVoiceSession {
         this.muteNow()
         return
       }
-      if (isEndVoiceCommand(text) || isEndVoiceCommand(raw)) {
+      // Standby via mute-watch only while audio is actually playing — never during
+      // the Thinking window (silence → Whisper “Bye.” was ending voice before TTS).
+      if (
+        this.speaking &&
+        (isEndVoiceCommand(text) || isEndVoiceCommand(raw)) &&
+        /\b(standby|stand\s*by|take\s*(a\s*)?(5|five)|end\s+voice|go\s+to\s+sleep)\b/i.test(
+          text
+        )
+      ) {
         void this.engageStandbyFromLive()
       }
     } catch {
       /* ignore watch errors */
     } finally {
+      // An obsolete transcription must never unlock or drain a newer watchdog.
+      if (this.muteWatchBusyGen !== generation || generation !== this.muteWatchGen) return
       this.muteWatchBusy = false
-      if (this.muteWatchPending && this.muteWatchWanted() && !this.muted) {
+      if (
+        this.muteWatchPending?.generation === generation &&
+        this.muteWatchWanted() &&
+        !this.muted
+      ) {
         const next = this.muteWatchPending
         this.muteWatchPending = null
-        void this.checkMuteWatchChunk(next)
+        void this.checkMuteWatchChunk(next.blob, next.generation)
       }
     }
   }
@@ -382,28 +496,56 @@ export class ClaudeVoiceSession {
     this.speaking = true
     this.onState('speaking')
     this.onStatus('Speaking… (say “mute” / “standby” anytime)')
-    this.startLiveKeywords()
+    // Now that audio is live, standby keywords are safe again
+    this.startLiveKeywords(true)
     this.startMuteWatch()
+  }
+
+  /** Speak a short local command and expose Speaking only when playback really starts. */
+  private async speakDirect(text: string, opts?: { allowMuted?: boolean }): Promise<void> {
+    const generation = this.lifecycleGen
+    this.speaking = false
+    try {
+      const result = await speakText(text, {
+        shouldCancel: () =>
+          generation !== this.lifecycleGen ||
+          !this.running ||
+          this.bargeIn ||
+          (!opts?.allowMuted && this.muted),
+        onStart: () => {
+          if (generation === this.lifecycleGen && this.running) this.markSpeaking()
+        }
+      })
+      if (result.fallbackFrom) {
+        this.voiceTurnNote = `${result.fallbackFrom} recovered through the system voice`
+      }
+    } finally {
+      if (generation === this.lifecycleGen) {
+        this.stopMuteWatch()
+        this.stopLiveKeywords()
+        this.speaking = false
+      }
+    }
   }
 
   /** Live keyword / safety-net path into real standby (stops the session). */
   private async engageStandbyFromLive(): Promise<void> {
-    if (!this.running) return
-    this.onStatus('Standing by…')
-    this.muted = true
-    stopSpeaking()
-    this.ttsQueue.reset({ shouldCancel: () => true })
-    this.speaking = true
-    this.onState('speaking')
+    if (!this.running || this.standbyInFlight) return
+    this.standbyInFlight = true
     try {
-      await speakText('Standing by, sir.', {
-        shouldCancel: () => !this.running
-      })
-    } catch {
-      /* ignore */
+      this.onStatus('Standing by…')
+      this.muted = true
+      stopSpeaking()
+      this.ttsQueue.reset({ shouldCancel: () => true })
+      try {
+        await this.speakDirect('Standing by, sir.', { allowMuted: true })
+      } catch {
+        /* ignore */
+      }
+      await this.stop()
+    } finally {
+      this.standbyInFlight = false
     }
-    this.speaking = false
-    await this.stop()
   }
 
   /** Model sometimes roleplays standby — force a real stop when the user meant it. */
@@ -415,7 +557,8 @@ export class ClaudeVoiceSession {
 
   private userLikelyWantedStandby(userText: string): boolean {
     if (isEndVoiceCommand(userText)) return true
-    return /\b(standby|stand\s*by|take\s*(a\s*)?(5|five)|end\s+voice|go\s+to\s+sleep|\bsleep\b)\b/i.test(
+    // Do NOT treat bare “sleep” in normal chat (“sleep schedule”, etc.) as standby
+    return /\b(standby|stand\s*by|take\s*(a\s*)?(5|five)|end\s+voice|go\s+to\s+sleep)\b/i.test(
       userText
     )
   }
@@ -424,18 +567,31 @@ export class ClaudeVoiceSession {
    * Speak as tokens stream: start on the first full sentence, then schedule each
    * following sentence onto a gapless Web Audio timeline (no HTMLAudio dead air).
    */
-  private async sendChatAndSpeak(userText: string): Promise<void> {
+  private async sendChatAndSpeak(
+    userText: string,
+    lifecycleGeneration = this.lifecycleGen
+  ): Promise<void> {
     let buffer = ''
     let fedAny = false
+    const current = (): boolean =>
+      this.running && lifecycleGeneration === this.lifecycleGen
 
     this.ttsQueue.reset({
-      shouldCancel: () => !this.running || this.bargeIn || this.muted,
-      onFirstStart: () => this.markSpeaking()
+      shouldCancel: () => !current() || this.bargeIn || this.muted,
+      onFirstStart: () => {
+        if (current()) this.markSpeaking()
+      },
+      onFallback: (error) => {
+        const detail = error.message.replace(/\s+/g, ' ').slice(0, 90)
+        this.voiceTurnNote = `Neural voice recovered through macOS · ${detail}`
+        this.onStatus(`System voice fallback active · ${detail}`)
+      }
     })
 
     const feed = (final: boolean): void => {
-      if (this.muted || this.bargeIn || !this.running) return
-      const { units, rest } = drainSpeakableUnits(buffer, final)
+      if (this.muted || this.bargeIn || !current()) return
+      // Eager first cut so sentence 1 synths while tokens (and later sentences) arrive
+      const { units, rest } = drainSpeakableUnits(buffer, final, !fedAny)
       buffer = rest
       for (const unit of units) {
         fedAny = true
@@ -445,7 +601,7 @@ export class ClaudeVoiceSession {
     }
 
     const off = window.albert.onChatEvent((event: AgentStreamEvent) => {
-      if (this.muted || this.bargeIn || !this.running) return
+      if (this.muted || this.bargeIn || !current()) return
       if (event.type !== 'token' || !event.content) return
       buffer += event.content
       feed(false)
@@ -453,11 +609,11 @@ export class ClaudeVoiceSession {
 
     try {
       this.onStatus('Thinking…')
-      this.startLiveKeywords()
-      this.startMuteWatch()
+      // Mute/hide only while waiting on the model — standby waits until audio plays
+      this.startLiveKeywords(false)
 
       const reply = await window.albert.sendChat(userText)
-      if (!this.running) return
+      if (!current()) return
       this.onTranscript('assistant', reply.content)
 
       if (this.muted || this.bargeIn) return
@@ -483,22 +639,35 @@ export class ClaudeVoiceSession {
         feed(true)
       }
 
+      // If tokens never streamed, still speak the final units (sentence-split for overlap)
+      if (!this.ttsQueue.hasStarted && fedAny) {
+        this.onStatus('Synthesizing voice…')
+      }
+
       await this.ttsQueue.flush()
     } finally {
       off()
-      this.stopMuteWatch()
-      this.stopLiveKeywords()
-      this.speaking = false
-      this.bargeHoldMs = 0
+      if (lifecycleGeneration === this.lifecycleGen) {
+        this.stopMuteWatch()
+        this.stopLiveKeywords()
+        this.speaking = false
+        this.bargeHoldMs = 0
+      }
     }
   }
 
   private beginUtteranceCapture(): void {
     if (!this.running || !this.stream || this.busy) return
+    const recordingGeneration = this.lifecycleGen
+
+    // One level-monitor loop only — overlapping timers never hit a clean 3s silence
+    if (this.timerId) window.clearTimeout(this.timerId)
+    this.timerId = 0
 
     this.chunks = []
     this.silenceMs = 0
     this.spokeMs = 0
+    this.lastSpeechAt = 0
     this.recording = true
     this.bargeIn = false
     this.muted = false
@@ -521,7 +690,9 @@ export class ClaudeVoiceSession {
     }
 
     this.mediaRecorder.onstop = () => {
-      void this.processRecording()
+      if (recordingGeneration === this.lifecycleGen) {
+        void this.processRecording(recordingGeneration)
+      }
     }
 
     if (!this.audioContext) {
@@ -529,7 +700,15 @@ export class ClaudeVoiceSession {
       const source = this.audioContext.createMediaStreamSource(this.stream)
       this.analyser = this.audioContext.createAnalyser()
       this.analyser.fftSize = 2048
+      // Keep the graph alive so Analyser levels update in Electron
+      const silent = this.audioContext.createGain()
+      silent.gain.value = 0
       source.connect(this.analyser)
+      this.analyser.connect(silent)
+      silent.connect(this.audioContext.destination)
+    }
+    if (this.audioContext.state === 'suspended') {
+      void this.audioContext.resume().catch(() => undefined)
     }
 
     this.mediaRecorder.start(100)
@@ -539,6 +718,10 @@ export class ClaudeVoiceSession {
 
   private monitorLevels(): void {
     if (!this.running || !this.analyser) return
+
+    if (this.audioContext?.state === 'suspended') {
+      void this.audioContext.resume().catch(() => undefined)
+    }
 
     if (!this.levelBuffer || this.levelBuffer.length !== this.analyser.fftSize) {
       this.levelBuffer = new Uint8Array(this.analyser.fftSize) as Uint8Array<ArrayBuffer>
@@ -551,12 +734,14 @@ export class ClaudeVoiceSession {
     }
     const rms = Math.sqrt(sum / this.levelBuffer.length)
     const speakingNow = rms > this.speechRms
+    const silentNow = rms < this.silenceRms
     const bargeNow = rms > this.bargeRms
     const tickMs =
       speakingNow || this.speaking ? this.pollActiveMs : this.pollQuietMs
 
     const allowBargeIn = useAlbertStore.getState().settings.allowBargeIn !== false
-    if ((this.speaking || this.busy) && allowBargeIn && !this.muted) {
+    // Barge-in only while Albert is actually playing audio — NOT during Thinking.
+    if (this.speaking && allowBargeIn && !this.muted) {
       if (bargeNow) {
         this.bargeHoldMs += tickMs
         if (this.bargeHoldMs >= this.bargeHoldNeedMs) {
@@ -575,11 +760,16 @@ export class ClaudeVoiceSession {
       if (speakingNow) {
         this.spokeMs += tickMs
         this.silenceMs = 0
-      } else if (this.spokeMs > this.minSpeechMs * 0.55) {
+        this.lastSpeechAt = Date.now()
+      } else if (silentNow && this.spokeMs > this.minSpeechMs * 0.55) {
         this.silenceMs += tickMs
       }
+      // Mid-band noise (between silenceRms and speechRms): don't reset the 3s clock
 
-      if (this.spokeMs > this.minSpeechMs && this.silenceMs >= this.silenceToEndMs) {
+      const quietLongEnough =
+        this.lastSpeechAt > 0 && Date.now() - this.lastSpeechAt >= this.silenceToEndMs
+
+      if (this.spokeMs > this.minSpeechMs && quietLongEnough) {
         this.finishUtterance()
         return
       }
@@ -596,11 +786,23 @@ export class ClaudeVoiceSession {
   private finishUtterance(): void {
     if (!this.mediaRecorder || this.mediaRecorder.state !== 'recording') return
     this.recording = false
-    this.mediaRecorder.stop()
+    if (this.timerId) window.clearTimeout(this.timerId)
+    this.timerId = 0
+    try {
+      this.mediaRecorder.stop()
+    } catch {
+      /* ignore */
+    }
   }
 
-  private async processRecording(): Promise<void> {
-    if (!this.running || this.busy) return
+  private async processRecording(lifecycleGeneration = this.lifecycleGen): Promise<void> {
+    if (
+      !this.running ||
+      this.busy ||
+      lifecycleGeneration !== this.lifecycleGen
+    ) return
+    const current = (): boolean =>
+      this.running && lifecycleGeneration === this.lifecycleGen
     const blob = new Blob(this.chunks, {
       type: this.mediaRecorder?.mimeType || 'audio/webm'
     })
@@ -612,12 +814,15 @@ export class ClaudeVoiceSession {
     }
 
     this.busy = true
+    this.voiceTurnNote = null
     this.onState('thinking')
     this.onStatus('Transcribing…')
 
     try {
-      const audio = await decodeBlobToMono16k(blob)
+      const audio = trimSilence(await decodeBlobToMono16k(blob))
+      if (!current()) return
       const raw = (await window.albert.transcribeAudio(audio)).trim()
+      if (!current()) return
       const text = correctTranscript(raw)
 
       if (!text || isLikelyHallucination(text)) {
@@ -634,85 +839,69 @@ export class ClaudeVoiceSession {
 
       if (isHideCommand(text) || isHideCommand(raw)) {
         await window.albert.hideWindow()
+        if (!current()) return
         this.onStatus('Window minimized')
-        this.speaking = true
-        await speakText('Hiding, sir.', {
-          shouldCancel: () => !this.running || this.bargeIn || this.muted
-        })
-        this.speaking = false
+        await this.speakDirect('Hiding, sir.')
         return
       }
 
       if (isShowCommand(text) || isShowCommand(raw)) {
         await window.albert.showWindow()
+        if (!current()) return
         this.onStatus('Window shown')
         return
       }
 
       if (isEndVoiceCommand(text) || isEndVoiceCommand(raw)) {
-        this.onStatus('Standing by…')
-        this.speaking = true
-        this.onState('speaking')
-        this.startLiveKeywords()
-        this.startMuteWatch()
-        await speakText('Standing by, sir.', {
-          shouldCancel: () => !this.running || this.bargeIn || this.muted
-        })
-        this.stopMuteWatch()
-        this.stopLiveKeywords()
-        this.speaking = false
-        await this.stop()
+        await this.engageStandbyFromLive()
         return
       }
 
       const personalityAdj = parsePersonalityVoiceCommand(text)
       if (personalityAdj) {
-        const current = normalizePersonality(useAlbertStore.getState().settings.personality)
-        const next = applyPersonalityAdjust(current, personalityAdj)
+        const currentPersonality = normalizePersonality(
+          useAlbertStore.getState().settings.personality
+        )
+        const next = applyPersonalityAdjust(currentPersonality, personalityAdj)
         const updated = await window.albert.setSettings({ personality: next })
+        if (!current()) return
         useAlbertStore.getState().setSettings(updated)
         const label = PERSONALITY_META[personalityAdj.key].label
         const value = next[personalityAdj.key]
         const reply = `${label} set to ${value}%, sir.`
         this.onTranscript('assistant', reply)
-        this.speaking = true
-        this.onState('speaking')
-        this.startLiveKeywords()
-        this.startMuteWatch()
-        await speakText(reply, {
-          shouldCancel: () => !this.running || this.bargeIn || this.muted
-        })
-        this.stopMuteWatch()
-        this.stopLiveKeywords()
-        this.speaking = false
+        await this.speakDirect(reply)
         return
       }
 
       this.onStatus(`Heard: “${text}”`)
       this.bargeIn = false
-      await this.sendChatAndSpeak(text)
+      await this.sendChatAndSpeak(text, lifecycleGeneration)
     } catch (err) {
+      if (!current()) return
       const message = err instanceof Error ? err.message : String(err)
+      this.voiceTurnNote = `Last turn fault · ${message.replace(/\s+/g, ' ').slice(0, 110)}`
       this.onStatus(message)
       if (this.running && !this.muted) {
-        this.speaking = true
-        this.startLiveKeywords()
-        this.startMuteWatch()
-        await speakText(`I hit an error, sir. ${message}`, {
-          shouldCancel: () => !this.running || this.bargeIn || this.muted
-        })
-        this.stopMuteWatch()
-        this.stopLiveKeywords()
-        this.speaking = false
+        try {
+          await this.speakDirect(`I hit an error, sir. ${message}`)
+        } catch (voiceError) {
+          const detail = voiceError instanceof Error ? voiceError.message : String(voiceError)
+          this.voiceTurnNote = `Voice output unavailable · ${detail.replace(/\s+/g, ' ').slice(0, 100)}`
+          this.onStatus(`${message} · Voice output unavailable: ${detail}`)
+        }
       }
     } finally {
+      if (lifecycleGeneration !== this.lifecycleGen) return
       this.busy = false
       this.stopMuteWatch()
-      if (this.running) {
+      if (current()) {
         this.onStatus(
           this.muted
             ? 'Muted — listening again'
-            : 'Listening — mute / hide / show / standby work anytime'
+            : this.voiceTurnNote
+              ? `Listening · ${this.voiceTurnNote}`
+              : 'Listening — mute / hide / show / standby work anytime'
         )
         this.beginUtteranceCapture()
       } else {

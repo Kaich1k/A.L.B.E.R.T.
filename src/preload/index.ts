@@ -25,6 +25,11 @@ const api: AlbertApi = {
   deleteMemory: (id) => ipcRenderer.invoke(IpcChannels.memoryDelete, id),
   updateMemory: (id, content, category) =>
     ipcRenderer.invoke(IpcChannels.memoryUpdate, { id, content, category }),
+  onMemoryChanged: (handler) => {
+    const listener = (): void => handler()
+    ipcRenderer.on('albert:memory:changed', listener)
+    return () => ipcRenderer.removeListener('albert:memory:changed', listener)
+  },
 
   listActivity: () => ipcRenderer.invoke(IpcChannels.activityList),
   clearActivity: () => ipcRenderer.invoke(IpcChannels.activityClear),
@@ -44,6 +49,7 @@ const api: AlbertApi = {
   getCompanionStatus: () => ipcRenderer.invoke(IpcChannels.companionStatus),
   applyCompanion: () => ipcRenderer.invoke(IpcChannels.companionApply),
   rotateCompanionToken: () => ipcRenderer.invoke(IpcChannels.companionRotateToken),
+  revokeCompanionDevice: (deviceId: string) => ipcRenderer.invoke(IpcChannels.companionRevokeDevice, deviceId),
 
   speakElevenLabs: (text, overrides) =>
     ipcRenderer.invoke(IpcChannels.ttsSpeak, { text, ...overrides }),
@@ -92,7 +98,25 @@ const api: AlbertApi = {
   toggleWindow: () => ipcRenderer.invoke(IpcChannels.windowToggle),
   openPrivacyPane: (pane) => ipcRenderer.invoke(IpcChannels.openPrivacyPane, pane),
   probeOllama: () => ipcRenderer.invoke(IpcChannels.ollamaProbe),
-  probeGroq: () => ipcRenderer.invoke(IpcChannels.groqProbe)
+  pullOllamaModel: (model) => ipcRenderer.invoke(IpcChannels.ollamaPull, model),
+  probeGroq: () => ipcRenderer.invoke(IpcChannels.groqProbe),
+  getOperations: () => ipcRenderer.invoke(IpcChannels.operationsGet),
+  createMission: (input) => ipcRenderer.invoke(IpcChannels.missionCreate, input),
+  updateMission: (id, patch) => ipcRenderer.invoke(IpcChannels.missionUpdate, { id, patch }),
+  deleteMission: (id) => ipcRenderer.invoke(IpcChannels.missionDelete, id),
+  addMissionStep: (missionId, title) => ipcRenderer.invoke(IpcChannels.missionStepAdd, { missionId, title }),
+  updateMissionStep: (id, patch) => ipcRenderer.invoke(IpcChannels.missionStepUpdate, { id, patch }),
+  createRoutine: (input) => ipcRenderer.invoke(IpcChannels.routineCreate, input),
+  updateRoutine: (id, patch) => ipcRenderer.invoke(IpcChannels.routineUpdate, { id, patch }),
+  deleteRoutine: (id) => ipcRenderer.invoke(IpcChannels.routineDelete, id),
+  resolveApproval: (id, resolution) => ipcRenderer.invoke(IpcChannels.approvalResolve, { id, resolution }),
+  createCapture: (content, kind) => ipcRenderer.invoke(IpcChannels.captureCreate, { content, kind }),
+  updateCapture: (id, state) => ipcRenderer.invoke(IpcChannels.captureUpdate, { id, state }),
+  onOperationsChanged: (handler) => {
+    const listener = (): void => handler()
+    ipcRenderer.on('albert:operations:changed', listener)
+    return () => ipcRenderer.removeListener('albert:operations:changed', listener)
+  }
 }
 
 contextBridge.exposeInMainWorld('albert', api)

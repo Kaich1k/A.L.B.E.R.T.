@@ -20,18 +20,47 @@ import { transcribeFloat32, warmWhisper } from '../voice/whisper'
 import {
   applyCompanionSettings,
   getCompanionStatus,
+  revokeCompanionAccess,
   startCompanionServer
 } from '../companion/server'
 import { registerComputerIpc } from '../computer/tabs'
 import { synthesizeElevenLabs } from '../voice/elevenlabs'
 import { synthesizeKokoro, warmKokoro } from '../voice/kokoro'
-import { probeOllama } from '../ollama/client'
+import { probeOllama, pullOllamaModel } from '../ollama/client'
 import { probeGroq } from '../groq/client'
 import { randomBytes } from 'crypto'
 import type { AlbertSettings } from '../../shared/types'
+import {
+  addMissionStep,
+  createCapture,
+  createMission,
+  createRoutine,
+  deleteMission,
+  deleteRoutine,
+  getOperationsSnapshot,
+  resolveApproval,
+  updateCapture,
+  updateMission,
+  updateMissionStep,
+  updateRoutine
+} from '../operations/service'
 
 export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void {
   registerComputerIpc()
+  const changed = (): void => getWindow()?.webContents.send('albert:operations:changed')
+
+  ipcMain.handle(IpcChannels.operationsGet, () => getOperationsSnapshot())
+  ipcMain.handle(IpcChannels.missionCreate, (_e, input) => { const value = createMission(input); changed(); return value })
+  ipcMain.handle(IpcChannels.missionUpdate, (_e, { id, patch }) => { const value = updateMission(id, patch); changed(); return value })
+  ipcMain.handle(IpcChannels.missionDelete, (_e, id: string) => { const value = deleteMission(id); changed(); return value })
+  ipcMain.handle(IpcChannels.missionStepAdd, (_e, { missionId, title }) => { const value = addMissionStep(missionId, title); changed(); return value })
+  ipcMain.handle(IpcChannels.missionStepUpdate, (_e, { id, patch }) => { const value = updateMissionStep(id, patch); changed(); return value })
+  ipcMain.handle(IpcChannels.routineCreate, (_e, input) => { const value = createRoutine(input); changed(); return value })
+  ipcMain.handle(IpcChannels.routineUpdate, (_e, { id, patch }) => { const value = updateRoutine(id, patch); changed(); return value })
+  ipcMain.handle(IpcChannels.routineDelete, (_e, id: string) => { const value = deleteRoutine(id); changed(); return value })
+  ipcMain.handle(IpcChannels.approvalResolve, (_e, { id, resolution }) => { const value = resolveApproval(id, resolution); changed(); return value })
+  ipcMain.handle(IpcChannels.captureCreate, (_e, { content, kind }) => { const value = createCapture(content, kind); changed(); return value })
+  ipcMain.handle(IpcChannels.captureUpdate, (_e, { id, state }) => { const value = updateCapture(id, state); changed(); return value })
 
   ipcMain.handle(IpcChannels.windowHide, () => {
     const win = getWindow()
@@ -68,6 +97,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   })
 
   ipcMain.handle(IpcChannels.ollamaProbe, () => probeOllama())
+  ipcMain.handle(IpcChannels.ollamaPull, (_e, model?: string) => pullOllamaModel(model))
   ipcMain.handle(IpcChannels.groqProbe, () => probeGroq())
 
   /** Open the relevant macOS Privacy & Security pane for desktop automation. */
@@ -219,6 +249,9 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     if (getSettings().companionEnabled) await startCompanionServer()
     return getCompanionStatus()
   })
+  ipcMain.handle(IpcChannels.companionRevokeDevice, (_event, deviceId: string) =>
+    revokeCompanionAccess(deviceId)
+  )
 
   ipcMain.handle(
     IpcChannels.ttsSpeak,

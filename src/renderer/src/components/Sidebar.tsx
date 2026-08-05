@@ -1,11 +1,11 @@
 import { APP_NAME } from '../../../shared/brand'
 import type { PanelId, RoutingMode } from '../../../shared/types'
-import { CLAUDE_DASHBOARD_URL } from '../../../shared/types'
 import { useAlbertStore } from '../store'
 
 const items: { id: PanelId; label: string }[] = [
   { id: 'home', label: 'Home' },
   { id: 'conversation', label: 'Comm' },
+  { id: 'missions', label: 'Operations' },
   { id: 'memory', label: 'Memory' },
   { id: 'activity', label: 'Activity' },
   { id: 'settings', label: 'Systems' }
@@ -22,7 +22,8 @@ export function Sidebar(): React.JSX.Element {
   const hasBrain = Boolean(
     settings.anthropicApiKey?.trim() ||
       settings.ollamaApiKey?.trim() ||
-      settings.groqApiKey?.trim()
+      settings.groqApiKey?.trim() ||
+      settings.localProvider === 'ollama'
   )
 
   const mode = settings.routingMode || 'auto'
@@ -48,10 +49,12 @@ export function Sidebar(): React.JSX.Element {
           <button
             key={item.id}
             className={panel === item.id ? 'active' : ''}
+            aria-current={panel === item.id ? 'page' : undefined}
             onClick={() => setPanel(item.id)}
           >
             <span className="nav-index">0{index + 1}</span>
             {item.label}
+            <kbd className="nav-shortcut">⌘{index + 1}</kbd>
           </button>
         ))}
         <button type="button" onClick={() => void window.albert.showComputer()}>
@@ -59,22 +62,20 @@ export function Sidebar(): React.JSX.Element {
           Computer
         </button>
       </nav>
-      <a className="sidebar-dash-link" href={CLAUDE_DASHBOARD_URL} target="_blank" rel="noreferrer">
-        Claude Dashboard
-      </a>
+      <div className="sidebar-command-hint"><span>Command deck</span><kbd>⌘ K</kbd></div>
 
       <div
         className="mode-toggle"
-        title={isAuto ? 'Auto: LOCAL (Ollama/Groq) → Haiku → Opus' : routeInfo || undefined}
+        title={isAuto ? 'Auto: QUICK (Ollama/Groq Cloud) → Haiku → Opus' : routeInfo || undefined}
       >
-        <span className="hud-label">Brain</span>
+        <span className="hud-label">Routing mode</span>
         <div className="mode-toggle-row triple">
           <button
             type="button"
             className={mode === 'local' ? 'active' : ''}
             onClick={() => void setMode(mode === 'local' ? 'auto' : 'local')}
           >
-            LOCAL
+            QUICK
           </button>
           <button
             type="button"

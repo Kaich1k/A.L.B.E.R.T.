@@ -3,6 +3,10 @@
  * Shared by renderer (voice session) and main (chat safety net).
  */
 
+import { repairAlbertMentions } from './albertName'
+import { collapseRepeatedTranscript } from './voiceReliability'
+export { collapseRepeatedTranscript } from './voiceReliability'
+
 /** Leading fluff we ignore when judging “is this the whole command?” */
 const FILLER =
   /^(hey\s+)?(a\.?l\.?b\.?e\.?r\.?t\.?|albert)\s*[,.]?\s*|^ok(ay)?\s*[,.…\-–—]?\s*|^gotcha\s*[,.]?\s*|^yeah\s*[,.]?\s*|^yep\s*[,.]?\s*|^yup\s*[,.]?\s*|^alright\s*[,.]?\s*|^well\s*[,.]?\s*|^however\s*[,.]?\s*|^anyway\s*[,.]?\s*|^with\s+that\s+said\s*[,.]?\s*|^that\s+said\s*[,.]?\s*|^so\s*[,.]?\s*|^u[mh]+\s*[,.…\-–—]?\s*|^please\s*|^now\s*|^just\s*|^no\s*[,.]?\s*/i
@@ -37,6 +41,8 @@ const END_VOICE_WHOLE: RegExp[] = [
   /^(you\s+can\s+)?(be\s+)?on\s+standby\.?$/i,
   /^you\s+can\s+(turn\s+off|stand\s*-?\s*by|standby|go\s+to\s+sleep|stop\s+listening|be\s+on\s+stand\s*-?\s*by|be\s+on\s+standby)\.?$/i,
   /^go\s+to\s+sleep\.?$/i,
+  /^(you\s+should\s+|you\s+need\s+to\s+|i\s+want\s+you\s+to\s+|i\s+said\s+(you\s+should\s+)?)go\s+to\s+sleep\.?$/i,
+  /^(you\s+should\s+|you\s+need\s+to\s+)(go\s+to\s+)?sleep\.?$/i,
   /^sleep\.?$/i,
   /^(deactivate|disconnect|disengage)(\s+(voice|listening))?\.?$/i,
   /^(that'?s\s+all|that\s+is\s+all)\.?$/i,
@@ -79,7 +85,10 @@ const STANDBY_INTENT: RegExp[] = [
   /\btake\s+(a\s+)?(5|five|break)\b/i,
   /\b(end|stop)\s+(the\s+)?(voice|listening)(\s+(mode|session|for\s+now))?\b/i,
   /\byou\s+can\s+turn\s+(yourself\s+)?off\b/i,
-  /\bturn\s+(yourself\s+)?off\b/i
+  /\bturn\s+(yourself\s+)?off\b/i,
+  // “No Albert, I said you should go to sleep for now.”
+  /\b(you\s+should\s+|you\s+need\s+to\s+|i\s+(want|need)\s+you\s+to\s+|i\s+said\s+(you\s+should\s+)?)go\s+to\s+sleep\b/i,
+  /\b(you\s+should\s+|you\s+need\s+to\s+)(go\s+to\s+)?sleep\b/i
 ]
 
 /** Talking about standby / teaching the matcher — not a command to enter it. */
@@ -125,14 +134,18 @@ const HALLUCINATION_PATTERNS: RegExp[] = [
   /^(please subscribe.*)$/i,
   /^(music|applause|laughter)$/i,
   /^\[.*\]$/,
-  /^\(.*\)$/
+  /^\(.*\)$/,
+  // Whisper silence / noise crumbs that used to fake end-voice (“Bye.” → standby)
+  /^(bye|goodbye|good\s*bye|hello|hi|hey|yes|no|okay|ok|so|the|a|to|and)\.?$/i,
+  /^(thanks?|thank\s+you)(\s+for\s+watching)?\.?$/i
 ]
 
 /** Soft phonetic / Whisper repairs before command matching + chat. */
 export function correctTranscript(text: string): string {
   let t = text.trim()
 
-  t = t.replace(/\ba\.?\s*l\.?\s*b\.?\s*e\.?\s*r\.?\s*t\.?\b/gi, 'albert')
+  // Name first — wake + “hey Albert …” depend on this
+  t = repairAlbertMentions(t, { aggressive: true })
   t = t.replace(/\bin\s+voice\b/gi, 'end voice')
   t = t.replace(/\band\s+voice\b/gi, 'end voice')
   t = t.replace(/\bend\s+boys\b/gi, 'end voice')
@@ -165,7 +178,7 @@ export function correctTranscript(text: string): string {
   t = t.replace(/\bhey albert\b/gi, 'hey A.L.B.E.R.T.')
   t = t.replace(/\bokay albert\b/gi, 'okay A.L.B.E.R.T.')
 
-  return t.replace(/\s+/g, ' ').trim()
+  return collapseRepeatedTranscript(t)
 }
 
 /** Strip fillers so “okay, standby please” → “standby”. */

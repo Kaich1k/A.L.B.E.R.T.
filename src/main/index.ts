@@ -9,6 +9,7 @@ import { registerIpcHandlers } from './ipc/handlers'
 import { closeDb, getDb } from './memory/db'
 import { getSettings } from './config'
 import { applyCompanionSettings, stopCompanionServer } from './companion/server'
+import { startOperationsScheduler, stopOperationsScheduler } from './operations/scheduler'
 
 // Load OPENAI_API_KEY from env if present
 if (process.env.OPENAI_API_KEY) {
@@ -44,7 +45,10 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      webviewTag: true
+      webviewTag: true,
+      // Voice can be entered by the wake phrase without a click. Explicitly
+      // permit that trusted app flow to resume Web Audio and play the reply.
+      autoplayPolicy: 'no-user-gesture-required'
     }
   })
 
@@ -93,6 +97,7 @@ app.whenReady().then(() => {
   }
 
   createWindow()
+  startOperationsScheduler(() => mainWindow)
 
   globalShortcut.register('CommandOrControl+Shift+A', () => {
     toggleWindow()
@@ -113,6 +118,7 @@ app.whenReady().then(() => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
   void stopCompanionServer()
+  stopOperationsScheduler()
   closeDb()
 })
 

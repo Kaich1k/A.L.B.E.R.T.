@@ -9,8 +9,9 @@ cd "$ROOT"
 DEST_DIR="${HOME}/Applications"
 APP_NAME="ALBERT.app"
 DEST="${DEST_DIR}/${APP_NAME}"
-# Older builds used a dotted bundle name that crashes on launch
+# Older Electron builds used a dotted bundle name under ~/Applications
 DOTTED_DEST="${DEST_DIR}/A.L.B.E.R.T.app"
+# Do NOT touch /Applications/A.L.B.E.R.T..app — that can be the iOS companion on Mac.
 
 echo "==> Building A.L.B.E.R.T.…"
 ELECTRON_RUN_AS_NODE= npm run build
@@ -30,10 +31,13 @@ mkdir -p "${DEST_DIR}"
 
 # Quit running instance if present
 if pgrep -f "ALBERT.app/Contents/MacOS" >/dev/null 2>&1 || \
-   pgrep -f "A.L.B.E.R.T.app/Contents/MacOS" >/dev/null 2>&1; then
+   pgrep -f "A.L.B.E.R.T" >/dev/null 2>&1; then
   echo "==> Quitting running A.L.B.E.R.T.…"
   osascript -e 'tell application "ALBERT" to quit' >/dev/null 2>&1 || true
   osascript -e 'tell application "A.L.B.E.R.T" to quit' >/dev/null 2>&1 || true
+  sleep 1
+  pkill -f "A.L.B.E.R.T" >/dev/null 2>&1 || true
+  pkill -f "ALBERT.app/Contents/MacOS" >/dev/null 2>&1 || true
   sleep 1
 fi
 

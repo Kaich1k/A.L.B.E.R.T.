@@ -8,8 +8,9 @@ const { createRequire } = require('module')
 const { join } = require('path')
 const { mkdirSync, existsSync } = require('fs')
 
+// Bias the decoder hard toward the assistant’s name (Whisper loves “Alfred” / “all bird”).
 const WHISPER_PROMPT =
-  'A.L.B.E.R.T. Albert. Standby. Take 5. End voice. Haiku. Opus. Groq. Ollama. Spotify. YouTube. Arduino. Computer.'
+  'Albert. Hey Albert. Okay Albert. A.L.B.E.R.T. Albert. Albert wake up. Wake up Albert. Yo Albert. Albert standby. Albert take 5. Albert end voice. Albert Haiku. Albert Opus. Albert Groq. Albert Ollama. Albert Spotify. Albert YouTube. Albert Arduino. Albert Computer.'
 
 function resolvePackageJson() {
   const candidates = [

@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { APP_NAME } from '../../../shared/brand'
 import { useAlbertStore } from '../store'
+import { JarvisTelemetry } from './JarvisTelemetry'
 
 export function ActivityPanel(): React.JSX.Element {
   const activity = useAlbertStore((s) => s.activity)
@@ -20,6 +21,7 @@ export function ActivityPanel(): React.JSX.Element {
     <section className="panel">
       <h2 className="section-title">Activity</h2>
       <p className="section-sub">Tool calls {APP_NAME} made on your behalf.</p>
+      <JarvisTelemetry compact refreshIntervalMs={0} className="activity-telemetry" />
       <div className="toolbar">
         <button className="btn ghost" onClick={() => void refresh()}>
           Refresh

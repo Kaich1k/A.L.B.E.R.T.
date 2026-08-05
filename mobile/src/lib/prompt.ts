@@ -1,5 +1,270 @@
 import type { ChatMessage, MemoryFact } from '../types'
 
+export type StandaloneProvider = 'anthropic' | 'groq'
+
+export type ProviderErrorCode =
+  | 'missing_key'
+  | 'cancelled'
+  | 'timeout'
+  | 'network'
+  | 'authentication'
+  | 'rate_limit'
+  | 'model_unavailable'
+  | 'invalid_request'
+  | 'invalid_response'
+  | 'provider_unavailable'
+
+export interface ProviderReply {
+  reply: string
+  newMemories: { category: string; content: string }[]
+  /** The provider that actually answered, including after auto fallback. */
+  provider: StandaloneProvider
+  /** The model reported by the provider, falling back to the requested model. */
+  model: string
+  /** End-to-end route latency, including retries and fallback. */
+  latencyMs: number
+  /** Present only when Auto deliberately crossed providers. */
+  fallbackFrom?: StandaloneProvider
+}
+
+export type FetchLike = typeof fetch
+
+export class ProviderRequestError extends Error {
+  readonly code: ProviderErrorCode
+  readonly provider: StandaloneProvider | 'auto'
+  readonly status?: number
+  readonly retryAfterMs?: number
+  readonly model?: string
+  readonly retryable: boolean
+
+  constructor(opts: {
+    message: string
+    code: ProviderErrorCode
+    provider: StandaloneProvider | 'auto'
+    status?: number
+    retryAfterMs?: number
+    model?: string
+    retryable?: boolean
+  }) {
+    super(opts.message)
+    this.name = 'ProviderRequestError'
+    this.code = opts.code
+    this.provider = opts.provider
+    this.status = opts.status
+    this.retryAfterMs = opts.retryAfterMs
+    this.model = opts.model
+    this.retryable = opts.retryable ?? false
+  }
+}
+
+export class RequestBoundaryError extends Error {
+  readonly kind: 'cancelled' | 'timeout'
+
+  constructor(kind: 'cancelled' | 'timeout') {
+    super(kind === 'cancelled' ? 'Request cancelled' : 'Request timed out')
+    this.name = 'RequestBoundaryError'
+    this.kind = kind
+  }
+}
+
+/**
+ * Bounds both the fetch and response-body phases. The explicit rejection keeps
+ * the caller bounded even if a non-standard fetch implementation ignores abort.
+ */
+export async function withinRequestBoundary<T>(opts: {
+  timeoutMs: number
+  signal?: AbortSignal
+  run: (signal: AbortSignal) => Promise<T>
+}): Promise<T> {
+  if (opts.signal?.aborted) throw new RequestBoundaryError('cancelled')
+
+  const controller = new AbortController()
+  let boundary: 'cancelled' | 'timeout' | null = null
+  let rejectBoundary: ((error: RequestBoundaryError) => void) | null = null
+  const boundaryPromise = new Promise<never>((_resolve, reject) => {
+    rejectBoundary = reject
+  })
+
+  const cancel = (): void => {
+    if (boundary) return
+    boundary = 'cancelled'
+    controller.abort()
+    rejectBoundary?.(new RequestBoundaryError('cancelled'))
+  }
+  opts.signal?.addEventListener('abort', cancel, { once: true })
+
+  const timeoutMs = Math.max(1, Math.floor(opts.timeoutMs))
+  const timer = setTimeout(() => {
+    if (boundary) return
+    boundary = 'timeout'
+    controller.abort()
+    rejectBoundary?.(new RequestBoundaryError('timeout'))
+  }, timeoutMs)
+
+  try {
+    return await Promise.race([opts.run(controller.signal), boundaryPromise])
+  } catch (error) {
+    if (boundary) throw new RequestBoundaryError(boundary)
+    throw error
+  } finally {
+    clearTimeout(timer)
+    opts.signal?.removeEventListener('abort', cancel)
+  }
+}
+
+export function parseRetryAfterMs(value: string | null, nowMs = Date.now()): number | undefined {
+  if (!value?.trim()) return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds)) return seconds >= 0 ? Math.round(seconds * 1_000) : undefined
+  const dateMs = Date.parse(value)
+  if (!Number.isFinite(dateMs)) return undefined
+  return Math.max(0, dateMs - nowMs)
+}
+
+export function safeJsonObject(raw: string): Record<string, unknown> | null {
+  if (!raw.trim()) return null
+  try {
+    const value = JSON.parse(raw) as unknown
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null
+  } catch {
+    return null
+  }
+}
+
+export function safeRemoteMessage(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const clean = value.replace(/\s+/g, ' ').trim()
+  if (!clean) return undefined
+  return clean.slice(0, 240)
+}
+
+export function displayRetryDelay(retryAfterMs?: number): string {
+  if (retryAfterMs === undefined) return ''
+  const seconds = Math.max(1, Math.ceil(retryAfterMs / 1_000))
+  return ` Retry in about ${seconds}s.`
+}
+
+export function transportProviderError(opts: {
+  error: unknown
+  provider: StandaloneProvider
+  model: string
+}): ProviderRequestError {
+  if (opts.error instanceof ProviderRequestError) return opts.error
+  if (opts.error instanceof RequestBoundaryError) {
+    return new ProviderRequestError({
+      message:
+        opts.error.kind === 'cancelled'
+          ? `${providerLabel(opts.provider)} request cancelled.`
+          : `${providerLabel(opts.provider)} did not respond in time.`,
+      code: opts.error.kind,
+      provider: opts.provider,
+      model: opts.model,
+      retryable: opts.error.kind === 'timeout'
+    })
+  }
+  const name = opts.error instanceof Error ? opts.error.name : ''
+  if (name === 'AbortError') {
+    return new ProviderRequestError({
+      message: `${providerLabel(opts.provider)} request cancelled.`,
+      code: 'cancelled',
+      provider: opts.provider,
+      model: opts.model
+    })
+  }
+  return new ProviderRequestError({
+    message: `${providerLabel(opts.provider)} could not be reached. Check your connection and try again.`,
+    code: 'network',
+    provider: opts.provider,
+    model: opts.model,
+    retryable: true
+  })
+}
+
+export function providerLabel(provider: StandaloneProvider): string {
+  return provider === 'anthropic' ? 'Anthropic' : 'Groq'
+}
+
+export function providerHttpError(opts: {
+  provider: StandaloneProvider
+  model: string
+  status: number
+  remoteMessage?: string
+  retryAfterMs?: number
+}): ProviderRequestError {
+  const { provider, model, status } = opts
+  const label = providerLabel(provider)
+  if (status === 401) {
+    return new ProviderRequestError({
+      message: `${label} rejected the API key. Check the key in Systems.`,
+      code: 'authentication',
+      provider,
+      model,
+      status
+    })
+  }
+  if (
+    status === 403 &&
+    /api.?key|authenticat|credential|invalid token/i.test(opts.remoteMessage || '')
+  ) {
+    return new ProviderRequestError({
+      message: `${label} rejected the API key. Check the key in Systems.`,
+      code: 'authentication',
+      provider,
+      model,
+      status
+    })
+  }
+  if (status === 429) {
+    return new ProviderRequestError({
+      message: `${label} is rate-limited.${displayRetryDelay(opts.retryAfterMs)}`,
+      code: 'rate_limit',
+      provider,
+      model,
+      status,
+      retryAfterMs: opts.retryAfterMs,
+      retryable: true
+    })
+  }
+  if (status === 403 || status === 404) {
+    return new ProviderRequestError({
+      message: opts.remoteMessage || `${model} is not available for this ${label} account.`,
+      code: 'model_unavailable',
+      provider,
+      model,
+      status,
+      retryable: true
+    })
+  }
+  if (status === 400 || status === 422) {
+    return new ProviderRequestError({
+      message: opts.remoteMessage || `${label} rejected the request.`,
+      code: 'invalid_request',
+      provider,
+      model,
+      status
+    })
+  }
+  if (status === 408 || status >= 500) {
+    return new ProviderRequestError({
+      message: opts.remoteMessage || `${label} is temporarily unavailable (${status}).`,
+      code: 'provider_unavailable',
+      provider,
+      model,
+      status,
+      retryable: true
+    })
+  }
+  return new ProviderRequestError({
+    message: opts.remoteMessage || `${label} request failed (${status}).`,
+    code: 'provider_unavailable',
+    provider,
+    model,
+    status
+  })
+}
+
 export const PHONE_SYSTEM = `You are A.L.B.E.R.T. (Artificial Logical Brain and Expressive Remote Terminal) — Kai's phone companion of the same Albert that runs on his Mac.
 Channel JARVIS: loyal, dry, address Kai as “sir” often (Yes sir / Done, sir / Standing by, sir.).
 You share Comm history and memories with the Mac when paired. You do NOT have Mac tools (Spotify, Computer, desktop) on this phone — say so briefly if asked, and suggest the Mac app.
@@ -13,21 +278,38 @@ export function parseMemoryLines(text: string): {
   clean: string
   memories: { category: string; content: string }[]
 } {
+  const categories = new Set(['preference', 'project', 'person', 'reminder', 'general'])
   const memories: { category: string; content: string }[] = []
+  const seen = new Set<string>()
   const lines = text.split('\n')
   const kept: string[] = []
   for (const line of lines) {
     const m = line.match(/^\s*\[MEMORY\]\s*([^|]+)\|\s*(.+)\s*$/i)
     if (m) {
-      memories.push({
-        category: m[1].trim().toLowerCase() || 'general',
-        content: m[2].trim()
-      })
+      const requestedCategory = m[1].trim().toLowerCase()
+      const category = categories.has(requestedCategory) ? requestedCategory : 'general'
+      const content = m[2].replace(/\s+/g, ' ').trim().slice(0, 800)
+      const key = `${category}\u0000${content.toLowerCase()}`
+      if (content && !seen.has(key) && memories.length < 8) {
+        seen.add(key)
+        memories.push({ category, content })
+      }
       continue
     }
     kept.push(line)
   }
   return { clean: kept.join('\n').trim(), memories }
+}
+
+export function providerTextResult(text: string): {
+  reply: string
+  memories: { category: string; content: string }[]
+} {
+  const parsed = parseMemoryLines(text)
+  return {
+    reply: parsed.clean || (parsed.memories.length ? 'Understood, sir.' : ''),
+    memories: parsed.memories
+  }
 }
 
 export function memoryBlock(memories: MemoryFact[]): string {
@@ -39,8 +321,11 @@ export function memoryBlock(memories: MemoryFact[]): string {
 }
 
 export function historyMessages(messages: ChatMessage[]): Array<{ role: string; content: string }> {
-  return messages.slice(-24).map((m) => ({
-    role: m.role,
-    content: m.content
-  }))
+  return messages
+    .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim())
+    .slice(-24)
+    .map((m) => ({
+      role: m.role,
+      content: m.content.trim()
+    }))
 }

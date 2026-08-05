@@ -1,7 +1,9 @@
 import { app } from 'electron'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import { AlbertSettings, DEFAULT_SETTINGS } from '../shared/types'
+import { DEFAULT_GROQ_MODEL, DEFAULT_SETTINGS } from '../shared/types'
+import type { AlbertSettings } from '../shared/types'
+import { normalizeGroqModelForDate } from '../shared/groqModels'
 import { normalizePersonality } from '../shared/personality'
 
 function configPath(): string {
@@ -67,6 +69,12 @@ function migrateSettings(raw: Partial<AlbertSettings>): AlbertSettings {
   if (typeof settings.performanceMode !== 'boolean') {
     settings.performanceMode = DEFAULT_SETTINGS.performanceMode
   }
+  if (typeof settings.startupAnimationEnabled !== 'boolean') {
+    settings.startupAnimationEnabled = DEFAULT_SETTINGS.startupAnimationEnabled
+  }
+  if (!['minimal', 'balanced', 'cinematic'].includes(settings.hudDensity)) {
+    settings.hudDensity = DEFAULT_SETTINGS.hudDensity
+  }
   if (
     settings.ttsProvider !== 'system' &&
     settings.ttsProvider !== 'elevenlabs' &&
@@ -86,7 +94,11 @@ function migrateSettings(raw: Partial<AlbertSettings>): AlbertSettings {
   if (typeof settings.companionEnabled !== 'boolean') {
     settings.companionEnabled = DEFAULT_SETTINGS.companionEnabled
   }
-  if (typeof settings.companionPort !== 'number' || settings.companionPort < 1024) {
+  if (
+    !Number.isInteger(settings.companionPort) ||
+    settings.companionPort < 1024 ||
+    settings.companionPort > 65_535
+  ) {
     settings.companionPort = DEFAULT_SETTINGS.companionPort
   }
   if (typeof settings.companionToken !== 'string') {
@@ -112,9 +124,18 @@ function migrateSettings(raw: Partial<AlbertSettings>): AlbertSettings {
   if (!settings.localModel) {
     settings.localModel = DEFAULT_SETTINGS.localModel
   }
-  if (!settings.groqModel) {
-    settings.groqModel = DEFAULT_SETTINGS.groqModel
+  // Keep existing installs off already-retired Groq IDs. Announced-but-still-
+  // live transition models are preserved because some organizations block the
+  // replacement until an admin explicitly enables it.
+  const groqModelMigrations: Record<string, string> = {
+    'meta-llama/llama-4-scout-17b-16e-instruct': 'openai/gpt-oss-120b',
+    'qwen/qwen3-32b': 'openai/gpt-oss-120b'
   }
+  settings.groqModel = normalizeGroqModelForDate(
+    settings.groqModel
+      ? groqModelMigrations[settings.groqModel] || settings.groqModel
+      : DEFAULT_GROQ_MODEL
+  )
   if (settings.localProvider !== 'ollama' && settings.localProvider !== 'groq') {
     settings.localProvider = DEFAULT_SETTINGS.localProvider
   }

@@ -39,6 +39,11 @@ function getCtor(): (new () => SpeechRecognitionLike) | null {
   return window.SpeechRecognition || window.webkitSpeechRecognition || null
 }
 
+export type LiveKeywordOptions = {
+  /** When false, ignore standby / take-5 (use while Thinking — SR hallucinates “bye”). */
+  allowStandby?: boolean
+}
+
 /**
  * Lightweight listener while Albert is speaking/thinking — mute / hide / show / standby.
  * Uses loose live matching (Web Speech is messy) plus whole-utterance rules.
@@ -50,15 +55,17 @@ export class LiveKeywordMonitor {
   private restartTimer = 0
   private lastFired = ''
   private lastFiredAt = 0
+  private allowStandby = true
 
   constructor(onKeyword: (k: LiveKeyword) => void) {
     this.onKeyword = onKeyword
   }
 
-  start(): void {
+  start(opts?: LiveKeywordOptions): void {
     const Ctor = getCtor()
     if (!Ctor) return
     this.active = true
+    this.allowStandby = opts?.allowStandby !== false
     this.lastFired = ''
     this.lastFiredAt = 0
     if (!this.recognition) {
@@ -75,7 +82,7 @@ export class LiveKeywordMonitor {
         const text = heard.trim()
         if (!text) return
 
-        const key = matchLiveKeyword(text)
+        const key = matchLiveKeyword(text, { allowStandby: this.allowStandby })
         if (!key) return
         const now = Date.now()
         // Allow re-fire after 1.2s so “mute” isn’t stuck forever after a false start
@@ -125,9 +132,13 @@ export class LiveKeywordMonitor {
   }
 }
 
-export function matchLiveKeyword(text: string): LiveKeyword | null {
+export function matchLiveKeyword(
+  text: string,
+  opts?: LiveKeywordOptions
+): LiveKeyword | null {
   const t = text.trim()
   if (!t) return null
+  const allowStandby = opts?.allowStandby !== false
 
   // Prefer the latest short clause (SR buffers grow)
   const parts = t
@@ -151,12 +162,14 @@ export function matchLiveKeyword(text: string): LiveKeyword | null {
     if (isMuteCommand(chunk)) return 'mute'
     if (isHideCommand(chunk)) return 'hide'
     if (isShowCommand(chunk)) return 'show'
-    // Standby / take 5 while he is still thinking or speaking
-    if (
-      isEndVoiceCommand(chunk) ||
-      /\b(standby|stand\s*by|take\s*(a\s*)?(5|five)|end\s+voice)\b/i.test(chunk)
-    ) {
-      return 'standby'
+    // Standby only when allowed — bare “bye/sleep” via isEndVoiceCommand is too noisy while Thinking
+    if (allowStandby) {
+      if (/\b(standby|stand\s*by|take\s*(a\s*)?(5|five)|end\s+voice)\b/i.test(chunk)) {
+        return 'standby'
+      }
+      if (isEndVoiceCommand(chunk) && !/^(bye|goodbye|good\s*bye|sleep)\.?$/i.test(chunk.trim())) {
+        return 'standby'
+      }
     }
   }
   return null

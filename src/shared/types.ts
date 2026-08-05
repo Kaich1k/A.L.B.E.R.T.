@@ -4,7 +4,7 @@ export { DEFAULT_PERSONALITY, PERSONALITY_META } from './personality'
 
 export type VoiceState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking'
 
-export type PanelId = 'home' | 'conversation' | 'memory' | 'activity' | 'settings'
+export type PanelId = 'home' | 'conversation' | 'missions' | 'memory' | 'activity' | 'settings'
 
 export type TtsProvider = 'system' | 'kokoro' | 'elevenlabs'
 
@@ -61,6 +61,10 @@ export interface MemoryFact {
   createdAt: number
   updatedAt: number
   score?: number
+  source?: string
+  confidence?: number
+  lastUsedAt?: number
+  expiresAt?: number
 }
 
 export interface ActivityEntry {
@@ -72,13 +76,93 @@ export interface ActivityEntry {
   createdAt: number
 }
 
+export type MissionState = 'draft' | 'queued' | 'active' | 'waiting' | 'approval' | 'blocked' | 'complete' | 'cancelled'
+export type MissionPriority = 'low' | 'normal' | 'high' | 'critical'
+
+export interface MissionStep {
+  id: string
+  missionId: string
+  position: number
+  title: string
+  state: 'pending' | 'active' | 'approval' | 'complete' | 'failed' | 'skipped'
+  toolName?: string
+  toolArgs?: Record<string, unknown>
+  result?: string
+  verification?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface Mission {
+  id: string
+  title: string
+  outcome: string
+  state: MissionState
+  priority: MissionPriority
+  progress: number
+  deadline?: number
+  budgetCents?: number
+  risk: 'observe' | 'prepare' | 'approve' | 'restricted'
+  source: 'user' | 'chat' | 'routine' | 'system'
+  createdAt: number
+  updatedAt: number
+  steps: MissionStep[]
+}
+
+export interface Routine {
+  id: string
+  name: string
+  prompt: string
+  schedule: string
+  enabled: boolean
+  quietStart?: string
+  quietEnd?: string
+  lastRunAt?: number
+  nextRunAt?: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ApprovalRequest {
+  id: string
+  missionId?: string
+  title: string
+  description: string
+  actionLabel: string
+  risk: string
+  preview?: string
+  state: 'pending' | 'approved' | 'declined' | 'expired'
+  createdAt: number
+  /** Last state transition; added for deterministic phone ↔ Mac reconciliation. */
+  updatedAt?: number
+  resolvedAt?: number
+}
+
+export interface CaptureItem {
+  id: string
+  content: string
+  kind: 'note' | 'task' | 'idea' | 'url' | 'receipt' | 'reference'
+  state: 'inbox' | 'filed' | 'archived'
+  createdAt: number
+  /** Last edit/state transition; older databases fall back to createdAt. */
+  updatedAt?: number
+}
+
+export interface OperationsSnapshot {
+  missions: Mission[]
+  routines: Routine[]
+  approvals: ApprovalRequest[]
+  captures: CaptureItem[]
+  generatedAt: number
+}
+
 export type RoutingMode = 'auto' | 'local' | 'fast' | 'power'
 
 export type ModelTier = 'local' | 'fast' | 'power'
 
 export type OllamaEndpointMode = 'auto' | 'cloud' | 'local'
 
-/** Which backend powers the LOCAL brain tier */
+/** Which backend powers the internal QUICK tier (legacy key remains `local`) */
 export type LocalProvider = 'ollama' | 'groq'
 
 export interface AlbertSettings {
@@ -86,9 +170,9 @@ export interface AlbertSettings {
   anthropicApiKey: string
   /** Optional OpenAI key — memory embeddings */
   openaiApiKey: string
-  /** Ollama Cloud API key (ollama.com) — local/cheap tier */
+  /** Ollama Cloud API key (ollama.com) — QUICK tier */
   ollamaApiKey: string
-  /** Groq API key — alternate LOCAL provider (fast free tier) */
+  /** Groq API key — alternate QUICK provider (fast free cloud tier) */
   groqApiKey: string
   /** @deprecated migrated into openaiApiKey */
   apiKey?: string
@@ -104,7 +188,7 @@ export interface AlbertSettings {
   powerModel: string
   /** auto routes per message; local/fast/power force one tier */
   routingMode: RoutingMode
-  /** ollama = current LOCAL stack; groq = Groq Cloud as LOCAL */
+  /** ollama = cloud/on-device option; groq = Groq Cloud; both live in QUICK */
   localProvider: LocalProvider
   /** Prefer Ollama cloud, local daemon, or auto */
   ollamaEndpoint: OllamaEndpointMode
@@ -132,6 +216,10 @@ export interface AlbertSettings {
   wakeWordEnabled: boolean
   /** Skip heavy HUD animations (default on — saves GPU) */
   performanceMode: boolean
+  /** Play the cinematic system initialization overlay once per app session. */
+  startupAnimationEnabled: boolean
+  /** Visual information density for ambient HUD elements. */
+  hudDensity: 'minimal' | 'balanced' | 'cinematic'
   /** system = macOS; kokoro = free local neural; elevenlabs = cloud */
   ttsProvider: TtsProvider
   /** Kokoro voice id (e.g. am_michael) */
@@ -166,6 +254,7 @@ export interface AgentStreamEvent {
     | 'route'
     | 'standby'
     | 'chat_cleared'
+    | 'chat_synced'
   content?: string
   message?: ChatMessage
   toolName?: string
@@ -194,6 +283,7 @@ export interface RealtimeToolDefinition {
 }
 
 export const CLAUDE_DASHBOARD_URL = 'https://platform.claude.com/dashboard'
+export const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-20b'
 
 export const DEFAULT_SETTINGS: AlbertSettings = {
   anthropicApiKey: '',
@@ -201,8 +291,8 @@ export const DEFAULT_SETTINGS: AlbertSettings = {
   ollamaApiKey: '',
   groqApiKey: '',
   model: 'claude-opus-5',
-  localModel: 'llama3.2',
-  groqModel: 'llama-3.1-8b-instant',
+  localModel: 'qwen3.5:4b',
+  groqModel: DEFAULT_GROQ_MODEL,
   fastModel: 'claude-haiku-4-5',
   powerModel: 'claude-opus-5',
   routingMode: 'auto',
@@ -224,6 +314,8 @@ export const DEFAULT_SETTINGS: AlbertSettings = {
   allowBargeIn: true,
   wakeWordEnabled: true,
   performanceMode: true,
+  startupAnimationEnabled: true,
+  hudDensity: 'cinematic',
   ttsProvider: 'kokoro',
   kokoroVoiceId: 'am_michael',
   elevenLabsApiKey: '',

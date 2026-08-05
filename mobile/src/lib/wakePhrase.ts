@@ -2,22 +2,36 @@
 
 const TRAILING = /^(please|now|thanks|thank|you|already|man|dude|sir)$/i
 
+/** Keep in sync with src/shared/albertName.ts (phone bundle can’t import desktop shared). */
+function repairAlbertMentions(text: string): string {
+  let t = text
+  t = t.replace(/a\.?\s*l\.?\s*b\.?\s*e\.?\s*r\.?\s*t\.?/gi, 'albert')
+  t = t.replace(/\bal[\s.\-]+bert\b/gi, 'albert')
+  t = t.replace(/\ba\s+bert\b/gi, 'albert')
+  t = t.replace(/\ball\s+bert\b/gi, 'albert')
+  t = t.replace(/\bi'?ll\s+bert\b/gi, 'albert')
+  t = t.replace(
+    /\b(all|ol|old|ow|ill|i'?ll|our|al|el|hal|uhl|ul|oh)\s+(bird|burt|bert|but|burp|bred|bet|bear|vert|pert|burger|birth|boat|bored)\b/gi,
+    'albert'
+  )
+  t = t.replace(
+    /\b(elbert|alberta|alberts|albert'?s|olbert|allbert|albird|albertt|alburt|halbert|alberti|alpert|alvert|abert|albrecht|albart|alfred|alfie|alberto|albertan|uburt|obert)\b/gi,
+    'albert'
+  )
+  return t
+}
+
 function normalizeWakeText(text: string): string {
-  return text
+  return repairAlbertMentions(text)
     .toLowerCase()
-    .replace(/a\.?\s*l\.?\s*b\.?\s*e\.?\s*r\.?\s*t\.?/g, 'albert')
-    .replace(/\bal\s*bert\b/g, 'albert')
-    .replace(/\b(elbert|alberts|albert'?s|olbert|allbert|albird|albertt|alburt|halbert)\b/g, 'albert')
-    .replace(/\b(all|ol|old|ow|ill|i'?ll)\s+(bird|burt|bert|but|burp|bred|bet)\b/g, 'albert')
-    .replace(/\ba\s+bert\b/g, 'albert')
     .replace(
-      /\b(what|week|make|wakee|woke|wait|weigh|wayne|work|walk|way|weight|bake|fake|lake)\s+(up|cup|app|of|op)\b/g,
+      /\b(what|week|make|wakee|woke|wait|weigh|wayne|work|walk|way|weight|bake|fake|lake|vague)\s+(up|cup|app|of|op)\b/g,
       'wake up'
     )
     .replace(/\bmakeup\b/g, 'wake up')
     .replace(/\bwake[\s\-]+up\b/g, 'wake up')
     .replace(/\bwakeup\b/g, 'wake up')
-    .replace(/\b(waken|awaken)\b/g, 'wake')
+    .replace(/\b(waken|awaken|waking)\b/g, 'wake')
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
@@ -42,17 +56,22 @@ export function isWakePhrase(text: string): boolean {
     if (pair === 'albert wake' || pair === 'wake albert') return true
   }
 
-  if (/\balbert\b.{0,24}\bwake(\s+up)?\b/.test(joined)) return true
-  if (/\bwake(\s+up)?\b.{0,24}\balbert\b/.test(joined)) return true
+  if (/\balbert\b.{0,32}\bwake(\s+up)?\b/.test(joined)) return true
+  if (/\bwake(\s+up)?\b.{0,32}\balbert\b/.test(joined)) return true
 
   const last2 = words.slice(-2).join(' ')
+  const last3 = words.slice(-3).join(' ')
+  if (last3 === 'albert wake up' || last3 === 'wake up albert') return true
   if (last2 === 'wake up' && words.includes('albert')) return true
+  if (last2 === 'albert wake' || last2 === 'wake albert') return true
 
   if (/\b(hey|yo|okay|ok|hi|hello)\s+albert\b/.test(joined)) return true
-  if (last2 === 'hey albert' || last2 === 'okay albert' || last2 === 'ok albert') return true
+  if (last2 === 'hey albert' || last2 === 'okay albert' || last2 === 'ok albert') {
+    return true
+  }
 
   if (
-    words.length <= 12 &&
+    words.length <= 14 &&
     words.includes('albert') &&
     (/\bwake(\s+up)?\b/.test(joined) || words.includes('wakeup'))
   ) {

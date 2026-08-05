@@ -3,6 +3,7 @@ import { APP_NAME } from '../../../shared/brand'
 import type { ChatImageMediaType, ChatImagePayload, ChatImageRef } from '../../../shared/types'
 import { useAlbertStore } from '../store'
 import { isEndVoiceCommand } from '../voice/voiceCommands'
+import { AlbertCore } from './AlbertCore'
 
 interface Props {
   onTalk: () => void
@@ -103,11 +104,15 @@ function MessageImages({ images }: { images: ChatImageRef[] }): React.JSX.Elemen
 
   return (
     <div className="msg-images">
-      {images.map((img) => {
+      {images.map((img, index) => {
         const src = urls[img.id] || img.dataUrl
         return src ? (
           <a key={img.id} href={src} target="_blank" rel="noreferrer" className="msg-image-link">
-            <img src={src} alt="Attachment" className="msg-image" />
+            <img
+              src={src}
+              alt={`Conversation attachment ${index + 1}`}
+              className="msg-image"
+            />
           </a>
         ) : (
           <div key={img.id} className="msg-image placeholder">
@@ -135,20 +140,71 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
   const [draft, setDraft] = useState('')
   const [draftImages, setDraftImages] = useState<DraftImage[]>([])
   const [dragOver, setDragOver] = useState(false)
+  const [purgeArmed, setPurgeArmed] = useState(false)
+  const [purging, setPurging] = useState(false)
+  const [followOutput, setFollowOutput] = useState(true)
+  const [composerHeight, setComposerHeight] = useState(80)
+  const messagesRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const composerRef = useRef<HTMLFormElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const purgeTimerRef = useRef(0)
+  const scrollFrameRef = useRef(0)
 
   const voiceLive = voiceState !== 'idle'
+  const voiceLabel = voiceCaption(voiceState)
+  const micLabel =
+    voiceState === 'listening'
+      ? 'Open'
+      : voiceState === 'speaking'
+        ? 'Monitoring'
+        : voiceState === 'connecting'
+          ? 'Initializing'
+          : voiceState === 'thinking'
+            ? 'Processing'
+            : 'Standby'
   const standbyDraft =
     draft.trim().length > 0 && draftImages.length === 0 && isEndVoiceCommand(draft)
   const canSend =
     (draft.trim().length > 0 || draftImages.length > 0) &&
     !busy &&
     (!voiceLive || standbyDraft)
+  const voiceFault = /(?:^|·\s*)(?:Voice startup fault|Last turn fault|Voice output unavailable)\b/i.test(
+    voiceStatus
+  )
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, streamingText])
+    if (!followOutput) return
+    window.cancelAnimationFrame(scrollFrameRef.current)
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      const node = messagesRef.current
+      if (node) node.scrollTop = node.scrollHeight
+    })
+    return () => window.cancelAnimationFrame(scrollFrameRef.current)
+  }, [messages, streamingText, followOutput])
+
+  useEffect(() => {
+    return () => {
+      window.clearTimeout(purgeTimerRef.current)
+      window.cancelAnimationFrame(scrollFrameRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    const node = composerRef.current
+    if (!node) return
+    const update = (): void => setComposerHeight(Math.ceil(node.getBoundingClientRect().height))
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (!purgeArmed || (!busy && !voiceLive)) return
+    window.clearTimeout(purgeTimerRef.current)
+    setPurgeArmed(false)
+  }, [busy, purgeArmed, voiceLive])
 
   useEffect(() => {
     return () => {
@@ -159,6 +215,7 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
   }, [draftImages])
 
   async function addFiles(files: FileList | File[]): Promise<void> {
+    if (busy || voiceLive) return
     const list = Array.from(files)
     const next: DraftImage[] = [...draftImages]
     for (const file of list) {
@@ -170,6 +227,8 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
     if (next.length === draftImages.length && list.some((f) => f.type.startsWith('image/'))) {
       setError('Couldn’t attach that image (use PNG/JPEG/GIF/WebP under ~4.5MB, max 4).')
     }
+    const current = useAlbertStore.getState()
+    if (current.busy || current.voiceState !== 'idle') return
     setDraftImages(next.slice(0, MAX_ATTACH))
   }
 
@@ -192,6 +251,7 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
     }))
     setDraft('')
     setDraftImages([])
+    setFollowOutput(true)
     setError(null)
 
     // Standby / take 5 — app layer, not the brain roleplaying sleep
@@ -203,17 +263,21 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
         content: text,
         createdAt: now
       })
-      // Always end voice if live; never let the brain roleplay standby
-      if (onStandby) await onStandby()
-      appendMessage({
-        id: `asst-standby-${now}`,
-        role: 'assistant',
-        content: voiceLive
-          ? 'Standing by, sir.'
-          : 'Standing by, sir. Say “Albert, wake up” when you need me.',
-        createdAt: Date.now()
-      })
-      setVoiceStatus('Standby — wake armed when enabled')
+      try {
+        // Always end voice if live; never let the brain roleplay standby.
+        if (onStandby) await onStandby()
+        appendMessage({
+          id: `asst-standby-${now}`,
+          role: 'assistant',
+          content: voiceLive
+            ? 'Standing by, sir.'
+            : 'Standing by, sir. Say “Albert, wake up” when you need me.',
+          createdAt: Date.now()
+        })
+        setVoiceStatus('Standby — wake armed when enabled')
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
       return
     }
 
@@ -228,26 +292,57 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
   }
 
   async function clearChat(): Promise<void> {
-    await window.albert.clearChat()
-    setMessages([])
+    if (purging || busy || voiceLive) return
+    if (!purgeArmed) {
+      setPurgeArmed(true)
+      window.clearTimeout(purgeTimerRef.current)
+      purgeTimerRef.current = window.setTimeout(() => setPurgeArmed(false), 4_000)
+      return
+    }
+    window.clearTimeout(purgeTimerRef.current)
+    setPurging(true)
+    try {
+      await window.albert.clearChat()
+      setMessages([])
+      setFollowOutput(true)
+      setError(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setPurgeArmed(false)
+      setPurging(false)
+    }
   }
 
   return (
-    <section className="panel panel-comm">
+    <section className="panel panel-comm" aria-labelledby="comm-link-title">
       <header className="comm-header">
         <div>
-          <h2 className="section-title">Comm Link</h2>
+          <h2 className="section-title" id="comm-link-title">
+            Comm Link
+          </h2>
           <p className="section-sub">
             Text, images, or voice. {APP_NAME} retains context and can act on your Mac.
           </p>
         </div>
-        <button className="btn ghost" type="button" onClick={() => void clearChat()}>
-          Purge
+        <button
+          className={`btn ghost comm-purge ${purgeArmed ? 'armed' : ''}`}
+          type="button"
+          onClick={() => void clearChat()}
+          disabled={busy || voiceLive || purging || (messages.length === 0 && !streamingText)}
+          aria-busy={purging}
+          aria-label={purgeArmed ? 'Confirm clearing conversation history' : 'Clear conversation history'}
+          title={purgeArmed ? 'Click again within four seconds to confirm' : 'Clear conversation history'}
+        >
+          {purging ? 'Purging…' : purgeArmed ? 'Confirm purge' : 'Purge'}
         </button>
+        <span className="sr-only" role="status" aria-live="assertive" aria-atomic="true">
+          {purgeArmed ? 'Purge armed. Activate Confirm purge within four seconds.' : ''}
+        </span>
       </header>
 
       {error ? (
-        <div className="error-banner">
+        <div className="error-banner" role="alert">
           <div>{error}</div>
           <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => setError(null)}>
             Dismiss
@@ -258,13 +353,38 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
       <div className="comm-split">
         <div className="comm-chat">
           {(voiceStatus || routeInfo) && (
-            <div className="comm-meta">
-              {routeInfo ? <span>{routeInfo}</span> : null}
-              {voiceStatus ? <span>{voiceStatus}</span> : null}
+            <div className="comm-meta" aria-label="Connection details">
+              {routeInfo ? (
+                <span>
+                  <b>Last route</b>
+                  <span>{routeInfo}</span>
+                </span>
+              ) : null}
+              {voiceStatus ? (
+                <span>
+                  <b>Voice</b>
+                  <span>{voiceStatus}</span>
+                </span>
+              ) : null}
             </div>
           )}
 
-          <div className="messages">
+          <div
+            ref={messagesRef}
+            className="messages"
+            role="log"
+            aria-label="Conversation transcript"
+            aria-live="polite"
+            aria-relevant="additions"
+            aria-busy={busy || voiceState === 'thinking' || voiceState === 'speaking'}
+            tabIndex={0}
+            onScroll={() => {
+              const node = messagesRef.current
+              if (!node) return
+              const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 72
+              setFollowOutput(nearBottom)
+            }}
+          >
             {messages.length === 0 && !streamingText ? (
               <div className="empty">
                 Channel open — type, attach an image, or engage voice. Ask anything; he can search
@@ -274,7 +394,11 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
             {messages
               .filter((m) => m.role !== 'system')
               .map((m) => (
-                <div key={m.id} className={`msg ${m.role}`}>
+                <article
+                  key={m.id}
+                  className={`msg ${m.role}`}
+                  aria-label={`${m.role === 'assistant' ? APP_NAME : m.role === 'tool' ? 'Tool' : 'You'} message`}
+                >
                   <div className="role">
                     {m.role === 'assistant'
                       ? APP_NAME
@@ -288,40 +412,66 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
                   ) : m.images?.length ? null : (
                     <div className="body">{m.content}</div>
                   )}
-                </div>
+                </article>
               ))}
             {streamingText ? (
-              <div className="msg assistant">
+              <article
+                className="msg assistant streaming"
+                aria-label={`${APP_NAME} response in progress`}
+              >
                 <div className="role">{APP_NAME}</div>
                 <div className="body">{streamingText}</div>
-              </div>
+              </article>
             ) : null}
-            <div ref={bottomRef} />
+            <div ref={bottomRef} aria-hidden="true" />
           </div>
 
+          {!followOutput && (messages.length > 0 || Boolean(streamingText)) ? (
+            <button
+              type="button"
+              className="comm-jump-latest"
+              style={{ bottom: composerHeight + 18 }}
+              onClick={() => {
+                const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+                const node = messagesRef.current
+                if (reducedMotion) setFollowOutput(true)
+                node?.scrollTo({
+                  top: node.scrollHeight,
+                  behavior: reducedMotion ? 'auto' : 'smooth'
+                })
+              }}
+            >
+              Jump to latest ↓
+            </button>
+          ) : null}
+
           <form
+            ref={composerRef}
             className={`composer ${dragOver ? 'drag-over' : ''}`}
+            aria-label="Message composer"
             onSubmit={(e) => void onSubmit(e)}
             onDragOver={(e) => {
               e.preventDefault()
-              setDragOver(true)
+              if (!busy && !voiceLive) setDragOver(true)
             }}
             onDragLeave={() => setDragOver(false)}
             onDrop={(e) => {
               e.preventDefault()
               setDragOver(false)
-              if (e.dataTransfer.files?.length) void addFiles(e.dataTransfer.files)
+              if (!busy && !voiceLive && e.dataTransfer.files?.length) {
+                void addFiles(e.dataTransfer.files)
+              }
             }}
           >
             {draftImages.length > 0 ? (
               <div className="composer-previews">
-                {draftImages.map((img) => (
+                {draftImages.map((img, index) => (
                   <div key={img.id} className="composer-preview">
-                    <img src={img.previewUrl} alt="" />
+                    <img src={img.previewUrl} alt={`Pending attachment ${index + 1}`} />
                     <button
                       type="button"
                       className="composer-preview-remove"
-                      aria-label="Remove image"
+                      aria-label={`Remove attachment ${index + 1}`}
                       onClick={() => removeDraftImage(img.id)}
                     >
                       ×
@@ -339,7 +489,7 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
                 multiple
                 hidden
                 onChange={(e) => {
-                  if (e.target.files?.length) void addFiles(e.target.files)
+                  if (!busy && !voiceLive && e.target.files?.length) void addFiles(e.target.files)
                   e.target.value = ''
                 }}
               />
@@ -347,6 +497,7 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
                 type="button"
                 className="btn ghost composer-attach"
                 title="Attach image"
+                aria-label="Attach images"
                 disabled={busy || voiceLive || draftImages.length >= MAX_ATTACH}
                 onClick={() => fileInputRef.current?.click()}
               >
@@ -361,8 +512,11 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
                     : `Message ${APP_NAME}… (paste or drop images)`
                 }
                 disabled={voiceLive}
+                aria-label={`Message ${APP_NAME}`}
+                aria-describedby="comm-composer-hint"
                 rows={2}
                 onPaste={(e) => {
+                  if (busy || voiceLive) return
                   const items = e.clipboardData?.items
                   if (!items) return
                   const files: File[] = []
@@ -384,24 +538,50 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
                   }
                 }}
               />
-              <button className="btn primary" type="submit" disabled={!canSend}>
-                {busy ? '…' : 'Send'}
+              <span id="comm-composer-hint" className="sr-only">
+                {voiceLive
+                  ? 'Voice is engaged. Use End voice before typing a message.'
+                  : 'Press Enter to send or Shift Enter for a new line. Up to four images may be attached.'}
+              </span>
+              <button
+                className="btn primary"
+                type="submit"
+                disabled={!canSend}
+                aria-label={busy ? `${APP_NAME} is responding` : 'Send message'}
+              >
+                {busy ? 'Working…' : 'Send'}
               </button>
             </div>
           </form>
         </div>
 
-        <aside className={`comm-voice state-${voiceState}`}>
-          <div className="voice-stage" aria-hidden>
-            <div className="voice-blob core" />
-            <div className="voice-blob mid" />
-            <div className="voice-blob outer" />
-            <div className="voice-ring" />
+        <aside
+          className={`comm-voice state-${voiceState}`}
+          aria-label="Voice link controls"
+          aria-describedby="voice-link-caption"
+        >
+          <AlbertCore
+            state={voiceState}
+            variant="comm"
+            fault={voiceFault}
+            label={`Voice link ${voiceLabel.toLowerCase()}`}
+          />
+
+          <div className="voice-waveform" aria-hidden="true">
+            {Array.from({ length: 19 }, (_, index) => (
+              <i key={index} style={{ '--wave-index': index } as React.CSSProperties} />
+            ))}
           </div>
 
-          <div className="voice-caption">
-            <span className={`status-dot ${voiceLive ? voiceState : ''}`} />
-            {voiceCaption(voiceState)}
+          <div
+            className="voice-caption"
+            id="voice-link-caption"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <span className={`status-dot ${voiceLive ? voiceState : ''}`} aria-hidden="true" />
+            {voiceLabel}
           </div>
 
           <button
@@ -409,12 +589,24 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
             className={`voice-toggle ${voiceLive ? 'live' : 'idle'}`}
             onClick={onTalk}
             aria-pressed={voiceLive}
+            aria-label={voiceLive ? 'End voice session' : 'Engage voice session'}
           >
             <span className="voice-toggle-track">
               <span className="voice-toggle-label idle-label">Engage voice</span>
               <span className="voice-toggle-label live-label">End voice</span>
             </span>
           </button>
+          <div className="voice-diagnostics">
+            <span>
+              <b>Session</b> {voiceLive ? 'Active' : 'Standby'}
+            </span>
+            <span>
+              <b>Input</b> {micLabel}
+            </span>
+            <span>
+              <b>State</b> {voiceLabel}
+            </span>
+          </div>
         </aside>
       </div>
     </section>

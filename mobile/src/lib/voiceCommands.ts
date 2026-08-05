@@ -37,6 +37,8 @@ const END_VOICE_WHOLE: RegExp[] = [
   /^(you\s+can\s+)?(be\s+)?on\s+standby\.?$/i,
   /^you\s+can\s+(turn\s+off|stand\s*-?\s*by|standby|go\s+to\s+sleep|stop\s+listening|be\s+on\s+stand\s*-?\s*by|be\s+on\s+standby)\.?$/i,
   /^go\s+to\s+sleep\.?$/i,
+  /^(you\s+should\s+|you\s+need\s+to\s+|i\s+want\s+you\s+to\s+|i\s+said\s+(you\s+should\s+)?)go\s+to\s+sleep\.?$/i,
+  /^(you\s+should\s+|you\s+need\s+to\s+)(go\s+to\s+)?sleep\.?$/i,
   /^sleep\.?$/i,
   /^(deactivate|disconnect|disengage)(\s+(voice|listening))?\.?$/i,
   /^(that'?s\s+all|that\s+is\s+all)\.?$/i,
@@ -79,7 +81,9 @@ const STANDBY_INTENT: RegExp[] = [
   /\btake\s+(a\s+)?(5|five|break)\b/i,
   /\b(end|stop)\s+(the\s+)?(voice|listening)(\s+(mode|session|for\s+now))?\b/i,
   /\byou\s+can\s+turn\s+(yourself\s+)?off\b/i,
-  /\bturn\s+(yourself\s+)?off\b/i
+  /\bturn\s+(yourself\s+)?off\b/i,
+  /\b(you\s+should\s+|you\s+need\s+to\s+|i\s+(want|need)\s+you\s+to\s+|i\s+said\s+(you\s+should\s+)?)go\s+to\s+sleep\b/i,
+  /\b(you\s+should\s+|you\s+need\s+to\s+)(go\s+to\s+)?sleep\b/i
 ]
 
 /** Talking about standby / teaching the matcher — not a command to enter it. */
@@ -125,8 +129,37 @@ const HALLUCINATION_PATTERNS: RegExp[] = [
   /^(please subscribe.*)$/i,
   /^(music|applause|laughter)$/i,
   /^\[.*\]$/,
-  /^\(.*\)$/
+  /^\(.*\)$/,
+  /^(bye|goodbye|good\s*bye|hello|hi|hey|yes|no|okay|ok|so|the|a|to|and)\.?$/i,
+  /^(thanks?|thank\s+you)(\s+for\s+watching)?\.?$/i
 ]
+
+/** Collapse only exact adjacent repetitions of four or more words. */
+export function collapseRepeatedTranscript(text: string): string {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  const words = normalized.split(' ').filter(Boolean)
+  if (words.length < 8) return normalized
+  const keys = words.map((word) =>
+    word
+      .toLocaleLowerCase()
+      .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')
+  )
+  for (let blockSize = 4; blockSize <= Math.floor(words.length / 2); blockSize++) {
+    if (words.length % blockSize !== 0) continue
+    const copies = words.length / blockSize
+    let identical = copies >= 2
+    for (let copy = 1; copy < copies && identical; copy++) {
+      for (let i = 0; i < blockSize; i++) {
+        if (keys[i] !== keys[copy * blockSize + i]) {
+          identical = false
+          break
+        }
+      }
+    }
+    if (identical) return words.slice(0, blockSize).join(' ')
+  }
+  return normalized
+}
 
 /** Soft phonetic / Whisper repairs before command matching + chat. */
 export function correctTranscript(text: string): string {
@@ -165,7 +198,7 @@ export function correctTranscript(text: string): string {
   t = t.replace(/\bhey albert\b/gi, 'hey A.L.B.E.R.T.')
   t = t.replace(/\bokay albert\b/gi, 'okay A.L.B.E.R.T.')
 
-  return t.replace(/\s+/g, ' ').trim()
+  return collapseRepeatedTranscript(t)
 }
 
 /** Strip fillers so “okay, standby please” → “standby”. */

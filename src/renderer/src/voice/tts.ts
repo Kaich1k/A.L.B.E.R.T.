@@ -1,9 +1,40 @@
 import { useAlbertStore } from '../store'
+import {
+  isCurrentVoiceGeneration,
+  shouldUseSystemTtsFallback,
+  ttsRecoveryTail
+} from '../../../shared/voiceReliability'
 
 let currentAudio: HTMLAudioElement | null = null
 let currentObjectUrl: string | null = null
 /** Generation token — bump to invalidate in-flight stream plays */
 let speakGeneration = 0
+
+/**
+ * Neural TTS is intentionally bounded. A wedged worker used to leave a voice
+ * turn looking complete in Comm while no audio ever arrived. The underlying
+ * IPC request may still finish later, but this turn can recover immediately.
+ */
+const NEURAL_TTS_TIMEOUT_MS = 25_000
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)} seconds`))
+    }, timeoutMs)
+
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        window.clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
+}
 
 /** Shared Web Audio graph for gapless streamed clips */
 let gaplessCtx: AudioContext | null = null
@@ -45,12 +76,41 @@ function pickVoice(preferredName: string): SpeechSynthesisVoice | null {
 }
 
 /**
+ * Strip markdown / list markers so Kokoro doesn’t say “asterisk” or “hashtag”.
+ * Also turns bullet lines into sentence-ish breaks for cleaner chunking upstream.
+ */
+export function stripMarkdownForSpeech(text: string): string {
+  return text
+    .replace(/\r\n/g, '\n')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/(?<!\w)\*([^*\n]+)\*(?!\w)/g, '$1')
+    .replace(/(?<!\w)_([^_\n]+)_(?!\w)/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    // Bullets → plain lines (markers removed; newlines kept for splitters)
+    .replace(/^\s*[-*•]\s+/gm, '')
+    .replace(/^\s*\d+\.\s+/gm, '')
+    // Any leftover decorative asterisks / hashes (never speak “asterisk”)
+    .replace(/\*+/g, '')
+    .replace(/#+/g, '')
+    .replace(/~/g, '')
+    .replace(/\|/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/**
  * Prep text for TTS.
  * System TTS: optional punctuation strip (macOS inserts long pauses on .!?).
  * Neural (Kokoro/ElevenLabs): keep punctuation — stripping causes odd joins / “skipped” words.
  */
 function prepareForSpeech(text: string, stripPunctuation: boolean): string {
-  const collapsed = text.replace(/\s+/g, ' ').trim()
+  const demarked = stripMarkdownForSpeech(text)
+  const collapsed = demarked.replace(/\s+/g, ' ').trim()
   if (!collapsed) return ''
   if (!stripPunctuation) {
     return collapsed
@@ -158,8 +218,13 @@ function stopGaplessPlayback(): void {
 }
 
 async function ensureGaplessCtx(): Promise<AudioContext> {
-  if (!gaplessCtx) gaplessCtx = new AudioContext()
-  if (gaplessCtx.state === 'suspended') await gaplessCtx.resume()
+  if (!gaplessCtx || gaplessCtx.state === 'closed') gaplessCtx = new AudioContext()
+  if (gaplessCtx.state === 'suspended') {
+    await withTimeout(gaplessCtx.resume(), 5_000, 'Voice audio output resume')
+  }
+  if (gaplessCtx.state !== 'running') {
+    throw new Error(`Voice audio output is ${gaplessCtx.state}`)
+  }
   return gaplessCtx
 }
 
@@ -186,9 +251,26 @@ async function scheduleGaplessBase64(
   new Uint8Array(copy).set(bytes)
   let audioBuffer: AudioBuffer
   try {
-    audioBuffer = await ctx.decodeAudioData(copy)
+    audioBuffer = await withTimeout(ctx.decodeAudioData(copy), 8_000, 'Voice audio decode')
   } catch (err) {
     throw err instanceof Error ? err : new Error(String(err))
+  }
+
+  let peak = 0
+  let sumSquares = 0
+  let sampleCount = 0
+  for (let channel = 0; channel < audioBuffer.numberOfChannels; channel++) {
+    const samples = audioBuffer.getChannelData(channel)
+    for (let i = 0; i < samples.length; i += 4) {
+      const amplitude = Math.abs(samples[i] || 0)
+      peak = Math.max(peak, amplitude)
+      sumSquares += amplitude * amplitude
+      sampleCount += 1
+    }
+  }
+  const rms = sampleCount > 0 ? Math.sqrt(sumSquares / sampleCount) : 0
+  if (!Number.isFinite(audioBuffer.duration) || audioBuffer.duration <= 0 || peak < 0.001 || rms < 0.0001) {
+    throw new Error('Voice synthesis returned silent audio')
   }
 
   if (options?.shouldCancel?.() || gen !== speakGeneration) {
@@ -201,25 +283,107 @@ async function scheduleGaplessBase64(
 
   const now = ctx.currentTime
   // Abut previous clip; small pad only when the timeline is idle
+  const previousNextTime = gaplessNextTime
   const startAt = gaplessNextTime > now + 0.005 ? gaplessNextTime : now + 0.015
   gaplessNextTime = startAt + audioBuffer.duration
 
-  const delayMs = Math.max(0, (startAt - ctx.currentTime) * 1000 - 5)
-  if (options?.onStart) {
-    window.setTimeout(() => {
-      if (options.shouldCancel?.() || gen !== speakGeneration) return
-      options.onStart?.()
-    }, delayMs)
+  gaplessSources.add(source)
+  let startPollTimer = 0
+  let safetyTimer = 0
+  let renderingStarted = false
+  let settled = false
+  let abortEnded = (): void => undefined
+  const ended = new Promise<void>((resolve, reject) => {
+    const cancelled = (): boolean =>
+      Boolean(options?.shouldCancel?.() || gen !== speakGeneration)
+    const finish = (error?: Error): void => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(startPollTimer)
+      window.clearTimeout(safetyTimer)
+      gaplessSources.delete(source)
+      source.onended = null
+      if (error) {
+        try {
+          source.stop()
+        } catch {
+          /* already stopped */
+        }
+      }
+      try {
+        source.disconnect()
+      } catch {
+        /* already disconnected */
+      }
+      if (error) reject(error)
+      else resolve()
+    }
+    abortEnded = () => finish()
+
+    const markStartedFromAudioClock = (): boolean => {
+      if (renderingStarted) return true
+      if (cancelled()) return false
+      // AudioContext.currentTime advances only while the rendering graph is
+      // running. This is stronger evidence than a wall-clock timeout firing.
+      if (ctx.state === 'running' && ctx.currentTime >= startAt) {
+        renderingStarted = true
+        options?.onStart?.()
+        return true
+      }
+      return false
+    }
+
+    const scheduledDelayMs = Math.max(0, (startAt - ctx.currentTime) * 1000)
+    const startDeadline = window.performance.now() + scheduledDelayMs + 3_000
+    const pollForStart = (): void => {
+      if (cancelled()) {
+        finish()
+        return
+      }
+      if (markStartedFromAudioClock()) return
+      if (ctx.state === 'closed' || window.performance.now() >= startDeadline) {
+        finish(new Error(`Voice audio output did not start (${ctx.state})`))
+        return
+      }
+      startPollTimer = window.setTimeout(pollForStart, 20)
+    }
+
+    source.onended = () => {
+      if (cancelled()) {
+        finish()
+        return
+      }
+      if (!markStartedFromAudioClock()) {
+        finish(new Error('Voice audio ended before output began'))
+        return
+      }
+      finish()
+    }
+    startPollTimer = window.setTimeout(pollForStart, 0)
+    safetyTimer = window.setTimeout(
+      () => {
+        if (cancelled()) {
+          finish()
+          return
+        }
+        const expectedEnd = startAt + audioBuffer.duration
+        if (markStartedFromAudioClock() && ctx.currentTime >= expectedEnd - 0.05) {
+          finish()
+          return
+        }
+        finish(new Error(`Voice audio output stalled (${ctx.state})`))
+      },
+      Math.max(5_000, Math.ceil((startAt - ctx.currentTime + audioBuffer.duration) * 1000) + 3_000)
+    )
+  })
+  try {
+    source.start(startAt)
+  } catch (error) {
+    gaplessNextTime = previousNextTime
+    abortEnded()
+    throw error
   }
 
-  gaplessSources.add(source)
-  const ended = new Promise<void>((resolve) => {
-    source.onended = () => {
-      gaplessSources.delete(source)
-      resolve()
-    }
-  })
-  source.start(startAt)
   return { ended }
 }
 
@@ -249,7 +413,7 @@ function ensureVoicesLoaded(): Promise<void> {
 
 async function speakSystem(
   chunks: string[],
-  options?: { onStart?: () => void; shouldCancel?: () => boolean }
+  options?: { onStart?: () => void; shouldCancel?: () => boolean; append?: boolean }
 ): Promise<void> {
   const settings = useAlbertStore.getState().settings
   await ensureVoicesLoaded()
@@ -258,7 +422,10 @@ async function speakSystem(
   const rate = Math.min(2, Math.max(0.5, settings.ttsRate || 1.22))
   const pitch = Math.min(2, Math.max(0, settings.ttsPitch ?? 1))
 
-  if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+  if (
+    !options?.append &&
+    (window.speechSynthesis.speaking || window.speechSynthesis.pending)
+  ) {
     window.speechSynthesis.cancel()
   }
   try {
@@ -266,7 +433,7 @@ async function speakSystem(
   } catch {
     /* ignore */
   }
-  options?.onStart?.()
+  let announced = false
 
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i]
@@ -275,14 +442,79 @@ async function speakSystem(
       return
     }
 
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       const utterance = new SpeechSynthesisUtterance(chunk)
       utterance.rate = rate
       utterance.pitch = pitch
       utterance.volume = 1
       if (voice) utterance.voice = voice
-      utterance.onend = () => resolve()
-      utterance.onerror = () => resolve()
+      let started = false
+      let settled = false
+      let startTimer = 0
+      let completionTimer = 0
+      let statePollTimer = 0
+      const finish = (error?: Error): void => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(startTimer)
+        window.clearTimeout(completionTimer)
+        window.clearTimeout(statePollTimer)
+        utterance.onstart = null
+        utterance.onend = null
+        utterance.onerror = null
+        if (error) reject(error)
+        else resolve()
+      }
+      const pollNativeState = (): void => {
+        if (settled || !started) return
+        if (!window.speechSynthesis.speaking && !window.speechSynthesis.pending) {
+          finish()
+          return
+        }
+        statePollTimer = window.setTimeout(pollNativeState, 250)
+      }
+      utterance.onstart = () => {
+        if (settled) return
+        if (options?.shouldCancel?.()) {
+          finish()
+          window.speechSynthesis.cancel()
+          return
+        }
+        started = true
+        window.clearTimeout(startTimer)
+        if (!announced) {
+          announced = true
+          options?.onStart?.()
+        }
+        const wordCount = Math.max(1, chunk.trim().split(/\s+/).length)
+        const estimatedMs = (wordCount / Math.max(90, 180 * rate)) * 60_000
+        completionTimer = window.setTimeout(() => {
+          finish(new Error('System voice playback did not finish'))
+          window.speechSynthesis.cancel()
+        }, Math.min(180_000, Math.max(15_000, estimatedMs + 15_000)))
+        statePollTimer = window.setTimeout(pollNativeState, 250)
+      }
+      utterance.onend = () => finish()
+      utterance.onerror = (event) => {
+        if (
+          options?.shouldCancel?.() ||
+          event.error === 'canceled' ||
+          event.error === 'interrupted'
+        ) {
+          finish()
+          return
+        }
+        finish(new Error(`System voice playback failed (${event.error || 'unknown error'})`))
+      }
+      // Chromium can omit onstart. Fail quickly enough to surface the fault,
+      // but never mark a merely queued utterance as successfully spoken.
+      startTimer = window.setTimeout(
+        () => {
+          finish(new Error('System voice playback did not start'))
+          window.speechSynthesis.cancel()
+        },
+        8_000
+      )
       window.speechSynthesis.speak(utterance)
       try {
         window.speechSynthesis.resume()
@@ -321,26 +553,65 @@ async function playAudioUrl(
     const audio = new Audio(src)
     currentAudio = audio
     let playing = false
-
-    audio.onended = () => {
+    let announced = false
+    let settled = false
+    let startupTimer = 0
+    let playbackTimer = 0
+    let delayedStartTimer = 0
+    const finish = (error?: Error): void => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(startupTimer)
+      window.clearTimeout(playbackTimer)
+      window.clearTimeout(delayedStartTimer)
+      audio.onended = null
+      audio.onerror = null
+      audio.onplaying = null
+      audio.oncanplaythrough = null
       if (currentAudio === audio) currentAudio = null
-      resolve()
+      if (error) {
+        audio.pause()
+        audio.removeAttribute('src')
+        audio.load()
+      }
+      if (error) reject(error)
+      else resolve()
     }
+    startupTimer = window.setTimeout(
+      () => finish(new Error(`${label} audio playback did not start`)),
+      8_000
+    )
+
+    audio.onended = () => finish()
     audio.onerror = () => {
-      if (currentAudio === audio) currentAudio = null
-      reject(new Error(`${label} audio playback failed`))
+      if (options?.shouldCancel?.() || gen !== speakGeneration) finish()
+      else finish(new Error(`${label} audio playback failed`))
+    }
+    audio.onplaying = () => {
+      if (settled) return
+      window.clearTimeout(startupTimer)
+      const durationMs = Number.isFinite(audio.duration)
+        ? Math.ceil(audio.duration * 1000) + 10_000
+        : 240_000
+      window.clearTimeout(playbackTimer)
+      playbackTimer = window.setTimeout(
+        () => finish(new Error(`${label} audio playback did not finish`)),
+        Math.min(360_000, Math.max(15_000, durationMs))
+      )
+      if (announced) return
+      announced = true
+      options?.onStart?.()
     }
 
     const startPlay = (): void => {
-      if (playing) return
+      if (settled || playing) return
       if (options?.shouldCancel?.() || gen !== speakGeneration) {
-        resolve()
+        finish()
         return
       }
       playing = true
-      options?.onStart?.()
       void audio.play().catch((err) => {
-        reject(err instanceof Error ? err : new Error(String(err)))
+        finish(err instanceof Error ? err : new Error(String(err)))
       })
     }
 
@@ -351,7 +622,7 @@ async function playAudioUrl(
         audio.oncanplaythrough = null
         startPlay()
       }
-      window.setTimeout(startPlay, 120)
+      delayedStartTimer = window.setTimeout(startPlay, 120)
     }
   })
 }
@@ -362,8 +633,13 @@ async function playBase64Chunks(
   label: string,
   options?: SpeakOptions & { generation?: number }
 ): Promise<void> {
+  let activeGeneration = options?.generation
   if (!options?.append) {
+    // If something cancelled this handle while synthesis was in flight, do not
+    // revive it. Otherwise stop prior audio and adopt the newly-issued token.
+    if (activeGeneration != null && activeGeneration !== speakGeneration) return
     stopSpeaking()
+    activeGeneration = speakGeneration
   }
 
   let announced = false
@@ -372,22 +648,22 @@ async function playBase64Chunks(
       if (!options?.append) stopSpeaking()
       return
     }
-    if (options?.generation != null && options.generation !== speakGeneration) return
+    if (activeGeneration != null && activeGeneration !== speakGeneration) return
 
     let base64: string
     try {
-      base64 = await chunkAudio[i]!
+      base64 = await withTimeout(chunkAudio[i]!, NEURAL_TTS_TIMEOUT_MS, `${label} synthesis`)
     } catch (err) {
       throw unwrapIpcError(err)
     }
     if (options?.shouldCancel?.()) return
-    if (options?.generation != null && options.generation !== speakGeneration) return
+    if (activeGeneration != null && activeGeneration !== speakGeneration) return
 
     // Gapless path for streamed appends (Kokoro/ElevenLabs)
     if (options?.append) {
       const { ended } = await scheduleGaplessBase64(base64, {
         shouldCancel: options.shouldCancel,
-        generation: options.generation,
+        generation: activeGeneration,
         onStart: () => {
           if (!announced) {
             announced = true
@@ -408,7 +684,7 @@ async function playBase64Chunks(
 
     await playAudioUrl(src, label, {
       shouldCancel: options?.shouldCancel,
-      generation: options?.generation,
+      generation: activeGeneration,
       onStart: () => {
         if (!announced) {
           announced = true
@@ -490,8 +766,37 @@ export function beginSpeak(text: string, options?: SpeakOptions): SpeakHandle {
   }
 }
 
-export async function speakText(text: string, options?: SpeakOptions): Promise<void> {
-  await beginSpeak(text, options).play()
+export type SpeakResult = {
+  providerUsed: 'system' | 'kokoro' | 'elevenlabs'
+  fallbackFrom?: 'kokoro' | 'elevenlabs'
+  fallbackReason?: string
+}
+
+export async function speakText(text: string, options?: SpeakOptions): Promise<SpeakResult> {
+  const settings = useAlbertStore.getState().settings
+  const provider = options?.provider || settings.ttsProvider || 'system'
+  let started = false
+  const wrappedOptions: SpeakOptions = {
+    ...options,
+    onStart: () => {
+      started = true
+      options?.onStart?.()
+    }
+  }
+
+  try {
+    await beginSpeak(text, wrappedOptions).play()
+    return { providerUsed: provider }
+  } catch (error) {
+    if (provider === 'system' || started || options?.shouldCancel?.()) throw error
+    console.warn(`[voice] ${provider} TTS failed; falling back to the system voice`, error)
+    await beginSpeak(text, { ...wrappedOptions, provider: 'system', append: false }).play()
+    return {
+      providerUsed: 'system',
+      fallbackFrom: provider,
+      fallbackReason: unwrapIpcError(error).message
+    }
+  }
 }
 
 export function stopSpeaking(): void {
@@ -509,30 +814,75 @@ export function stopSpeaking(): void {
   }
 }
 
+type NeuralPartResult =
+  | { ok: true; base64: string }
+  | { ok: false; error: unknown }
+
+type NeuralPartsResult =
+  | { ok: true; parts: Promise<NeuralPartResult>[] }
+  | { ok: false; error: Error }
+
 /**
- * Streamed replies: synth starts on enqueue; clips are scheduled on a shared
- * AudioContext timeline so sentence N+1 abuts N with no HTMLAudio dead air.
+ * Streamed replies: each enqueue kicks off synthesis immediately. Clips are
+ * scheduled onto a shared AudioContext timeline in order so sentence N plays
+ * while N+1 (already fetching) finishes synth and abuts without dead air.
  */
 export class StreamingTtsQueue {
   private scheduleChain: Promise<void> = Promise.resolve()
   private playbackEnds: Promise<void>[] = []
   private started = false
+  private enqueued = 0
+  private queuedText: string[] = []
   private generation = 0
   private shouldCancel: () => boolean = () => false
   private onFirstStart: (() => void) | null = null
+  private onFallback: ((error: Error) => void) | null = null
+  private firstFailure: Error | null = null
+  private failedPieceIndex: number | null = null
+  private fallbackUsed = false
+  private neuralEnqueued = false
 
-  reset(opts?: { shouldCancel?: () => boolean; onFirstStart?: () => void }): void {
+  reset(opts?: {
+    shouldCancel?: () => boolean
+    onFirstStart?: () => void
+    onFallback?: (error: Error) => void
+  }): void {
     stopSpeaking()
     this.generation = speakGeneration
     this.scheduleChain = Promise.resolve()
     this.playbackEnds = []
     this.started = false
+    this.enqueued = 0
+    this.queuedText = []
     this.shouldCancel = opts?.shouldCancel ?? (() => false)
     this.onFirstStart = opts?.onFirstStart ?? null
+    this.onFallback = opts?.onFallback ?? null
+    this.firstFailure = null
+    this.failedPieceIndex = null
+    this.fallbackUsed = false
+    this.neuralEnqueued = false
+  }
+
+  private rememberFailure(
+    error: unknown,
+    generation = this.generation,
+    pieceIndex?: number
+  ): Error {
+    const normalized = unwrapIpcError(error)
+    if (isCurrentVoiceGeneration(generation, this.generation, speakGeneration)) {
+      this.firstFailure ||= normalized
+      if (pieceIndex != null) {
+        this.failedPieceIndex =
+          this.failedPieceIndex == null
+            ? pieceIndex
+            : Math.min(this.failedPieceIndex, pieceIndex)
+      }
+    }
+    return normalized
   }
 
   enqueue(text: string): void {
-    const piece = text.replace(/\s+/g, ' ').trim()
+    const piece = stripMarkdownForSpeech(text).replace(/\s+/g, ' ').trim()
     if (!piece) return
     if (this.shouldCancel()) return
 
@@ -540,62 +890,105 @@ export class StreamingTtsQueue {
     const settings = useAlbertStore.getState().settings
     const provider = settings.ttsProvider || 'system'
     const cancelled = (): boolean => this.shouldCancel() || gen !== speakGeneration
+    const append = this.enqueued > 0
+    const pieceIndex = this.queuedText.length
+    this.enqueued += 1
+    this.queuedText.push(piece)
 
     const announce = (): void => {
+      if (gen !== this.generation || gen !== speakGeneration) return
       if (this.started) return
       this.started = true
       this.onFirstStart?.()
     }
 
-    // System voice: no Web Audio buffers — keep sequential utterance play
+    // System voice: queue native utterances (no Web Audio). Still feed ASAP.
     if (provider === 'system') {
       this.scheduleChain = this.scheduleChain
         .then(async () => {
           if (cancelled()) return
+          if (this.failedPieceIndex != null && pieceIndex > this.failedPieceIndex) return
           await speakSystem(chunkForSystemTts(piece), {
             shouldCancel: cancelled,
-            onStart: announce
+            onStart: announce,
+            append
           })
         })
-        .catch(() => undefined)
+        .catch((error) => {
+          this.rememberFailure(error, gen, pieceIndex)
+        })
       return
     }
 
-    // Neural: start synth immediately; schedule onto gapless timeline in order
-    const synthPromise = synthesizeNeuralParts(
+    this.neuralEnqueued = true
+
+    // Neural: fire IPC synth NOW (overlaps prior sentence playback).
+    // scheduleChain only orders decode/schedule — it must not await playback end.
+    const audioParts: Promise<NeuralPartsResult> = synthesizeNeuralParts(
       piece,
       provider === 'elevenlabs' ? 'elevenlabs' : 'kokoro'
-    ).catch((err) => {
-      throw unwrapIpcError(err)
-    })
+    ).then(
+      ({ parts }) => ({
+        ok: true as const,
+        parts: parts.map((part) =>
+          part.then<NeuralPartResult, NeuralPartResult>(
+            (base64) => ({ ok: true, base64 }),
+            (error) => ({ ok: false, error })
+          )
+        )
+      }),
+      (error) => ({
+        ok: false as const,
+        error: this.rememberFailure(error, gen, pieceIndex)
+      })
+    )
 
     this.scheduleChain = this.scheduleChain
       .then(async () => {
         if (cancelled()) return
-        let parts: Promise<string>[]
-        try {
-          ;({ parts } = await synthPromise)
-        } catch {
-          return
-        }
-        for (const part of parts) {
+        const synthesis = await audioParts
+        if (!synthesis.ok) return
+        if (this.failedPieceIndex != null && pieceIndex > this.failedPieceIndex) return
+        for (const part of synthesis.parts) {
           if (cancelled()) return
-          let base64: string
+          let partResult: NeuralPartResult
           try {
-            base64 = await part
-          } catch {
-            return
+            partResult = await withTimeout(
+              part,
+              NEURAL_TTS_TIMEOUT_MS,
+              'Neural voice synthesis'
+            )
+          } catch (error) {
+            this.rememberFailure(error, gen, pieceIndex)
+            break
+          }
+          if (!partResult.ok) {
+            this.rememberFailure(partResult.error, gen, pieceIndex)
+            break
           }
           if (cancelled()) return
           try {
-            const { ended } = await scheduleGaplessBase64(base64, {
+            // Resolves when scheduled onto the timeline — not when audio ends
+            const { ended } = await scheduleGaplessBase64(partResult.base64, {
               shouldCancel: cancelled,
               generation: gen,
-              onStart: announce
+              onStart: () => {
+                if (gen !== this.generation || gen !== speakGeneration) return
+                announce()
+              }
             })
-            this.playbackEnds.push(ended)
-          } catch {
-            return
+            this.playbackEnds.push(
+              ended.catch((error) => {
+                const recorded = this.rememberFailure(error, gen, pieceIndex)
+                if (gen === this.generation && gen === speakGeneration) {
+                  console.warn('[voice] Neural playback failed; stopping queued clips', recorded)
+                  stopGaplessPlayback()
+                }
+              })
+            )
+          } catch (error) {
+            this.rememberFailure(error, gen, pieceIndex)
+            break
           }
         }
       })
@@ -606,8 +999,82 @@ export class StreamingTtsQueue {
     return this.started
   }
 
+  get usedFallback(): boolean {
+    return this.fallbackUsed
+  }
+
   async flush(): Promise<void> {
-    await this.scheduleChain.catch(() => undefined)
-    await Promise.all(this.playbackEnds.map((p) => p.catch(() => undefined)))
+    const gen = this.generation
+    const scheduleChain = this.scheduleChain
+    await scheduleChain.catch(() => undefined)
+    if (gen !== this.generation || gen !== speakGeneration) return
+    const playbackEnds = [...this.playbackEnds]
+    await Promise.all(playbackEnds)
+    if (gen !== this.generation || gen !== speakGeneration) return
+
+    // The old queue swallowed every synth/decode/playback error. That exactly
+    // produced “assistant text exists, UI is listening, Albert says nothing.”
+    // If no neural audio ever began, speak the whole reply through the local
+    // system voice instead of silently discarding it.
+    if (shouldUseSystemTtsFallback({
+      enqueued: this.enqueued,
+      neuralEnqueued: this.neuralEnqueued,
+      started: this.started,
+      cancelled: this.shouldCancel(),
+      generationCurrent: this.generation === speakGeneration
+    })) {
+      const fallbackText = this.queuedText.join(' ').trim()
+      if (!fallbackText) return
+      const failure = this.firstFailure || new Error('Neural voice returned no playable audio')
+      this.fallbackUsed = true
+      console.warn('[voice] Streamed neural TTS failed; using the system voice', failure)
+      await speakSystem(chunkForSystemTts(fallbackText), {
+        shouldCancel: this.shouldCancel,
+        onStart: () => {
+          if (gen !== this.generation || gen !== speakGeneration) return
+          if (!this.started) {
+            this.started = true
+            this.onFirstStart?.()
+          }
+          this.onFallback?.(failure)
+        }
+      })
+      return
+    }
+
+    // If an early sentence played but a later one could not synthesize or
+    // render, recover only the unsaid tail through native speech. Repeating
+    // the whole reply would sound like Albert started over mid-conversation.
+    if (
+      this.firstFailure &&
+      this.started &&
+      this.neuralEnqueued &&
+      !this.shouldCancel() &&
+      this.generation === speakGeneration
+    ) {
+      const unsaidTail = ttsRecoveryTail(this.queuedText, this.failedPieceIndex)
+      if (unsaidTail) {
+        const failure = this.firstFailure
+        this.fallbackUsed = true
+        await speakSystem(chunkForSystemTts(unsaidTail), {
+          shouldCancel: this.shouldCancel,
+          onStart: () => {
+            if (gen !== this.generation || gen !== speakGeneration) return
+            this.onFallback?.(failure)
+          }
+        })
+        return
+      }
+    }
+
+    // A native-voice failure or a partial neural reply must remain visible.
+    // Never turn a truncated/silent output into an apparently healthy turn.
+    if (
+      this.firstFailure &&
+      !this.shouldCancel() &&
+      this.generation === speakGeneration
+    ) {
+      throw this.firstFailure
+    }
   }
 }

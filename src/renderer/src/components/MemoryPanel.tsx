@@ -14,6 +14,7 @@ export function MemoryPanel(): React.JSX.Element {
 
   useEffect(() => {
     void refresh()
+    return window.albert.onMemoryChanged(() => void refresh())
   }, [])
 
   async function onDelete(id: string): Promise<void> {
@@ -61,6 +62,11 @@ export function MemoryPanel(): React.JSX.Element {
                   </button>
                 </div>
               </header>
+              <div className="memory-provenance">
+                <span>SOURCE {m.source || 'conversation'}</span>
+                <span>CONFIDENCE {Math.round((m.confidence ?? 1) * 100)}%</span>
+                <span>{m.lastUsedAt ? `USED ${new Date(m.lastUsedAt).toLocaleDateString()}` : 'NOT YET RECALLED'}</span>
+              </div>
               {editingId === m.id ? (
                 <div style={{ display: 'grid', gap: 8 }}>
                   <textarea

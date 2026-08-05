@@ -32,8 +32,22 @@ export function parsePairInfo(raw: string): { macBaseUrl?: string; macToken?: st
 }
 
 export function normalizeMacUrl(url: string): string {
-  let u = url.trim().replace(/\/+$/, '')
-  if (!u) return ''
-  if (!/^https?:\/\//i.test(u)) u = `http://${u}`
-  return u
+  let input = url.trim()
+  if (!input) return ''
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(input)) input = `http://${input}`
+  let parsed: URL
+  try {
+    parsed = new URL(input)
+  } catch {
+    throw new Error('Enter a valid Mac companion address')
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Mac companion addresses must use http:// or https://')
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('Do not place credentials in the Mac companion URL')
+  }
+  if (!parsed.hostname) throw new Error('Mac companion address is missing a host')
+  // Sync endpoints are fixed and credentials belong only in Authorization headers.
+  return `${parsed.protocol}//${parsed.host}`
 }

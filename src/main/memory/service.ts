@@ -198,7 +198,8 @@ export async function rememberFact(content: string, category = 'general'): Promi
 export function listMemories(): MemoryFact[] {
   return getDb()
     .prepare(
-      `SELECT id, content, category, created_at as createdAt, updated_at as updatedAt
+      `SELECT id, content, category, source, confidence, last_used_at as lastUsedAt,
+              expires_at as expiresAt, created_at as createdAt, updated_at as updatedAt
        FROM memories ORDER BY updated_at DESC`
     )
     .all() as MemoryFact[]
@@ -328,10 +329,11 @@ export function updateMemory(id: string, content: string, category?: string): Me
 export async function recallMemories(query: string, limit = 6): Promise<MemoryFact[]> {
   const rows = getDb()
     .prepare(
-      `SELECT id, content, category, embedding, created_at as createdAt, updated_at as updatedAt
-       FROM memories`
+      `SELECT id, content, category, embedding, source, confidence, last_used_at as lastUsedAt,
+              expires_at as expiresAt, created_at as createdAt, updated_at as updatedAt
+       FROM memories WHERE expires_at IS NULL OR expires_at > ?`
     )
-    .all() as Array<MemoryFact & { embedding: string | null }>
+    .all(Date.now()) as Array<MemoryFact & { embedding: string | null }>
 
   if (rows.length === 0) return []
 
@@ -339,10 +341,12 @@ export async function recallMemories(query: string, limit = 6): Promise<MemoryFa
 
   if (!queryVec) {
     const q = query.toLowerCase()
-    return rows
+    const matches = rows
       .filter((r) => r.content.toLowerCase().includes(q))
       .slice(0, limit)
       .map(({ embedding: _e, ...rest }) => rest)
+    if (matches.length) getDb().prepare(`UPDATE memories SET last_used_at=? WHERE id IN (${matches.map(() => '?').join(',')})`).run(Date.now(), ...matches.map((m) => m.id))
+    return matches
   }
 
   const scored = rows
@@ -354,7 +358,9 @@ export async function recallMemories(query: string, limit = 6): Promise<MemoryFa
     })
     .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
 
-  return scored.filter((s) => (s.score ?? 0) > 0.25).slice(0, limit)
+  const matches = scored.filter((s) => (s.score ?? 0) > 0.25).slice(0, limit)
+  if (matches.length) getDb().prepare(`UPDATE memories SET last_used_at=? WHERE id IN (${matches.map(() => '?').join(',')})`).run(Date.now(), ...matches.map((m) => m.id))
+  return matches
 }
 
 export function logActivity(

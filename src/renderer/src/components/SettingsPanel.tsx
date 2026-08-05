@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   CLAUDE_DASHBOARD_URL,
+  DEFAULT_GROQ_MODEL,
   DEFAULT_PERSONALITY,
   PERSONALITY_META,
   type AlbertSettings,
@@ -12,6 +13,7 @@ import {
 } from '../../../shared/types'
 import { normalizePersonality } from '../../../shared/personality'
 import { APP_NAME } from '../../../shared/brand'
+import { groqTransitionWindowOpen } from '../../../shared/groqModels'
 import { useAlbertStore } from '../store'
 import { listTtsVoices, speakText, stopSpeaking } from '../voice/tts'
 
@@ -47,22 +49,28 @@ const MODEL_OPTIONS = [
   'claude-opus-5'
 ]
 
-const OLLAMA_MODEL_OPTIONS = [
-  'llama3.2',
-  'llama3.1',
-  'qwen2.5',
-  'mistral',
-  'gpt-oss:20b',
-  'gpt-oss:120b'
+const OLLAMA_MODEL_OPTIONS: Array<{ id: string; label: string; disabled?: boolean }> = [
+  { id: 'qwen3.5:4b', label: 'qwen3.5:4b — recommended · ~3.4GB' },
+  { id: 'qwen3.5:9b', label: 'qwen3.5:9b — stronger, slower · ~6.6GB' },
+  { id: 'llama3.1:8b', label: 'llama3.1:8b — solid 8B baseline' },
+  { id: 'llama3.2:3b', label: 'llama3.2:3b' },
+  { id: 'llama3.2:1b', label: 'llama3.2:1b — smallest/fastest' },
+  { id: 'qwen2.5:7b', label: 'qwen2.5:7b' },
+  { id: 'mistral', label: 'mistral' },
+  { id: 'gpt-oss:20b', label: 'gpt-oss:20b — ~14GB; not recommended on 16GB' },
+  { id: 'gpt-oss:120b', label: 'gpt-oss:120b — unsuitable on this 16GB Mac', disabled: true }
 ]
 
 const GROQ_MODEL_OPTIONS = [
-  { id: 'llama-3.1-8b-instant', label: 'Llama 3.1 8B Instant — fastest, highest free daily cap' },
-  { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B — stronger, ~1k req/day free' },
-  { id: 'openai/gpt-oss-20b', label: 'GPT-OSS 20B' },
-  { id: 'openai/gpt-oss-120b', label: 'GPT-OSS 120B' },
-  { id: 'qwen/qwen3.6-27b', label: 'Qwen 3.6 27B' },
-  { id: 'meta-llama/llama-4-scout-17b-16e-instruct', label: 'Llama 4 Scout 17B' }
+  { id: 'openai/gpt-oss-20b', label: 'GPT-OSS 20B — recommended · ~1,000 tok/s' },
+  { id: 'openai/gpt-oss-120b', label: 'GPT-OSS 120B — stronger reasoning' },
+  { id: 'qwen/qwen3.6-27b', label: 'Qwen 3.6 27B — preview; availability may change' },
+  ...(groqTransitionWindowOpen()
+    ? [
+        { id: 'llama-3.1-8b-instant', label: 'Llama 3.1 8B — temporary bridge · retires Aug 16' },
+        { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B — temporary bridge · retires Aug 16' }
+      ]
+    : [])
 ]
 
 const PERSONALITY_KEYS = Object.keys(PERSONALITY_META) as PersonalityKey[]
@@ -72,6 +80,15 @@ type CompanionStatus = {
   port: number | null
   token: string
   urls: string[]
+  protocolVersion: number
+  devices: Array<{
+    id: string
+    name: string
+    scopes: string[]
+    createdAt: number
+    lastSeenAt: number
+    revokedAt?: number
+  }>
 }
 
 export function SettingsPanel(): React.JSX.Element {
@@ -188,7 +205,7 @@ export function SettingsPanel(): React.JSX.Element {
       ...urls.map((u) => `  ${u}`),
       `Token: ${token}`,
       ``,
-      `On phone: PAIR → Paste pair info → Test sync.`,
+      `On phone: SYSTEMS → Mac Link → Paste pair info → Enroll & sync.`,
       `iOS Simulator: use http://127.0.0.1:${form.companionPort || 47831}`
     ].join('\n')
     try {
@@ -213,6 +230,15 @@ export function SettingsPanel(): React.JSX.Element {
     }
   }
 
+  async function revokePhone(deviceId: string): Promise<void> {
+    try {
+      await window.albert.revokeCompanionDevice(deviceId)
+      await refreshCompanion()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   useEffect(() => {
     return window.albert.onKokoroProgress((p) => {
       if (p.message) setKokoroStatus(p.message)
@@ -227,7 +253,7 @@ export function SettingsPanel(): React.JSX.Element {
       setKokoroStatus('Starting Kokoro (first run downloads ~80–100MB)…')
     }
     try {
-      await speakText(`${APP_NAME} online. Systems nominal. How can I help you?`, {
+      const result = await speakText(`${APP_NAME} online. Systems nominal. How can I help you?`, {
         provider: form.ttsProvider || 'system',
         apiKey: form.elevenLabsApiKey,
         voiceId:
@@ -235,7 +261,13 @@ export function SettingsPanel(): React.JSX.Element {
             ? form.kokoroVoiceId || 'am_michael'
             : form.elevenLabsVoiceId
       })
-      if (form.ttsProvider === 'kokoro') setKokoroStatus('Kokoro preview OK')
+      if (form.ttsProvider === 'kokoro') {
+        setKokoroStatus(
+          result.fallbackFrom
+            ? `Kokoro failed · system fallback verified · ${result.fallbackReason || 'unknown error'}`
+            : 'Kokoro synthesis + playback verified'
+        )
+      }
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err)
       const nested = raw.match(/Error invoking remote method[^:]+: Error: ([\s\S]+)$/)
@@ -263,8 +295,8 @@ export function SettingsPanel(): React.JSX.Element {
           <div>
             <h2 className="section-title">Systems</h2>
             <p className="section-sub">
-              Changes save automatically. Auto-routing: LOCAL (Ollama/Groq) → Haiku → Opus — or lock via the
-              sidebar. Voice can use macOS speech or ElevenLabs.
+              Changes save automatically. Auto-routing: QUICK (Ollama/Groq Cloud) → Haiku → Opus
+              — or lock via the sidebar. Voice can use Kokoro, macOS speech, or ElevenLabs.
             </p>
           </div>
           <span className="hud-label" style={{ whiteSpace: 'nowrap' }}>
@@ -300,7 +332,7 @@ export function SettingsPanel(): React.JSX.Element {
               }
             >
               <option value="auto">auto — cheap by default, Opus when needed</option>
-              <option value="local">local only — always LOCAL provider (Groq or Ollama)</option>
+              <option value="local">quick only — always the configured Groq/Ollama provider</option>
               <option value="fast">fast only — always Haiku</option>
               <option value="power">power only — always Opus</option>
             </select>
@@ -499,6 +531,43 @@ export function SettingsPanel(): React.JSX.Element {
             Performance mode (cut HUD GPU animations — recommended)
           </label>
 
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={form.startupAnimationEnabled !== false}
+              onChange={(e) => setForm({ ...form, startupAnimationEnabled: e.target.checked })}
+            />
+            Cinematic startup sequence (plays once when Albert launches)
+          </label>
+          <div>
+            <button
+              className="btn ghost"
+              type="button"
+              disabled={form.startupAnimationEnabled === false}
+              onClick={() => window.dispatchEvent(new CustomEvent('albert:replay-startup'))}
+            >
+              Replay startup sequence
+            </button>
+          </div>
+
+          <div className="field">
+            <label htmlFor="hudDensity">HUD density</label>
+            <select
+              id="hudDensity"
+              value={form.hudDensity || 'cinematic'}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  hudDensity: e.target.value as AlbertSettings['hudDensity']
+                })
+              }
+            >
+              <option value="minimal">Minimal — essential status only</option>
+              <option value="balanced">Balanced — status and context</option>
+              <option value="cinematic">Cinematic — full Jarvis instrumentation</option>
+            </select>
+          </div>
+
           <div className="field">
             <label htmlFor="openaiApiKey">OpenAI API key (optional embeddings)</label>
             <input
@@ -511,12 +580,12 @@ export function SettingsPanel(): React.JSX.Element {
             />
           </div>
           <h3 className="section-title" style={{ marginTop: '1.5rem', fontSize: '1rem' }}>
-            LOCAL brain provider
+            QUICK brain provider
           </h3>
           <p className="section-sub">
-            Casual Auto routes and the LOCAL lock use this provider. Groq is free with rate limits
-            (typically ~30 req/min; daily caps vary by model — 8B Instant is the most generous).
-            Get a key at console.groq.com/keys. Ollama stays available for cloud/local daemon.
+            Casual Auto routes and the QUICK lock use this provider. Groq is free cloud inference
+            with rate limits; Ollama can run in its cloud or genuinely on-device. Get a key at
+            console.groq.com/keys.
           </p>
           <div className="field">
             <label htmlFor="localProvider">Provider</label>
@@ -549,7 +618,7 @@ export function SettingsPanel(): React.JSX.Element {
                 <label htmlFor="groqModel">Groq model</label>
                 <select
                   id="groqModel"
-                  value={form.groqModel || 'llama-3.1-8b-instant'}
+                  value={form.groqModel || DEFAULT_GROQ_MODEL}
                   onChange={(e) => setForm({ ...form, groqModel: e.target.value })}
                 >
                   {GROQ_MODEL_OPTIONS.map((m) => (
@@ -559,6 +628,14 @@ export function SettingsPanel(): React.JSX.Element {
                   ))}
                 </select>
               </div>
+              <p className="section-sub">
+                Groq retires both Llama transition models on August 16, 2026. Enable GPT-OSS 20B,
+                GPT-OSS 120B, or Qwen 3.6 in your{' '}
+                <a href="https://console.groq.com/settings/limits" target="_blank" rel="noreferrer">
+                  Groq organization limits
+                </a>{' '}
+                before then. Albert will fail over only to models your organization permits.
+              </p>
               <button
                 type="button"
                 className="btn ghost"
@@ -577,7 +654,7 @@ export function SettingsPanel(): React.JSX.Element {
             <>
               <p className="section-sub">
                 With an API key + Endpoint Auto, Albert uses Ollama Cloud. Start `ollama serve` and
-                set Endpoint to local for true offline LOCAL.
+                set Endpoint to local for true offline, on-device inference.
               </p>
               <div className="field">
                 <label htmlFor="ollamaApiKey">Ollama API key</label>
@@ -594,12 +671,12 @@ export function SettingsPanel(): React.JSX.Element {
                 <label htmlFor="localModel">Ollama model</label>
                 <select
                   id="localModel"
-                  value={form.localModel || 'llama3.2'}
+                  value={form.localModel || 'qwen3.5:4b'}
                   onChange={(e) => setForm({ ...form, localModel: e.target.value })}
                 >
                   {OLLAMA_MODEL_OPTIONS.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
+                    <option key={m.id} value={m.id} disabled={m.disabled}>
+                      {m.label}
                     </option>
                   ))}
                 </select>
@@ -618,18 +695,42 @@ export function SettingsPanel(): React.JSX.Element {
                   <option value="local">Local (localhost:11434)</option>
                 </select>
               </div>
-              <button
-                type="button"
-                className="btn ghost"
-                onClick={() => {
-                  void (async () => {
-                    const r = await window.albert.probeOllama()
-                    setOllamaStatus(r.ok ? `OK · ${r.mode} · ${r.detail}` : `Fail · ${r.detail}`)
-                  })()
-                }}
-              >
-                Test Ollama connection
-              </button>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  onClick={() => {
+                    void (async () => {
+                      const r = await window.albert.probeOllama()
+                      setOllamaStatus(r.ok ? `OK · ${r.mode} · ${r.detail}` : `Fail · ${r.detail}`)
+                    })()
+                  }}
+                >
+                  Test Ollama connection
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  onClick={() => {
+                    void (async () => {
+                      const model = form.localModel || 'qwen3.5:4b'
+                      // Pull always hits localhost — force Local in settings so chat matches
+                      if (form.ollamaEndpoint !== 'local') {
+                        setForm({ ...form, ollamaEndpoint: 'local' })
+                      }
+                      setOllamaStatus(`Pulling ${model} into local Ollama… (keep the app open)`)
+                      const r = await window.albert.pullOllamaModel(model)
+                      setOllamaStatus(r.ok ? `OK · ${r.detail}` : `Fail · ${r.detail}`)
+                    })()
+                  }}
+                >
+                  Pull model (local)
+                </button>
+              </div>
+              <p className="section-sub">
+                For qwen3.5:4b: set Endpoint to Local, then Pull model. It is the recommended
+                on-device balance for a 16GB Mac; keep context modest for responsive voice turns.
+              </p>
               {ollamaStatus ? <p className="section-sub">{ollamaStatus}</p> : null}
             </>
           )}
@@ -812,7 +913,7 @@ export function SettingsPanel(): React.JSX.Element {
             <label htmlFor="companionToken">Pairing token</label>
             <input
               id="companionToken"
-              type="text"
+              type="password"
               value={form.companionToken || companion?.token || ''}
               onChange={(e) => setForm({ ...form, companionToken: e.target.value })}
               placeholder="Generated on first enable"
@@ -848,6 +949,21 @@ export function SettingsPanel(): React.JSX.Element {
               Refresh status
             </button>
           </div>
+          {companion?.devices?.some((device) => !device.revokedAt) ? (
+            <div className="companion-status" aria-label="Enrolled mobile devices">
+              <span className="hud-label">Enrolled phones · protocol v{companion.protocolVersion}</span>
+              <ul className="companion-urls">
+                {companion.devices.filter((device) => !device.revokedAt).map((device) => (
+                  <li key={device.id}>
+                    <span>{device.name} · seen {new Date(device.lastSeenAt).toLocaleString()}</span>{' '}
+                    <button className="btn ghost" type="button" onClick={() => void revokePhone(device.id)}>
+                      Revoke
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
       </div>
     </section>

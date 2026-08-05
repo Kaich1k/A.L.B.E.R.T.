@@ -2,46 +2,48 @@ import type { ExpoConfig } from 'expo/config'
 
 const config: ExpoConfig = {
   name: 'A.L.B.E.R.T.',
-  slug: 'albert-companion',
-  version: '1.0.0',
-  orientation: 'portrait',
+  slug: 'albert',
+  owner: 'kaichik',
+  description: 'A private, voice-first AI companion with optional two-way Mac synchronization.',
+  version: '1.1.0',
+  platforms: ['ios', 'android'],
+  orientation: 'default',
   icon: './assets/icon.png',
   userInterfaceStyle: 'dark',
   scheme: 'albert',
   ios: {
     supportsTablet: true,
-    bundleIdentifier: 'com.kai.albert.companion',
-    buildNumber: '1',
+    bundleIdentifier: 'com.kaichik.albert',
+    buildNumber: '2',
     infoPlist: {
       NSMicrophoneUsageDescription:
-        'A.L.B.E.R.T. needs the microphone for wake, voice chat, and mute.',
+        'A.L.B.E.R.T. uses the microphone for wake phrases, voice commands, and conversations while the app is active.',
       NSSpeechRecognitionUsageDescription:
-        'A.L.B.E.R.T. uses on-device speech recognition for wake phrases and voice commands.',
+        'A.L.B.E.R.T. converts your speech to text for wake phrases, voice commands, and conversations.',
       NSLocalNetworkUsageDescription:
-        'A.L.B.E.R.T. connects to your Mac on the local network to sync Comm and memories.',
+        'A.L.B.E.R.T. connects to your Mac on the local network to sync Comm, memory, Operations, approvals, captures, and activity.',
       NSAppTransportSecurity: {
         NSAllowsLocalNetworking: true,
-        NSAllowsArbitraryLoads: true
+        NSAllowsArbitraryLoads: false
       }
-    }
+    },
+    config: { usesNonExemptEncryption: false }
   },
   android: {
-    package: 'com.kai.albert.companion',
+    package: 'com.kaichik.albert',
+    versionCode: 2,
     adaptiveIcon: {
       foregroundImage: './assets/adaptive-icon.png',
       backgroundColor: '#000000'
-    },
-    permissions: ['RECORD_AUDIO']
-  },
-  web: {
-    favicon: './assets/favicon.png'
+    }
   },
   extra: {
     eas: {
-      projectId: process.env.EAS_PROJECT_ID || undefined
+      projectId: process.env.EAS_PROJECT_ID || '3b312788-2ec0-45da-83d7-e88014d9c9ef'
     }
   },
   plugins: [
+    './plugins/with-local-network',
     'expo-secure-store',
     'expo-font',
     'expo-asset',
@@ -49,9 +51,19 @@ const config: ExpoConfig = {
       'expo-speech-recognition',
       {
         microphonePermission:
-          'A.L.B.E.R.T. needs the microphone for wake, voice chat, and mute.',
+          'A.L.B.E.R.T. uses the microphone for wake phrases, voice commands, and conversations while the app is active.',
         speechRecognitionPermission:
-          'A.L.B.E.R.T. uses speech recognition for wake phrases and voice commands.'
+          'A.L.B.E.R.T. converts your speech to text for wake phrases, voice commands, and conversations.'
+      }
+    ],
+    [
+      'expo-splash-screen',
+      {
+        image: './assets/splash-icon.png',
+        imageWidth: 180,
+        resizeMode: 'contain',
+        backgroundColor: '#000000',
+        dark: { backgroundColor: '#000000' }
       }
     ]
   ]

@@ -1,5 +1,11 @@
 import { getSettings, setSettings } from '../config'
-import type { LocalProvider, ModelTier, RoutingMode } from '../../shared/types'
+import {
+  DEFAULT_GROQ_MODEL,
+  DEFAULT_SETTINGS,
+  type LocalProvider,
+  type ModelTier,
+  type RoutingMode
+} from '../../shared/types'
 
 const POWER_HINTS =
   /\b(opus|think hard|be thorough|deep dive|architect|refactor|implement|debug|troubleshoot|analyse|analyze|design system|codebase|pull request|\bpr\b|unit test|typeerror|stack trace|optimize|migrate|rewrite|complex|multi[- ]step|step by step|plan out|from scratch|self-?edit|god mode)\b/i
@@ -15,7 +21,7 @@ const EXPLICIT_POWER =
 const EXPLICIT_FAST =
   /\b(use haiku|switch to haiku|haiku mode|mid mode)\b/i
 const EXPLICIT_LOCAL =
-  /\b(use (ollama|local|groq)|switch to (ollama|local|groq)|local mode|ollama mode|groq mode|cheap mode|keep it (cheap|local))\b/i
+  /\b(use (ollama|local|groq|quick)|switch to (ollama|local|groq|quick)|local mode|quick mode|ollama mode|groq mode|cheap mode|keep it (cheap|local|quick))\b/i
 const EXPLICIT_AUTO = /\b(auto mode|auto routing|unlock routing)\b/i
 const EXPLICIT_GROQ_PROVIDER = /\b(use groq|switch to groq|groq mode)\b/i
 const EXPLICIT_OLLAMA_PROVIDER = /\b(use ollama|switch to ollama|ollama mode)\b/i
@@ -31,16 +37,16 @@ function resolveLocalRoute(locked: boolean): {
   if (provider === 'groq') {
     return {
       tier: 'local',
-      model: settings.groqModel || 'llama-3.1-8b-instant',
+      model: settings.groqModel || DEFAULT_GROQ_MODEL,
       provider: 'groq',
-      reason: locked ? 'Locked to Groq (LOCAL)' : 'Routing locked to Groq (LOCAL)'
+      reason: locked ? 'Locked to Groq Cloud (QUICK)' : 'Routing locked to Groq Cloud (QUICK)'
     }
   }
   return {
     tier: 'local',
-    model: settings.localModel || 'llama3.2',
+    model: settings.localModel || DEFAULT_SETTINGS.localModel,
     provider: 'ollama',
-    reason: locked ? 'Locked to Ollama (LOCAL)' : 'Routing locked to Ollama (LOCAL)'
+    reason: locked ? 'Locked to Ollama (QUICK)' : 'Routing locked to Ollama (QUICK)'
   }
 }
 
@@ -113,15 +119,15 @@ export function selectModelTier(
       reason:
         locked === 'local'
           ? local.provider === 'groq'
-            ? 'Locked to Groq (LOCAL)'
-            : 'Locked to Ollama (LOCAL)'
+            ? 'Locked to Groq Cloud (QUICK)'
+            : 'Locked to Ollama (QUICK)'
           : local.provider === 'groq'
-            ? 'Routing locked to Groq (LOCAL)'
-            : 'Routing locked to Ollama (LOCAL)'
+            ? 'Routing locked to Groq Cloud (QUICK)'
+            : 'Routing locked to Ollama (QUICK)'
     }
   }
 
-  // auto: images → Haiku vision (LOCAL vision is best-effort)
+  // auto: images → Haiku vision (QUICK-provider vision is best-effort)
   if (opts?.hasImages) {
     return {
       tier: 'fast',
@@ -131,7 +137,7 @@ export function selectModelTier(
     }
   }
 
-  // auto: LOCAL → Haiku → Opus
+  // auto: QUICK → Haiku → Opus
   if (text.length > 450 || text.split('\n').length > 8) {
     return {
       tier: 'power',
@@ -179,7 +185,9 @@ export function selectModelTier(
     return {
       ...local,
       reason:
-        local.provider === 'groq' ? 'Casual chat → Groq (LOCAL)' : 'Casual chat → Ollama (LOCAL)'
+        local.provider === 'groq'
+          ? 'Casual chat → Groq Cloud (QUICK)'
+          : 'Casual chat → Ollama (QUICK)'
     }
   }
 

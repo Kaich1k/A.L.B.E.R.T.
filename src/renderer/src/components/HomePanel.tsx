@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { APP_EXPANSION, APP_NAME } from '../../../shared/brand'
+import type { OperationsSnapshot } from '../../../shared/types'
 import { useAlbertStore } from '../store'
+import { AlbertCore } from './AlbertCore'
 
 interface Props {
   onTalk: () => void
@@ -17,7 +19,7 @@ function brainLabel(settings: {
 }): string {
   const mode = settings.routingMode || 'auto'
   if (mode === 'local') {
-    return settings.localProvider === 'groq' ? 'LOCAL·GROQ' : 'LOCAL·OLLAMA'
+    return settings.localProvider === 'groq' ? 'QUICK·GROQ CLOUD' : 'QUICK·OLLAMA'
   }
   if (mode === 'fast') return 'HAIKU'
   if (mode === 'power') return 'OPUS'
@@ -40,13 +42,16 @@ export function HomePanel({ onTalk }: Props): React.JSX.Element {
   const memories = useAlbertStore((s) => s.memories)
   const setMemories = useAlbertStore((s) => s.setMemories)
   const routeInfo = useAlbertStore((s) => s.routeInfo)
+  const activity = useAlbertStore((s) => s.activity)
   const hasBrain = Boolean(
     settings.anthropicApiKey?.trim() ||
       settings.ollamaApiKey?.trim() ||
-      settings.groqApiKey?.trim()
+      settings.groqApiKey?.trim() ||
+      settings.localProvider === 'ollama'
   )
   const wakeOn = settings.wakeWordEnabled !== false
   const [clock, setClock] = useState(() => formatHudClock(new Date()))
+  const [operations, setOperations] = useState<OperationsSnapshot | null>(null)
 
   useEffect(() => {
     const id = window.setInterval(() => setClock(formatHudClock(new Date())), 1000)
@@ -55,18 +60,11 @@ export function HomePanel({ onTalk }: Props): React.JSX.Element {
 
   useEffect(() => {
     void window.albert.listMemories().then(setMemories).catch(() => undefined)
+    void window.albert.getOperations().then(setOperations).catch(() => undefined)
+    return window.albert.onOperationsChanged(() => {
+      void window.albert.getOperations().then(setOperations).catch(() => undefined)
+    })
   }, [setMemories])
-
-  const coreClass = [
-    'orb',
-    'reactor-core',
-    voiceState === 'listening' ? 'listening' : '',
-    voiceState === 'speaking' ? 'speaking' : '',
-    voiceState === 'connecting' || voiceState === 'thinking' ? 'listening' : '',
-    voiceState === 'idle' && wakeArmed ? 'listening' : ''
-  ]
-    .filter(Boolean)
-    .join(' ')
 
   const brain = brainLabel(settings)
   const wakeValue = !wakeOn ? 'OFF' : wakeArmed ? 'ARMED' : 'ARMING'
@@ -81,6 +79,8 @@ export function HomePanel({ onTalk }: Props): React.JSX.Element {
         : 18
   const memCount = memories.length
   const tts = ttsLabel(settings.ttsProvider)
+  const hour = new Date().getHours()
+  const greeting = hour < 12 ? 'Good morning, sir.' : hour < 18 ? 'Good afternoon, sir.' : 'Good evening, sir.'
 
   return (
     <section className="panel hero jarvis-home">
@@ -91,7 +91,7 @@ export function HomePanel({ onTalk }: Props): React.JSX.Element {
         </div>
         <div className="jarvis-top-status">
           <span className={`jarvis-uplink ${hasBrain ? 'ok' : 'off'}`}>
-            {hasBrain ? 'UPLINK_SECURE' : 'UPLINK_OFFLINE'}
+            {hasBrain ? 'ROUTER_CONFIGURED' : 'ROUTER_OFFLINE'}
           </span>
           <span className="jarvis-clock">{clock}</span>
         </div>
@@ -102,23 +102,12 @@ export function HomePanel({ onTalk }: Props): React.JSX.Element {
         <aside className="jarvis-diag left">
           <div className="jarvis-diag-title">SYS_STATUS</div>
           <Meter label="BRAIN" value={brain} pct={hasBrain ? 100 : 20} />
-          <Meter label="CORE" value={hasBrain ? 'ONLINE' : 'OFFLINE'} pct={corePct} />
+          <Meter label="CORE" value={hasBrain ? 'CONFIGURED' : 'OFFLINE'} pct={corePct} />
           <Meter label="WAKE" value={wakeValue} pct={wakePct} />
         </aside>
 
         <div className="jarvis-reactor-slot">
-          <div className="reactor-wrap jarvis-reactor">
-            <div className="reactor-ring outer" />
-            <div className="reactor-ring mid" />
-            <div className="reactor-ring inner" />
-            <div className="reactor-ring ticks" />
-            <div className="reactor-crosshair" aria-hidden />
-            <div className="reactor-dot n" />
-            <div className="reactor-dot e" />
-            <div className="reactor-dot s" />
-            <div className="reactor-dot w" />
-            <div className={coreClass} aria-hidden />
-          </div>
+          <AlbertCore state={voiceState} wakeArmed={wakeArmed} fault={Boolean(error)} />
         </div>
 
         <aside className="jarvis-diag right">
@@ -136,11 +125,30 @@ export function HomePanel({ onTalk }: Props): React.JSX.Element {
       <div className="jarvis-brand-block">
         <h1 className="hero-brand">{APP_NAME}</h1>
         <p className="hero-expansion">{APP_EXPANSION}</p>
+        <p className="jarvis-greeting">{greeting} {hasBrain ? 'Cognitive routing is configured and standing by.' : 'The core is awaiting a brain connection.'}</p>
         {routeInfo ? <p className="jarvis-route-chip">{routeInfo}</p> : null}
       </div>
 
+      <div className="home-intel-deck">
+        <button type="button" onClick={() => setPanel('missions')}>
+          <span>PRIORITY OBJECTIVE</span>
+          <strong>{operations?.missions.find((m) => ['active', 'queued', 'approval'].includes(m.state))?.title || 'NO ACTIVE MISSION'}</strong>
+          <small>{operations?.missions.filter((m) => !['complete', 'cancelled'].includes(m.state)).length || 0} OPEN LOOPS</small>
+        </button>
+        <button type="button" onClick={() => setPanel('missions')}>
+          <span>DECISION QUEUE</span>
+          <strong>{operations?.approvals.filter((a) => a.state === 'pending').length || 0} AWAITING YOU</strong>
+          <small>HUMAN AUTHORITY RETAINED</small>
+        </button>
+        <button type="button" onClick={() => setPanel('activity')}>
+          <span>LAST OPERATION</span>
+          <strong>{activity[0]?.toolName?.replaceAll('_', ' ') || 'SYSTEM IDLE'}</strong>
+          <small>AUDIT TRAIL AVAILABLE</small>
+        </button>
+      </div>
+
       {error ? (
-        <div className="error-banner">
+        <div className="error-banner" role="alert">
           <div>{error}</div>
           <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => setError(null)}>
             Dismiss
@@ -198,7 +206,7 @@ export function HomePanel({ onTalk }: Props): React.JSX.Element {
                 ? 'Arming wake mic…'
                 : error
                   ? 'Fault logged — dismiss to continue'
-                  : 'All systems nominal · Engage or enable wake word'}
+                  : 'Interface ready · Engage or enable wake word'}
       </div>
     </section>
   )

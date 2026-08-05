@@ -23,6 +23,44 @@ export async function decodeBlobToMono16k(blob: Blob): Promise<Float32Array> {
   }
 }
 
+/**
+ * Remove the long quiet lead/tail produced by VAD-controlled MediaRecorder
+ * sessions while retaining a small natural pad around speech. Frame RMS is
+ * more robust than testing individual samples against background noise.
+ */
+export function trimSilence(
+  samples: Float32Array,
+  sampleRate = 16_000,
+  threshold = 0.008,
+  paddingMs = 180
+): Float32Array {
+  if (samples.length === 0) return samples
+  const frameSize = Math.max(1, Math.floor(sampleRate * 0.01))
+  let firstActive = -1
+  let lastActive = -1
+
+  for (let offset = 0; offset < samples.length; offset += frameSize) {
+    const end = Math.min(samples.length, offset + frameSize)
+    let sum = 0
+    for (let i = offset; i < end; i++) {
+      const value = samples[i]!
+      sum += value * value
+    }
+    const rms = Math.sqrt(sum / Math.max(1, end - offset))
+    if (rms >= threshold) {
+      if (firstActive < 0) firstActive = offset
+      lastActive = end
+    }
+  }
+
+  if (firstActive < 0 || lastActive <= firstActive) return samples
+  const pad = Math.floor(sampleRate * (paddingMs / 1000))
+  return samples.subarray(
+    Math.max(0, firstActive - pad),
+    Math.min(samples.length, lastActive + pad)
+  )
+}
+
 function mixToMono(buffer: AudioBuffer): Float32Array {
   const len = buffer.length
   const out = new Float32Array(len)

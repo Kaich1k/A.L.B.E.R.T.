@@ -193,6 +193,18 @@ export function getKokoroProgress(): ProgressPayload | null {
   return lastProgress
 }
 
+/** Serialize synth jobs — worker model isn't safe for parallel generate(). */
+let synthQueue: Promise<unknown> = Promise.resolve()
+
+function enqueueSynth<T>(fn: () => Promise<T>): Promise<T> {
+  const run = synthQueue.then(fn, fn)
+  synthQueue = run.then(
+    () => undefined,
+    () => undefined
+  )
+  return run
+}
+
 export async function synthesizeKokoro(
   text: string,
   overrides?: { voiceId?: string }
@@ -203,16 +215,18 @@ export async function synthesizeKokoro(
   const cleaned = text.replace(/\s+/g, ' ').trim().slice(0, 2500)
   if (!cleaned) throw new Error('Nothing to speak')
 
-  await ensureWorker()
-  const speed = Math.min(1.3, Math.max(0.7, settings.ttsRate || 1))
-  const base64 = await callWorker({
-    type: 'synthesize',
-    text: cleaned,
-    voice,
-    speed,
-    cacheDir: cacheDir()
+  return enqueueSynth(async () => {
+    await ensureWorker()
+    const speed = Math.min(1.3, Math.max(0.7, settings.ttsRate || 1))
+    const base64 = await callWorker({
+      type: 'synthesize',
+      text: cleaned,
+      voice,
+      speed,
+      cacheDir: cacheDir()
+    })
+    return Buffer.from(base64, 'base64')
   })
-  return Buffer.from(base64, 'base64')
 }
 
 /** Ensure worker script is available next to the compiled main bundle (dev + pack). */

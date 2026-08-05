@@ -1,11 +1,253 @@
-import type { ChatMessage, MemoryFact } from '../types'
+import type {
+  ChatMessage,
+  CompanionConfig,
+  LocalData,
+  MemoryFact,
+  OperationsSnapshot,
+  SyncTombstone
+} from '../types'
 import { normalizeMacUrl } from './pairInfo'
+import {
+  mergeSyncedData,
+  SyncCoordinator,
+  syncBackoffMs,
+  SYNC_PROTOCOL_VERSION,
+  type SyncResponseLike
+} from './syncLogic'
 
-function normalizeBase(url: string): string {
-  return normalizeMacUrl(url)
+export { mergeSyncedData, SyncCoordinator, syncBackoffMs, SYNC_PROTOCOL_VERSION } from './syncLogic'
+
+const TIMEOUT_MS = 12_000
+/** Keep comfortably below the desktop companion's exact 2 MiB request ceiling. */
+export const SYNC_REQUEST_MAX_BYTES = 1_900_000
+
+/** Mirrors the desktop v2 sanitization ceilings; byte size alone is not enough. */
+export const SYNC_SERVER_ARRAY_LIMITS = {
+  mutationIds: 5_000,
+  messages: 300,
+  memories: 5_000,
+  tombstones: 10_000,
+  missions: 1_000,
+  routines: 1_000,
+  approvals: 2_000,
+  captures: 5_000
+} as const
+
+export type SyncPayloadBatch = {
+  protocolVersion: typeof SYNC_PROTOCOL_VERSION
+  deviceId: string
+  mutationIds?: string[]
+  messages?: ChatMessage[]
+  memories?: MemoryFact[]
+  operations?: Partial<OperationsSnapshot>
+  tombstones?: SyncTombstone[]
 }
 
-const TIMEOUT_MS = 10_000
+type TopLevelArrays = Pick<
+  SyncPayloadBatch,
+  'mutationIds' | 'messages' | 'memories' | 'tombstones'
+>
+type OperationArrays = Pick<
+  OperationsSnapshot,
+  'missions' | 'routines' | 'approvals' | 'captures'
+>
+type ArrayItem<T> = T extends Array<infer Item> ? Item : never
+
+function utf8ByteLength(value: string): number {
+  let bytes = 0
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code <= 0x7f) bytes += 1
+    else if (code <= 0x7ff) bytes += 2
+    else if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
+      const next = value.charCodeAt(index + 1)
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4
+        index += 1
+      } else bytes += 3
+    } else bytes += 3
+  }
+  return bytes
+}
+
+export function syncPayloadBytes(payload: SyncPayloadBatch): number {
+  return utf8ByteLength(JSON.stringify(payload))
+}
+
+function hasBatchContent(payload: SyncPayloadBatch): boolean {
+  return Boolean(
+    payload.mutationIds?.length ||
+    payload.messages?.length ||
+    payload.memories?.length ||
+    payload.tombstones?.length ||
+    payload.operations?.missions?.length ||
+    payload.operations?.routines?.length ||
+    payload.operations?.approvals?.length ||
+    payload.operations?.captures?.length
+  )
+}
+
+/**
+ * Build deletion-first, bounded sync requests. A mission is repeated in small
+ * fragments when necessary so even unusually detailed step histories stay
+ * below the desktop's request limit without dropping a step.
+ */
+export function buildSyncPayloadBatches(
+  data: LocalData,
+  deviceId: string,
+  maxBytes = SYNC_REQUEST_MAX_BYTES
+): SyncPayloadBatch[] {
+  if (!deviceId.trim()) throw new MacSyncError('A stable device identity is required for sync', 0, 'protocol')
+  if (!Number.isFinite(maxBytes) || maxBytes < 1_024) {
+    throw new MacSyncError('Sync request limit is invalid', 0, 'protocol')
+  }
+
+  const base = (): SyncPayloadBatch => ({
+    protocolVersion: SYNC_PROTOCOL_VERSION,
+    deviceId
+  })
+  const batches: SyncPayloadBatch[] = []
+  let current = base()
+
+  const commit = (): void => {
+    if (hasBatchContent(current)) batches.push(current)
+    current = base()
+  }
+  const append = (
+    createCandidate: (payload: SyncPayloadBatch) => SyncPayloadBatch,
+    description: string
+  ): void => {
+    let candidate = createCandidate(current)
+    if (syncPayloadBytes(candidate) > maxBytes) {
+      commit()
+      candidate = createCandidate(current)
+    }
+    if (syncPayloadBytes(candidate) > maxBytes) {
+      throw new MacSyncError(
+        `${description} is too large to synchronize safely; shorten its content and retry`,
+        0,
+        'protocol'
+      )
+    }
+    current = candidate
+  }
+  const appendTopLevel = <Key extends keyof TopLevelArrays>(
+    key: Key,
+    item: ArrayItem<NonNullable<TopLevelArrays[Key]>>,
+    description: string
+  ): void => {
+    if ((current[key]?.length || 0) >= SYNC_SERVER_ARRAY_LIMITS[key]) commit()
+    append((payload) => ({
+      ...payload,
+      [key]: [
+        ...((payload[key] || []) as NonNullable<TopLevelArrays[Key]>),
+        item
+      ]
+    }) as SyncPayloadBatch, description)
+  }
+  const appendOperation = <Key extends keyof OperationArrays>(
+    key: Key,
+    item: ArrayItem<OperationArrays[Key]>,
+    description: string
+  ): void => {
+    if ((current.operations?.[key]?.length || 0) >= SYNC_SERVER_ARRAY_LIMITS[key]) commit()
+    append((payload) => ({
+      ...payload,
+      operations: {
+        ...payload.operations,
+        generatedAt: data.operations.generatedAt,
+        [key]: [
+          ...((payload.operations?.[key] || []) as OperationArrays[Key]),
+          item
+        ]
+      }
+    }), description)
+  }
+
+  // Acknowledgement IDs and deletes lead the stream. If a later request is
+  // interrupted, retrying is idempotent and no stale entity can be resurrected.
+  for (const mutation of data.sync.outbox) {
+    appendTopLevel('mutationIds', mutation.id, `Mutation ${mutation.id}`)
+  }
+  for (const tombstone of data.sync.tombstones) {
+    appendTopLevel('tombstones', tombstone, `Deletion record ${tombstone.entityId}`)
+  }
+  for (const message of data.messages) {
+    appendTopLevel('messages', message, `Message ${message.id}`)
+  }
+  for (const memory of data.memories) {
+    appendTopLevel('memories', memory, `Memory ${memory.id}`)
+  }
+  for (const mission of data.operations.missions) {
+    const steps = Array.isArray(mission.steps) ? mission.steps : []
+    if (!steps.length) {
+      appendOperation('missions', { ...mission, steps: [] }, `Mission ${mission.id}`)
+      continue
+    }
+    // A server-accepted step can contain ~42 KB of text; 20-step fragments
+    // remain bounded while avoiding one request per step in ordinary use.
+    for (let offset = 0; offset < steps.length; offset += 20) {
+      appendOperation(
+        'missions',
+        { ...mission, steps: steps.slice(offset, offset + 20) },
+        `Mission ${mission.id}`
+      )
+    }
+  }
+  for (const routine of data.operations.routines) {
+    appendOperation('routines', routine, `Routine ${routine.id}`)
+  }
+  for (const approval of data.operations.approvals) {
+    appendOperation('approvals', approval, `Approval ${approval.id}`)
+  }
+  for (const capture of data.operations.captures) {
+    appendOperation('captures', capture, `Capture ${capture.id}`)
+  }
+  commit()
+  return batches.length ? batches : [base()]
+}
+
+export type MacHealth = {
+  ok: boolean
+  authenticated?: boolean
+  protocolVersion?: number
+  name?: string
+  serverTime?: number
+  capabilities?: string[]
+  error?: string
+}
+
+export type EnrollmentResult = {
+  credential: string
+  device: { id: string; name: string; scopes: string[] }
+  name: string
+  protocolVersion: number
+  capabilities: string[]
+}
+
+type SyncResponse = SyncResponseLike & {
+  ok?: boolean
+  error?: string
+  protocolVersion?: number
+  serverTime?: number
+  acknowledgedMutationIds?: string[]
+}
+
+export class MacSyncError extends Error {
+  readonly status: number
+  readonly kind: 'auth' | 'offline' | 'timeout' | 'protocol' | 'server'
+
+  constructor(message: string, status = 0, kind: MacSyncError['kind'] = 'server') {
+    super(message)
+    this.name = 'MacSyncError'
+    this.status = status
+    this.kind = kind
+  }
+}
+
+export function normalizeBase(url: string): string {
+  return normalizeMacUrl(url)
+}
 
 async function fetchWithTimeout(
   url: string,
@@ -16,193 +258,169 @@ async function fetchWithTimeout(
   const timer = setTimeout(() => ctrl.abort(), ms)
   try {
     return await fetch(url, { ...init, signal: ctrl.signal })
-  } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`Timed out reaching Mac (${ms / 1000}s) — check URL / Wi‑Fi / companion online`)
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new MacSyncError(`Mac did not respond within ${Math.round(ms / 1000)} seconds`, 0, 'timeout')
     }
-    throw err
+    throw new MacSyncError(
+      'Mac companion is unreachable — changes remain safely queued on this phone',
+      0,
+      'offline'
+    )
   } finally {
     clearTimeout(timer)
   }
 }
 
-export type MacHealth = {
-  ok: boolean
-  chatCount?: number
-  memoryCount?: number
-  name?: string
-}
-
-export async function checkMacHealth(baseUrl: string): Promise<MacHealth> {
-  const base = normalizeBase(baseUrl)
-  if (!base) return { ok: false }
+async function responseJson<T extends { error?: string }>(response: Response): Promise<T> {
+  let data: T
   try {
-    const res = await fetchWithTimeout(`${base}/v1/health`, { method: 'GET' })
-    if (!res.ok) return { ok: false }
-    const data = (await res.json()) as MacHealth & { ok?: boolean }
-    return {
-      ok: Boolean(data.ok),
-      chatCount: data.chatCount,
-      memoryCount: data.memoryCount,
-      name: data.name
-    }
+    data = await response.json() as T
   } catch {
-    return { ok: false }
+    throw new MacSyncError(`Mac returned an unreadable response (${response.status})`, response.status, 'protocol')
   }
-}
-
-async function authFetch(
-  baseUrl: string,
-  token: string,
-  path: string,
-  init?: RequestInit
-): Promise<Response> {
-  const base = normalizeBase(baseUrl)
-  if (!base || !token.trim()) {
-    throw new Error('Set Mac URL and pairing token first')
-  }
-  return fetchWithTimeout(`${base}${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token.trim()}`,
-      'Content-Type': 'application/json',
-      ...(init?.headers || {})
-    }
-  })
-}
-
-function syncHint(status: number, error?: string): string {
-  if (status === 401) return 'Unauthorized — pairing token does not match Mac'
-  if (status === 404) {
-    return 'Mac app is outdated — run npm run update:app on the Mac, then reopen A.L.B.E.R.T.'
-  }
-  return error || `Request failed (${status})`
-}
-
-export async function fetchChatFromMac(opts: {
-  baseUrl: string
-  token: string
-}): Promise<ChatMessage[]> {
-  const res = await authFetch(opts.baseUrl, opts.token, '/v1/chat')
-  const data = (await res.json()) as {
-    ok?: boolean
-    error?: string
-    messages?: ChatMessage[]
-  }
-  if (!res.ok || !data.ok) {
-    throw new Error(syncHint(res.status, data.error))
-  }
-  return Array.isArray(data.messages) ? data.messages : []
-}
-
-export async function syncChatWithMac(opts: {
-  baseUrl: string
-  token: string
-  messages: ChatMessage[]
-}): Promise<ChatMessage[]> {
-  const res = await authFetch(opts.baseUrl, opts.token, '/v1/chat/sync', {
-    method: 'POST',
-    body: JSON.stringify({ messages: opts.messages })
-  })
-  const data = (await res.json()) as {
-    ok?: boolean
-    error?: string
-    messages?: ChatMessage[]
-  }
-  if (!res.ok || !data.ok) {
-    throw new Error(syncHint(res.status, data.error || 'Chat sync failed'))
-  }
-  return Array.isArray(data.messages) ? data.messages : []
-}
-
-export async function clearChatOnMac(opts: {
-  baseUrl: string
-  token: string
-}): Promise<void> {
-  const res = await authFetch(opts.baseUrl, opts.token, '/v1/chat/clear', {
-    method: 'POST',
-    body: '{}'
-  })
-  const data = (await res.json()) as { ok?: boolean; error?: string }
-  if (!res.ok || !data.ok) {
-    throw new Error(syncHint(res.status, data.error || 'Clear failed'))
-  }
-}
-
-export async function syncMemoriesWithMac(opts: {
-  baseUrl: string
-  token: string
-  memories: MemoryFact[]
-  deletedIds?: string[]
-}): Promise<MemoryFact[]> {
-  const res = await authFetch(opts.baseUrl, opts.token, '/v1/memories/sync', {
-    method: 'POST',
-    body: JSON.stringify({
-      memories: opts.memories,
-      deletedIds: opts.deletedIds || []
-    })
-  })
-
-  const data = (await res.json()) as {
-    ok?: boolean
-    error?: string
-    memories?: MemoryFact[]
-  }
-
-  if (!res.ok || !data.ok) {
-    throw new Error(syncHint(res.status, data.error || 'Memory sync failed'))
-  }
-
-  return Array.isArray(data.memories) ? data.memories : []
-}
-
-export async function deleteMemoryOnMac(opts: {
-  baseUrl: string
-  token: string
-  id: string
-}): Promise<void> {
-  const res = await authFetch(
-    opts.baseUrl,
-    opts.token,
-    `/v1/memories/${encodeURIComponent(opts.id)}`,
-    { method: 'DELETE' }
-  )
-  if (res.status === 404) return
-  const data = (await res.json()) as { ok?: boolean; error?: string }
-  if (!res.ok || !data.ok) {
-    throw new Error(syncHint(res.status, data.error || 'Delete failed'))
-  }
-}
-
-/** Full reconcile: push local chat+memories, adopt Mac canonical sets. */
-export async function fullSyncWithMac(opts: {
-  baseUrl: string
-  token: string
-  messages: ChatMessage[]
-  memories: MemoryFact[]
-  deletedMemoryIds?: string[]
-}): Promise<{ messages: ChatMessage[]; memories: MemoryFact[]; health: MacHealth }> {
-  const base = normalizeBase(opts.baseUrl)
-  const health = await checkMacHealth(base)
-  if (!health.ok) {
-    throw new Error(
-      `Mac companion unreachable at ${base || '(empty URL)'}. Same Wi‑Fi? On Simulator try http://127.0.0.1:47831. Confirm Systems shows Server online.`
+  if (!response.ok) {
+    const kind = response.status === 401 || response.status === 403
+      ? 'auth'
+      : response.status === 404 || response.status === 409 || response.status === 426
+        ? 'protocol'
+        : 'server'
+    throw new MacSyncError(
+      data.error || (kind === 'auth' ? 'Mac rejected this device credential' : `Mac request failed (${response.status})`),
+      response.status,
+      kind
     )
   }
+  return data
+}
 
-  const [messages, memories] = await Promise.all([
-    syncChatWithMac({
-      baseUrl: base,
-      token: opts.token,
-      messages: opts.messages
-    }),
-    syncMemoriesWithMac({
-      baseUrl: base,
-      token: opts.token,
-      memories: opts.memories,
-      deletedIds: opts.deletedMemoryIds
+function authHeaders(credential: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${credential.trim()}`,
+    'Content-Type': 'application/json',
+    Accept: 'application/json'
+  }
+}
+
+export async function enrollWithMac(opts: {
+  baseUrl: string
+  enrollmentToken: string
+  deviceId: string
+  deviceName: string
+}): Promise<EnrollmentResult> {
+  const base = normalizeBase(opts.baseUrl)
+  if (!base) throw new MacSyncError('Enter the Mac companion URL', 0, 'protocol')
+  if (!opts.enrollmentToken.trim()) throw new MacSyncError('Enter the pairing token from Mac Systems', 0, 'auth')
+  const response = await fetchWithTimeout(`${base}/v2/enroll`, {
+    method: 'POST',
+    headers: authHeaders(opts.enrollmentToken),
+    body: JSON.stringify({ deviceId: opts.deviceId, deviceName: opts.deviceName })
+  })
+  const data = await responseJson<{
+    ok?: boolean
+    error?: string
+    name?: string
+    protocolVersion?: number
+    credential?: string
+    device?: EnrollmentResult['device']
+    capabilities?: string[]
+  }>(response)
+  if (!data.ok || !data.credential || !data.device) {
+    throw new MacSyncError('Mac enrollment response was incomplete', response.status, 'protocol')
+  }
+  return {
+    credential: data.credential,
+    device: data.device,
+    name: data.name || 'A.L.B.E.R.T. Mac',
+    protocolVersion: data.protocolVersion || SYNC_PROTOCOL_VERSION,
+    capabilities: Array.isArray(data.capabilities) ? data.capabilities : []
+  }
+}
+
+export async function checkMacHealth(
+  baseUrl: string,
+  credential: string
+): Promise<MacHealth> {
+  const base = normalizeBase(baseUrl)
+  if (!base || !credential.trim()) return { ok: false, authenticated: false, error: 'Mac link is not enrolled' }
+  try {
+    const response = await fetchWithTimeout(`${base}/v2/health`, {
+      method: 'GET',
+      headers: authHeaders(credential)
+    }, 7_000)
+    const data = await responseJson<MacHealth & { error?: string }>(response)
+    return {
+      ok: Boolean(data.ok),
+      authenticated: Boolean(data.ok),
+      protocolVersion: data.protocolVersion,
+      name: data.name,
+      serverTime: data.serverTime,
+      capabilities: data.capabilities
+    }
+  } catch (error) {
+    if (error instanceof MacSyncError) {
+      return { ok: false, authenticated: error.kind !== 'auth' ? undefined : false, error: error.message }
+    }
+    return { ok: false, error: String(error) }
+  }
+}
+
+export async function syncAllWithMac(opts: {
+  config: CompanionConfig
+  data: LocalData
+  /** Re-read state after the network response so in-flight local edits survive. */
+  getLatestData?: () => LocalData
+}): Promise<LocalData> {
+  const { config, data } = opts
+  const base = normalizeBase(config.macBaseUrl)
+  if (!base || !config.macCredential.trim()) {
+    throw new MacSyncError('Enroll this phone under Systems → Mac Link first', 0, 'auth')
+  }
+  const sentOutbox = [...data.sync.outbox]
+  const batches = buildSyncPayloadBatches(data, config.deviceId)
+  const acknowledgedMutationIds = new Set<string>()
+  const tombstones = new Map<string, SyncTombstone>()
+  let finalResponse: SyncResponse | null = null
+
+  for (const batch of batches) {
+    const response = await fetchWithTimeout(`${base}/v2/sync`, {
+      method: 'POST',
+      headers: authHeaders(config.macCredential),
+      body: JSON.stringify(batch)
     })
-  ])
+    const parsed = await responseJson<SyncResponse>(response)
+    if (!parsed.ok) throw new MacSyncError(parsed.error || 'Mac sync failed', response.status)
+    if (parsed.protocolVersion !== SYNC_PROTOCOL_VERSION) {
+      throw new MacSyncError(
+        `Mac uses sync protocol ${parsed.protocolVersion ?? 'unknown'}; version ${SYNC_PROTOCOL_VERSION} is required`,
+        response.status,
+        'protocol'
+      )
+    }
+    for (const id of parsed.acknowledgedMutationIds || []) acknowledgedMutationIds.add(id)
+    for (const row of parsed.tombstones || []) {
+      if (!row?.entityType || !row.entityId) continue
+      const key = `${row.entityType}:${row.entityId}`
+      const before = tombstones.get(key)
+      if (!before || row.deletedAt > before.deletedAt) tombstones.set(key, row)
+    }
+    finalResponse = parsed
+  }
 
-  return { messages, memories, health }
+  if (!finalResponse) throw new MacSyncError('Mac sync produced no response', 0, 'protocol')
+  return mergeSyncedData(opts.getLatestData?.() || data, {
+    ...finalResponse,
+    acknowledgedMutationIds: [...acknowledgedMutationIds],
+    tombstones: [...tombstones.values()]
+  }, sentOutbox)
+}
+
+export async function revokeThisDevice(config: CompanionConfig): Promise<void> {
+  const base = normalizeBase(config.macBaseUrl)
+  if (!base || !config.macCredential) return
+  const response = await fetchWithTimeout(`${base}/v2/devices/self`, {
+    method: 'DELETE',
+    headers: authHeaders(config.macCredential)
+  }, 7_000)
+  await responseJson<{ ok?: boolean; error?: string }>(response)
 }

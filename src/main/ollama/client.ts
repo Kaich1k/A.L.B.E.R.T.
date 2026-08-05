@@ -2,6 +2,7 @@ import { getSettings } from '../config'
 import { streamOpenAiChatCompletions } from '../llm/openaiStream'
 import { getOpenAIToolSchemasForOllama } from '../tools/registry'
 import { normalizeToolCalls } from '../agent/textToolCalls'
+import { DEFAULT_SETTINGS } from '../../shared/types'
 
 export type OllamaChatMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -127,7 +128,8 @@ type ChatAttempt = {
 async function postOpenAIChat(
   attempt: ChatAttempt,
   model: string,
-  onToken?: (delta: string) => void
+  onToken?: (delta: string) => void,
+  timeoutMs = attempt.mode === 'local' ? 75_000 : 20_000
 ): Promise<OllamaChatResult> {
   const useTools = attempt.tools
   const tools = useTools ? getOpenAIToolSchemasForOllama() : undefined
@@ -141,6 +143,7 @@ async function postOpenAIChat(
     // Stream whenever the UI/TTS wants tokens (tools OK — deltas may include tool_calls)
     stream: wantStream
   }
+  if (/^qwen3(?:\.|:|$)/i.test(model)) body.think = false
   if (tools?.length) {
     body.tools = tools
     body.tool_choice = 'auto'
@@ -149,7 +152,8 @@ async function postOpenAIChat(
   const response = await fetch(`${attempt.base}/v1/chat/completions`, {
     method: 'POST',
     headers,
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(Math.max(1, timeoutMs))
   })
 
   if (!response.ok && response.status === 404) {
@@ -158,7 +162,8 @@ async function postOpenAIChat(
       messages: attempt.messages,
       onToken,
       base: attempt.base,
-      apiKey: attempt.apiKey
+      apiKey: attempt.apiKey,
+      timeoutMs
     })
   }
 
@@ -204,6 +209,8 @@ export async function ollamaChatCompletion(opts: {
   onToken?: (delta: string) => void
 }): Promise<OllamaChatResult> {
   const primary = resolveOllamaEndpoint()
+  const turnBudgetMs = primary.mode === 'local' ? 90_000 : 40_000
+  const deadline = Date.now() + turnBudgetMs
   const wantTools = opts.tools !== false
   const cloudKey = getSettings().ollamaApiKey?.trim() || process.env.OLLAMA_API_KEY || ''
 
@@ -269,8 +276,15 @@ export async function ollamaChatCompletion(opts: {
   let triedLocal = primary.mode === 'local'
 
   for (const attempt of attempts) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) break
     try {
-      return await postOpenAIChat(attempt, opts.model, opts.onToken)
+      return await postOpenAIChat(
+        attempt,
+        opts.model,
+        opts.onToken,
+        Math.min(attempt.mode === 'local' ? 75_000 : 20_000, remaining)
+      )
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err))
       if (!isRetryableStatus(err) && !/fetch failed|ECONNREFUSED|Failed to fetch/i.test(lastError.message)) {
@@ -284,6 +298,9 @@ export async function ollamaChatCompletion(opts: {
 
   // Last chance: local daemon if we were on cloud
   if (!triedLocal) {
+    if (Date.now() >= deadline) {
+      throw lastError || new Error(`Ollama turn exceeded ${turnBudgetMs / 1000} seconds`)
+    }
     const up = await localDaemonUp()
     if (up) {
       try {
@@ -297,7 +314,8 @@ export async function ollamaChatCompletion(opts: {
             label: 'local-fallback'
           },
           opts.model,
-          opts.onToken
+          opts.onToken,
+          Math.min(75_000, Math.max(1, deadline - Date.now()))
         )
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err))
@@ -314,6 +332,7 @@ async function nativeOllamaChat(opts: {
   onToken?: (delta: string) => void
   base?: string
   apiKey?: string | null
+  timeoutMs?: number
 }): Promise<OllamaChatResult> {
   const resolved = resolveOllamaEndpoint()
   const base = opts.base || resolved.base
@@ -321,17 +340,23 @@ async function nativeOllamaChat(opts: {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`
 
+  const nativeBody: Record<string, unknown> = {
+    model: opts.model,
+    messages: serializeNativeMessages(opts.messages).map((m) => ({
+      ...m,
+      role: m.role === 'tool' ? 'user' : m.role
+    })),
+    stream: false
+  }
+  if (/^qwen3(?:\.|:|$)/i.test(opts.model)) nativeBody.think = false
+
   const response = await fetch(`${base}/api/chat`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      model: opts.model,
-      messages: serializeNativeMessages(opts.messages).map((m) => ({
-        ...m,
-        role: m.role === 'tool' ? 'user' : m.role
-      })),
-      stream: false
-    })
+    body: JSON.stringify(nativeBody),
+    signal: AbortSignal.timeout(
+      Math.max(1, opts.timeoutMs ?? (apiKey ? 20_000 : 75_000))
+    )
   })
   if (!response.ok) {
     const errText = await response.text()
@@ -344,6 +369,88 @@ async function nativeOllamaChat(opts: {
   const content = (data.message?.content || '').trim()
   if (opts.onToken && content) opts.onToken(content)
   return { content, tool_calls: [], model: data.model || opts.model }
+}
+
+/**
+ * Pull a model into the local Ollama daemon (localhost).
+ * Streams /api/pull until complete — used by Systems → Pull model.
+ */
+export async function pullOllamaModel(
+  model?: string
+): Promise<{ ok: boolean; detail: string }> {
+  const name = (model || getSettings().localModel || DEFAULT_SETTINGS.localModel).trim()
+  if (!name) return { ok: false, detail: 'No model name' }
+
+  if (!(await localDaemonUp())) {
+    return {
+      ok: false,
+      detail: 'Local Ollama is not running. Open the Ollama app, then try Pull again.'
+    }
+  }
+
+  try {
+    const res = await fetch(`${localBase()}/api/pull`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, stream: true })
+    })
+    if (!res.ok) {
+      const err = await res.text()
+      return { ok: false, detail: `Pull HTTP ${res.status}: ${err.slice(0, 200)}` }
+    }
+    if (!res.body) {
+      return { ok: false, detail: 'Pull returned no body' }
+    }
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let lastStatus = 'pulling…'
+    let lastError = ''
+
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() || ''
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        try {
+          const row = JSON.parse(trimmed) as {
+            status?: string
+            error?: string
+            total?: number
+            completed?: number
+          }
+          if (row.error) lastError = row.error
+          if (row.status) {
+            if (
+              typeof row.total === 'number' &&
+              row.total > 0 &&
+              typeof row.completed === 'number'
+            ) {
+              const pct = Math.min(100, Math.round((row.completed / row.total) * 100))
+              lastStatus = `${row.status} (${pct}%)`
+            } else {
+              lastStatus = row.status
+            }
+          }
+        } catch {
+          /* ignore partial JSON */
+        }
+      }
+    }
+
+    if (lastError) return { ok: false, detail: lastError }
+    return { ok: true, detail: `Pulled ${name} · ${lastStatus}` }
+  } catch (err) {
+    return {
+      ok: false,
+      detail: err instanceof Error ? err.message : String(err)
+    }
+  }
 }
 
 export async function probeOllama(): Promise<{
@@ -376,16 +483,22 @@ export async function probeOllama(): Promise<{
       const err = await res.text()
       // Also note local daemon
       const localUp = await localDaemonUp()
+      const hint = localUp
+        ? ' · Local Ollama is running — set Endpoint to Local, then Pull the configured model (cloud and local tags can differ)'
+        : ' · local daemon not running'
       return {
         ok: false,
         mode,
-        detail: `Cloud HTTP ${res.status}: ${err.slice(0, 160)}${localUp ? ' · local daemon is up as backup' : ' · local daemon not running'}`
+        detail: `Cloud HTTP ${res.status}: ${err.slice(0, 120)}${hint}`
       }
     }
 
     const res = await fetch(`${base}/api/tags`, { headers, signal: AbortSignal.timeout(3000) })
     if (!res.ok) {
-      const res2 = await fetch(`${base}/v1/models`, { headers })
+      const res2 = await fetch(`${base}/v1/models`, {
+        headers,
+        signal: AbortSignal.timeout(3000)
+      })
       if (res2.ok) {
         return { ok: true, mode, detail: `Connected to ${base}` }
       }

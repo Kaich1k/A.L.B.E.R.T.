@@ -18,12 +18,14 @@ export const IpcChannels = {
   windowShow: 'albert:window:show',
   openPrivacyPane: 'albert:system:open-privacy',
   ollamaProbe: 'albert:ollama:probe',
+  ollamaPull: 'albert:ollama:pull',
   groqProbe: 'albert:groq:probe',
   voiceWarm: 'albert:voice:warm',
   voiceTranscribe: 'albert:voice:transcribe',
   companionStatus: 'albert:companion:status',
   companionApply: 'albert:companion:apply',
   companionRotateToken: 'albert:companion:rotate-token',
+  companionRevokeDevice: 'albert:companion:revoke-device',
   ttsSpeak: 'albert:tts:speak',
   ttsKokoro: 'albert:tts:kokoro',
   ttsKokoroWarm: 'albert:tts:kokoro-warm',
@@ -35,7 +37,19 @@ export const IpcChannels = {
   computerFocus: 'albert:computer:focus',
   computerClose: 'albert:computer:close',
   computerUpdateTab: 'albert:computer:update-tab',
-  computerGetPage: 'albert:computer:get-page'
+  computerGetPage: 'albert:computer:get-page',
+  operationsGet: 'albert:operations:get',
+  missionCreate: 'albert:mission:create',
+  missionUpdate: 'albert:mission:update',
+  missionDelete: 'albert:mission:delete',
+  missionStepAdd: 'albert:mission:step-add',
+  missionStepUpdate: 'albert:mission:step-update',
+  routineCreate: 'albert:routine:create',
+  routineUpdate: 'albert:routine:update',
+  routineDelete: 'albert:routine:delete',
+  approvalResolve: 'albert:approval:resolve',
+  captureCreate: 'albert:capture:create',
+  captureUpdate: 'albert:capture:update'
 } as const
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels]

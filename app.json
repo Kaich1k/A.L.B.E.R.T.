@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "3b312788-2ec0-45da-83d7-e88014d9c9ef"
+      }
+    },
+    "ios": {
+      "bundleIdentifier": "com.kaichik.albert",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    }
+  }
+}

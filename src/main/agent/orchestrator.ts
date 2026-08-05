@@ -21,6 +21,7 @@ import {
 } from './textToolCalls'
 import { buildPersonalityPromptBlock, normalizePersonality } from '../../shared/personality'
 import { isEndVoiceCommand } from '../../shared/voiceCommands'
+import { activeBrainReply, isActiveBrainQuestion } from '../../shared/brainIdentity'
 import type {
   AgentStreamEvent,
   ChatImageRef,
@@ -147,12 +148,13 @@ async function anthropicContentForMessage(
 
 async function ollamaMessagesFromHistory(
   system: string,
-  history: ChatMessage[]
+  history: ChatMessage[],
+  maxTurns = 16
 ): Promise<OllamaChatMessage[]> {
-  // Keep Ollama payloads small — cloud 500s on huge histories / reattached images
+  // Keep Ollama/Groq payloads small — cloud 413/500s on huge histories / reattached images
   const rows = history
     .filter((row) => row.role === 'user' || row.role === 'assistant')
-    .slice(-16)
+    .slice(-Math.max(4, maxTurns))
 
   const lastUserWithImages = [...rows]
     .reverse()
@@ -246,6 +248,18 @@ export async function runChatTurn(
     reason: route.reason
   })
 
+  // Small models can repeat an older assistant claim even when the system note
+  // says otherwise. Resolve this factual UI question deterministically so the
+  // spoken answer and Route readout can never contradict each other.
+  if (text && !images.length && isActiveBrainQuestion(text)) {
+    const content = activeBrainReply(route)
+    const assistantMessage = addMessage({ role: 'assistant', content })
+    emit(win, { type: 'token', content })
+    emit(win, { type: 'message', message: assistantMessage })
+    emit(win, { type: 'done' })
+    return assistantMessage
+  }
+
   const memories = await recallMemories(text || 'image', 6)
   const memoryBlock =
     memories.length > 0
@@ -255,15 +269,16 @@ export async function runChatTurn(
       : ''
 
   const localLabel =
-    route.provider === 'groq' ? 'Groq' : route.provider === 'ollama' ? 'Ollama' : null
+    route.provider === 'groq' ? 'Groq Cloud' : route.provider === 'ollama' ? 'Ollama' : null
 
   const routingNote =
     localLabel
       ? `\n\n=== ACTIVE BRAIN (THIS TURN) ===
-Provider: ${localLabel}. Model: ${route.model}. Tier: LOCAL.
+Provider: ${localLabel}. Model: ${route.model}. Tier: QUICK.
 You ARE on ${localLabel} right now — not Haiku, not Opus.
 If chat history has you saying you were on Haiku, that was an older turn. Do NOT claim Haiku/fallback unless THIS system message says fallback.
 If Kai asks which brain you're on, answer ${localLabel} and name ${route.model}.
+${route.provider === 'groq' ? 'Groq is cloud inference, not an on-device/local-private model.' : ''}
 Keep it light; for heavy coding, suggest Haiku/Opus.
 ${images.length ? `Kai attached image(s). Vision on ${localLabel} is best-effort — describe what you can; if you cannot see them, say so briefly and suggest Haiku.` : ''}
 === END BRAIN ===`
@@ -326,8 +341,13 @@ async function runOpenAiLocalTurn(
 ): Promise<ChatMessage> {
   const label = provider === 'groq' ? 'Groq' : 'Ollama'
   const chat = provider === 'groq' ? groqChatCompletion : ollamaChatCompletion
-  const history = getRecentMessages(24)
-  const messages: OllamaChatMessage[] = await ollamaMessagesFromHistory(system, history)
+  // Free cloud models can reject fat histories + long system prompts — keep QUICK tight
+  const history = getRecentMessages(provider === 'groq' ? 8 : 18)
+  const messages: OllamaChatMessage[] = await ollamaMessagesFromHistory(
+    system,
+    history,
+    provider === 'groq' ? 8 : 14
+  )
 
   let loops = 0
   let finalText = ''
@@ -352,20 +372,30 @@ async function runOpenAiLocalTurn(
         type: 'route',
         model: getSettings().fastModel || 'claude-haiku-4-5',
         tier: 'fast',
-        reason: `LOCAL (${label}) failed → Haiku this turn (${short})`
+        reason: `QUICK (${label}) failed → Haiku this turn (${short})`
       })
       return runAnthropicTurn(
         _userText,
         system +
           `\n\n=== ACTIVE BRAIN (THIS TURN — FALLBACK) ===
 ${label} failed (${short}). You are NOW on Anthropic Haiku (${getSettings().fastModel || 'claude-haiku-4-5'}).
-Kai still has LOCAL selected — only this turn fell back. If asked, say ${label} errored and Haiku covered it.
+Kai still has QUICK selected — only this turn fell back. If asked, say ${label} errored and Haiku covered it.
 Do not keep claiming fallback on later turns unless this note appears again.
 === END BRAIN ===`,
         getSettings().fastModel || 'claude-haiku-4-5',
         'fast',
         win
       )
+    }
+
+    if (result.model && result.model !== activeModel) {
+      emit(win, {
+        type: 'route',
+        model: result.model,
+        tier: 'local',
+        reason: `${label} model fallback · ${activeModel} unavailable`
+      })
+      activeModel = result.model
     }
 
     const toolCalls = (() => {
@@ -476,7 +506,6 @@ Do not keep claiming fallback on later turns unless this note appears again.
         tool_call_id: call.id
       })
     }
-    void activeModel
   }
 
   if (!finalText || looksLikeRawToolDump(finalText)) {

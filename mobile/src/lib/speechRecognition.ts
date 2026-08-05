@@ -9,16 +9,27 @@ export type SpeechRecognitionModule = {
   start: (options: {
     lang?: string
     interimResults?: boolean
+    maxAlternatives?: number
+    contextualStrings?: string[]
     continuous?: boolean
     addsPunctuation?: boolean
+    requiresOnDeviceRecognition?: boolean
     iosTaskHint?: string
   }) => void
   stop: () => void
-  requestPermissionsAsync: () => Promise<{ granted: boolean }>
+  abort: () => void
+  getPermissionsAsync?: () => Promise<SpeechPermissionResponse>
+  requestPermissionsAsync: () => Promise<SpeechPermissionResponse>
   addListener: (
     eventName: string,
     listener: (event: Record<string, unknown>) => void
   ) => { remove: () => void }
+}
+
+export type SpeechPermissionResponse = {
+  granted: boolean
+  canAskAgain?: boolean
+  status?: 'undetermined' | 'granted' | 'denied' | 'restricted'
 }
 
 type SpeechPackage = {

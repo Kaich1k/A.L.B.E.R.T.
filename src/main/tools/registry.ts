@@ -7,6 +7,7 @@ import { computerTools } from './computer'
 import { desktopTools } from './desktop'
 import { fileTools } from './files'
 import { memoryTools } from './memory'
+import { operationsTools } from './operations'
 import { projectTools } from './project'
 import { shellTools } from './shell'
 import { spotifyTools } from './spotify'
@@ -31,7 +32,8 @@ const allTools: ToolDefinition[] = [
   ...shellTools,
   ...desktopTools,
   ...systemTools,
-  ...memoryTools
+  ...memoryTools,
+  ...operationsTools
 ]
 
 const byName = new Map(allTools.map((t) => [t.name, t]))
