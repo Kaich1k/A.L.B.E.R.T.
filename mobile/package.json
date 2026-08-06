@@ -29,6 +29,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
+    "patch-package": "^8.0.1",
     "typescript": "~6.0.3"
   },
   "overrides": {
@@ -37,6 +38,7 @@
     }
   },
   "scripts": {
+    "postinstall": "patch-package",
     "start": "EXPO_NO_METRO_WORKSPACE_ROOT=1 expo start --dev-client --clear",
     "start:go": "EXPO_NO_METRO_WORKSPACE_ROOT=1 expo start --go --clear",
     "android": "EXPO_NO_METRO_WORKSPACE_ROOT=1 expo start --dev-client --android --clear",

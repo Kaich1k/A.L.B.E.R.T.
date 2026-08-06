@@ -112,12 +112,14 @@ export function HomeScreen(props: HomeScreenProps): React.JSX.Element {
         </View>
 
         <View style={styles.coreStage}>
-          <AlbertCore
-            phase={voicePhase}
-            wakeArmed={wakeArmed}
-            size={coreSize}
-            reducedMotion={reducedMotion}
-          />
+          <View style={[styles.coreFrame, { width: coreSize, height: coreSize }]}>
+            <AlbertCore
+              phase={voicePhase}
+              wakeArmed={wakeArmed}
+              size={coreSize}
+              reducedMotion={reducedMotion}
+            />
+          </View>
           <Text style={styles.phase} accessibilityLiveRegion="polite">
             {voicePhase.toUpperCase()}
           </Text>
@@ -285,7 +287,7 @@ const styles = StyleSheet.create({
   protocol: { color: colors.inkFaint, fontFamily: fonts.mono, fontSize: typeScale.micro, letterSpacing: 1.15 },
   brand: { marginTop: 2, color: colors.accentStrong, fontFamily: fonts.display, fontSize: typeScale.title, letterSpacing: 2.4, textShadowColor: colors.accentGlow, textShadowRadius: 10 },
   expansion: { color: colors.inkMuted, fontFamily: fonts.mono, fontSize: typeScale.micro, lineHeight: 15, letterSpacing: 0.4 },
-  commandStage: { alignItems: 'stretch', gap: spacing.sm },
+  commandStage: { width: '100%', alignItems: 'center', gap: spacing.sm },
   commandStageWide: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
   telemetryColumn: { width: 150, gap: spacing.lg },
   telemetryRow: { width: '100%', flexDirection: 'row', gap: spacing.sm },
@@ -295,9 +297,36 @@ const styles = StyleSheet.create({
   telemetryValue: { fontFamily: fonts.mono, fontSize: 10, letterSpacing: 0.35 },
   meterTrack: { height: 2, backgroundColor: colors.lineDim },
   meterFill: { height: 2 },
-  coreStage: { flex: 1, alignItems: 'center', justifyContent: 'center', minWidth: 210 },
-  phase: { marginTop: -spacing.md, color: colors.accentStrong, fontFamily: fonts.displayMed, fontSize: 15, letterSpacing: 2 },
-  voiceStatus: { marginTop: spacing.xs, color: colors.inkMuted, fontFamily: fonts.body, fontSize: typeScale.body, lineHeight: 20, textAlign: 'center', maxWidth: 420 },
+  coreStage: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    alignSelf: 'center'
+  },
+  coreFrame: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    alignSelf: 'center'
+  },
+  phase: {
+    marginTop: spacing.sm,
+    color: colors.accentStrong,
+    fontFamily: fonts.displayMed,
+    fontSize: 15,
+    letterSpacing: 2,
+    textAlign: 'center',
+    alignSelf: 'center'
+  },
+  voiceStatus: {
+    marginTop: spacing.xs,
+    color: colors.inkMuted,
+    fontFamily: fonts.body,
+    fontSize: typeScale.body,
+    lineHeight: 20,
+    textAlign: 'center',
+    maxWidth: 420,
+    alignSelf: 'center'
+  },
   faultText: { color: colors.danger },
   status: { color: colors.inkMuted, fontFamily: fonts.body, fontSize: typeScale.body, textAlign: 'center' },
   errorText: { color: colors.ink, fontFamily: fonts.body, fontSize: typeScale.body, lineHeight: 21 },

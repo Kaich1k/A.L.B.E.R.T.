@@ -86,7 +86,7 @@ export function MissionsPanel(): React.JSX.Element {
 
       <div className="mission-kpis">
         <Kpi label="Active" value={String(active).padStart(2, '0')} note="in progress" tone="live" />
-        <Kpi label="Needs you" value={String(pendingApprovals.length).padStart(2, '0')} note="approval gates" tone="warn" />
+        <Kpi label="Needs your" value={String(pendingApprovals.length).padStart(2, '0')} note="approval gates" tone="warn" />
         <Kpi label="Routines" value={String(data.routines.filter((r) => r.enabled).length).padStart(2, '0')} note="armed" />
         <Kpi label="Completed" value={String(completed).padStart(2, '0')} note="all time" />
       </div>

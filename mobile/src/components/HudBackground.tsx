@@ -11,7 +11,6 @@ export function HudBackground({ children }: { children: ReactNode }): React.JSX.
     <View style={styles.root}>
       <View pointerEvents="none" style={StyleSheet.absoluteFill} accessible={false}>
         <View style={styles.glowTop} />
-        <View style={styles.glowCore} />
         <View style={styles.grid}>
           {GRID_COLUMNS.map((column) => (
             <View
@@ -48,15 +47,6 @@ const styles = StyleSheet.create({
     height: 350,
     borderRadius: 220,
     backgroundColor: 'rgba(45, 134, 173, 0.14)'
-  },
-  glowCore: {
-    position: 'absolute',
-    top: '26%',
-    alignSelf: 'center',
-    width: 300,
-    height: 300,
-    borderRadius: 150,
-    backgroundColor: 'rgba(34, 110, 149, 0.08)'
   },
   grid: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, opacity: 0.42 },
   gridColumn: {

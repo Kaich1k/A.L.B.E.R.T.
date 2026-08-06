@@ -14,7 +14,7 @@ const config: ExpoConfig = {
   ios: {
     supportsTablet: true,
     bundleIdentifier: 'com.kaichik.albert',
-    buildNumber: '2',
+    buildNumber: '5',
     infoPlist: {
       NSMicrophoneUsageDescription:
         'A.L.B.E.R.T. uses the microphone for wake phrases, voice commands, and conversations while the app is active.',
@@ -22,6 +22,9 @@ const config: ExpoConfig = {
         'A.L.B.E.R.T. converts your speech to text for wake phrases, voice commands, and conversations.',
       NSLocalNetworkUsageDescription:
         'A.L.B.E.R.T. connects to your Mac on the local network to sync Comm, memory, Operations, approvals, captures, and activity.',
+      // Required by ITMS-90683: linked SDKs reference Photo Library APIs even when Albert does not open the picker itself.
+      NSPhotoLibraryUsageDescription:
+        'A.L.B.E.R.T. only accesses your photo library if you choose to share an image for a capture or conversation.',
       NSAppTransportSecurity: {
         NSAllowsLocalNetworking: true,
         NSAllowsArbitraryLoads: false

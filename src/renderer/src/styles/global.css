@@ -660,10 +660,20 @@ body[data-hud-density='balanced'] .jarvis-stage { grid-template-columns: minmax(
   margin: 10px auto 4px;
 }
 .jarvis-reactor::before, .jarvis-reactor::after { content: ''; position: absolute; pointer-events: none; border-radius: 50%; }
-.jarvis-reactor::before { inset: -12px; border: 2px solid transparent; border-top-color: rgba(137,207,240,.75); border-right-color: rgba(137,207,240,.16); border-bottom-color: rgba(137,207,240,.38); filter: drop-shadow(0 0 5px rgba(137,207,240,.4)); }
-.jarvis-reactor::after { inset: 58px; border: 1px solid rgba(137,207,240,.55); box-shadow: inset 0 0 22px rgba(137,207,240,.12); }
-body:not(.perf-mode) .jarvis-reactor::before { animation: ringSpin 18s linear infinite; }
+.jarvis-reactor::before {
+  inset: -14px;
+  border: 2px solid transparent;
+  border-top-color: rgba(137,207,240,.82);
+  border-right-color: rgba(137,207,240,.18);
+  border-bottom-color: rgba(137,207,240,.42);
+  filter: drop-shadow(0 0 6px rgba(137,207,240,.45));
+}
+.jarvis-reactor::after { inset: 52px; border: 1px solid rgba(137,207,240,.55); box-shadow: inset 0 0 22px rgba(137,207,240,.12); }
+body:not(.perf-mode) .jarvis-reactor::before { animation: ringSpin 12s linear infinite; }
 .system-listening .jarvis-reactor::after, .system-thinking .jarvis-reactor::after { animation: reactorAcquire 1.4s ease-in-out infinite; }
+.albert-core.state-listening .jarvis-reactor::before,
+.albert-core.state-thinking .jarvis-reactor::before,
+.albert-core.state-speaking .jarvis-reactor::before { animation-duration: 7s; }
 @keyframes reactorAcquire { 50% { transform: scale(1.13); opacity: .48; } }
 
 .reactor-ring {
@@ -673,29 +683,45 @@ body:not(.perf-mode) .jarvis-reactor::before { animation: ringSpin 18s linear in
   box-shadow: 0 0 12px rgba(137, 207, 240, 0.15);
 }
 
+.reactor-ring.sweep {
+  inset: -8px;
+  border: 2px solid transparent;
+  border-top-color: rgba(137, 207, 240, 0.55);
+  border-left-color: rgba(137, 207, 240, 0.12);
+  animation: ringSpin 16s linear infinite reverse;
+  box-shadow: none;
+}
+
 .reactor-ring.outer {
   inset: 0;
-  animation: ringSpin 14s linear infinite;
+  animation: ringSpin 9s linear infinite;
   border-style: dashed;
   border-width: 1px;
 }
 
 .reactor-ring.mid {
   inset: 18px;
-  animation: ringSpin 8s linear infinite reverse;
+  animation: ringSpin 6.5s linear infinite reverse;
   border-color: rgba(137, 207, 240, 0.55);
+}
+
+.reactor-ring.cardinals {
+  inset: 14px;
+  border: none;
+  box-shadow: none;
+  animation: ringSpin 11s linear infinite;
 }
 
 .reactor-ring.inner {
   inset: 40px;
-  animation: ringSpin 5.5s linear infinite;
+  animation: ringSpin 4.8s linear infinite;
   border-color: rgba(137, 207, 240, 0.42);
   border-style: dotted;
 }
 
 .reactor-ring.ticks {
   inset: 28px;
-  animation: ringSpin 22s linear infinite reverse;
+  animation: ringSpin 14s linear infinite reverse;
   border: none;
   background: conic-gradient(
     from 0deg,
@@ -710,10 +736,18 @@ body:not(.perf-mode) .jarvis-reactor::before { animation: ringSpin 18s linear in
   opacity: 0.85;
 }
 
+.albert-core.state-listening .reactor-ring.outer,
+.albert-core.state-thinking .reactor-ring.outer { animation-duration: 5.5s; }
+.albert-core.state-listening .reactor-ring.mid,
+.albert-core.state-thinking .reactor-ring.mid { animation-duration: 4s; }
+.albert-core.state-thinking .reactor-ring.ticks { animation-duration: 6s; }
+.albert-core.state-speaking .reactor-ring.outer { animation-duration: 4.2s; }
+.albert-core.state-speaking .reactor-ring.mid { animation-duration: 3.2s; }
+
 .reactor-crosshair {
   position: absolute;
   inset: 22%;
-  z-index: 0;
+  z-index: 2;
   pointer-events: none;
   background:
     linear-gradient(90deg, transparent 49%, rgba(137, 207, 240, 0.35) 49%, rgba(137, 207, 240, 0.35) 51%, transparent 51%),
@@ -732,25 +766,47 @@ body:not(.perf-mode) .jarvis-reactor::before { animation: ringSpin 18s linear in
   animation: dotPulse 2.4s ease-in-out infinite;
 }
 
+.reactor-sat {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(232, 248, 255, 0.95);
+  box-shadow: 0 0 10px rgba(137, 207, 240, 0.9);
+  z-index: 2;
+}
+
+.reactor-sat.n {
+  top: -3px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.reactor-sat.s {
+  bottom: -3px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
 .reactor-dot.n {
-  top: 14%;
+  top: 0;
   left: 50%;
   transform: translateX(-50%);
 }
 .reactor-dot.e {
-  right: 14%;
+  right: 0;
   top: 50%;
   transform: translateY(-50%);
   animation-delay: 0.4s;
 }
 .reactor-dot.s {
-  bottom: 14%;
+  bottom: 0;
   left: 50%;
   transform: translateX(-50%);
   animation-delay: 0.8s;
 }
 .reactor-dot.w {
-  left: 14%;
+  left: 0;
   top: 50%;
   transform: translateY(-50%);
   animation-delay: 1.2s;
@@ -769,6 +825,7 @@ body:not(.perf-mode) .jarvis-reactor::before { animation: ringSpin 18s linear in
 /* Cheap transform spins stay on in perf mode — only pause when window is hidden */
 body.window-hidden .reactor-ring,
 body.window-hidden .reactor-dot,
+body.window-hidden .jarvis-reactor::before,
 body.window-hidden .jarvis-uplink.ok {
   animation: none;
 }
@@ -916,19 +973,20 @@ body.window-hidden .jarvis-uplink.ok {
 
 .orb,
 .reactor-core {
-  width: 96px;
-  height: 96px;
+  width: 102px;
+  height: 102px;
   border-radius: 50%;
   overflow: hidden;
   isolation: isolate;
   background:
-    radial-gradient(circle at 35% 30%, rgba(225, 248, 255, 0.82), transparent 32%),
-    radial-gradient(circle at 70% 70%, rgba(22, 92, 132, 0.72), transparent 48%),
-    radial-gradient(circle at 50% 50%, rgba(137, 207, 240, 0.85), rgba(0, 12, 20, 0.4));
+    radial-gradient(circle at 34% 28%, rgba(245, 252, 255, 0.95), transparent 34%),
+    radial-gradient(circle at 68% 70%, rgba(28, 108, 150, 0.78), transparent 50%),
+    radial-gradient(circle at 50% 50%, rgba(137, 207, 240, 0.88), rgba(0, 12, 20, 0.42));
   animation: orbBreath 7.2s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
   box-shadow:
-    0 0 30px rgba(137, 207, 240, 0.55),
-    inset 0 0 20px rgba(137, 207, 240, 0.3);
+    0 0 36px rgba(137, 207, 240, 0.62),
+    0 0 64px rgba(137, 207, 240, 0.22),
+    inset 0 0 22px rgba(137, 207, 240, 0.34);
   position: relative;
   z-index: 1;
   will-change: transform, box-shadow;
@@ -969,9 +1027,13 @@ body.window-hidden .jarvis-uplink.ok {
 .albert-core.state-speaking .reactor-core { background: radial-gradient(circle at 35% 30%,rgba(245,253,255,.96),transparent 32%),radial-gradient(circle at 70% 70%,rgba(31,113,154,.78),transparent 48%),radial-gradient(circle,var(--accent-strong),rgba(0,18,28,.56)); box-shadow: 0 0 44px rgba(137,207,240,.72), inset 0 0 18px rgba(232,248,255,.3); }
 .albert-core.state-speaking .reactor-ring.inner { border-color: rgba(184,228,248,.86); }
 .albert-core.has-fault .reactor-ring.inner { border-color: rgba(255,107,99,.72); }
-.albert-core.has-fault .reactor-dot { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
-.albert-core.is-wake-armed.state-idle .reactor-dot { opacity: .82; }
-.albert-core.state-thinking .reactor-ring.ticks { animation-duration: 5s; }
+.albert-core.has-fault .reactor-dot,
+.albert-core.has-fault .reactor-sat { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+.albert-core.has-fault .reactor-ring.sweep {
+  border-top-color: rgba(255, 107, 99, 0.65);
+  border-left-color: rgba(255, 107, 99, 0.14);
+}
+.albert-core.is-wake-armed.state-idle .reactor-dot { opacity: .92; }
 .albert-core.state-listening .reactor-ring.mid { border-color: rgba(184,228,248,.9); box-shadow: 0 0 18px rgba(137,207,240,.25); }
 
 /* Core pulse is light enough to keep; pause only when window hidden */
