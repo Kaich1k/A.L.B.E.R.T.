@@ -55,10 +55,21 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     const onVis = (): void => {
       document.body.classList.toggle('window-hidden', document.hidden)
+      // After sleep / long background, mic tracks and wake timers often die quietly
+      if (!document.hidden) {
+        const idle = useAlbertStore.getState().voiceState === 'idle' && !sessionRef.current
+        if (idle && useAlbertStore.getState().settings.wakeWordEnabled !== false) {
+          wakeRef.current?.kick()
+        }
+      }
     }
     onVis()
     document.addEventListener('visibilitychange', onVis)
-    return () => document.removeEventListener('visibilitychange', onVis)
+    window.addEventListener('focus', onVis)
+    return () => {
+      document.removeEventListener('visibilitychange', onVis)
+      window.removeEventListener('focus', onVis)
+    }
   }, [])
 
   const startVoice = useCallback(async (): Promise<void> => {

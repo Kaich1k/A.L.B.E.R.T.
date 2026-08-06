@@ -97,6 +97,7 @@ export class WakeWordListener {
   private wanted = false
   private paused = false
   private busy = false
+  private busySince = 0
   private starting = false
   private segmentGen = 0
 
@@ -108,14 +109,19 @@ export class WakeWordListener {
   private levelBuffer: Uint8Array<ArrayBuffer> | null = null
   private pollTimer = 0
   private restartTimer = 0
+  private healthTimer = 0
   private spokeMs = 0
   private silenceMs = 0
   private segmentStartedAt = 0
   private recording = false
+  private lastPollAt = 0
+  private lastSegmentStopAt = 0
+  private recovering = false
 
   private lastFireAt = 0
   private lastStatusArmed: boolean | null = null
   private pendingQueue: Blob[] = []
+  private onDeviceChange: (() => void) | null = null
 
   private readonly onWake: WakeCallback
   private readonly onStatus: (armed: boolean, detail?: string) => void
@@ -127,6 +133,11 @@ export class WakeWordListener {
   /** Hard cut even if VAD never marks speech */
   private readonly maxSegmentMs = 2800
   private readonly minSegmentMs = 900
+  /** Long-running apps: mic tracks die after sleep; timers stall in background */
+  private readonly healthEveryMs = 20_000
+  private readonly pollStaleMs = 4_000
+  private readonly segmentStaleMs = 12_000
+  private readonly busyMaxMs = 20_000
 
   constructor(onWake: WakeCallback, onStatus: (armed: boolean, detail?: string) => void) {
     this.onWake = onWake
@@ -136,12 +147,15 @@ export class WakeWordListener {
   start(): void {
     this.wanted = true
     this.paused = false
+    this.bindDeviceChange()
     void this.ensureRunning()
+    this.armHealthWatch()
   }
 
   stop(): void {
     this.wanted = false
     this.paused = false
+    this.unbindDeviceChange()
     this.teardownCapture()
     this.emitStatus(false)
   }
@@ -155,14 +169,16 @@ export class WakeWordListener {
 
   resume(): void {
     if (!this.wanted) return
-    if (!this.paused && this.stream && this.analyser) {
-      this.emitStatus(true)
-      if (!this.pollTimer) this.pollLevels()
-      if (!this.recording) this.beginSegment()
-      return
-    }
     this.paused = false
+    this.bindDeviceChange()
+    this.armHealthWatch()
     void this.ensureRunning()
+  }
+
+  /** Call after sleep / window focus — forces a health check + reacquire if needed. */
+  kick(): void {
+    if (!this.wanted || this.paused) return
+    void this.recoverIfNeeded('kick')
   }
 
   private emitStatus(armed: boolean, detail?: string): void {
@@ -187,18 +203,110 @@ export class WakeWordListener {
     return true
   }
 
-  private teardownCapture(): void {
+  private bindDeviceChange(): void {
+    if (this.onDeviceChange || !navigator.mediaDevices?.addEventListener) return
+    this.onDeviceChange = () => {
+      if (this.wanted && !this.paused) void this.recoverIfNeeded('devicechange')
+    }
+    navigator.mediaDevices.addEventListener('devicechange', this.onDeviceChange)
+  }
+
+  private unbindDeviceChange(): void {
+    if (!this.onDeviceChange || !navigator.mediaDevices?.removeEventListener) return
+    navigator.mediaDevices.removeEventListener('devicechange', this.onDeviceChange)
+    this.onDeviceChange = null
+  }
+
+  private armHealthWatch(): void {
+    if (this.healthTimer) window.clearInterval(this.healthTimer)
+    this.healthTimer = window.setInterval(() => {
+      void this.recoverIfNeeded('health')
+    }, this.healthEveryMs)
+  }
+
+  private micLive(): boolean {
+    return Boolean(this.stream?.getTracks().some((t) => t.readyState === 'live'))
+  }
+
+  private attachTrackGuards(stream: MediaStream): void {
+    for (const track of stream.getTracks()) {
+      track.onended = () => {
+        console.warn('[wake] mic track ended — reacquiring')
+        void this.recoverIfNeeded('track-ended')
+      }
+      // Some macOS sleep/wake paths mute without ending the track
+      track.onmute = () => {
+        console.warn('[wake] mic track muted — will health-check')
+        window.setTimeout(() => void this.recoverIfNeeded('track-mute'), 800)
+      }
+    }
+  }
+
+  private async recoverIfNeeded(reason: string): Promise<void> {
+    if (!this.wanted || this.paused || this.recovering || this.starting) return
+
+    const now = Date.now()
+    if (this.busy && this.busySince && now - this.busySince > this.busyMaxMs) {
+      console.warn('[wake] whisper busy stuck — clearing', reason)
+      this.busy = false
+      this.busySince = 0
+      this.pendingQueue = []
+    }
+
+    const micOk = this.micLive()
+    const pollOk = this.pollTimer > 0 && now - this.lastPollAt < this.pollStaleMs
+    const segmentOk =
+      (this.recording && now - this.segmentStartedAt < this.maxSegmentMs * 3) ||
+      (!this.recording &&
+        (this.lastSegmentStopAt === 0 || now - this.lastSegmentStopAt < this.segmentStaleMs))
+    const ctxOk = !this.audioContext || this.audioContext.state !== 'closed'
+
+    if (micOk && pollOk && segmentOk && ctxOk) {
+      if (this.audioContext?.state === 'suspended') {
+        await this.audioContext.resume().catch(() => undefined)
+      }
+      if (!this.recording) this.beginSegment()
+      this.emitStatus(true)
+      return
+    }
+
+    console.warn('[wake] recovering capture', {
+      reason,
+      micOk,
+      pollOk,
+      segmentOk,
+      ctxOk,
+      ctxState: this.audioContext?.state
+    })
+    this.recovering = true
+    try {
+      this.teardownCapture({ keepHealth: true })
+      await this.ensureRunning()
+      this.emitStatus(true, 'rearmed')
+    } finally {
+      this.recovering = false
+    }
+  }
+
+  private teardownCapture(opts?: { keepHealth?: boolean }): void {
     this.segmentGen += 1
     if (this.pollTimer) window.clearTimeout(this.pollTimer)
     if (this.restartTimer) window.clearTimeout(this.restartTimer)
+    if (!opts?.keepHealth && this.healthTimer) {
+      window.clearInterval(this.healthTimer)
+      this.healthTimer = 0
+    }
     this.pollTimer = 0
     this.restartTimer = 0
     this.recording = false
     this.spokeMs = 0
     this.silenceMs = 0
     this.busy = false
+    this.busySince = 0
     this.pendingQueue = []
     this.starting = false
+    this.lastPollAt = 0
+    this.lastSegmentStopAt = 0
 
     try {
       if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
@@ -225,17 +333,30 @@ export class WakeWordListener {
     this.analyser = null
     void this.audioContext?.close().catch(() => undefined)
     this.audioContext = null
-    this.stream?.getTracks().forEach((t) => t.stop())
+    this.stream?.getTracks().forEach((t) => {
+      t.onended = null
+      t.onmute = null
+      t.stop()
+    })
     this.stream = null
   }
 
   private async ensureRunning(): Promise<void> {
     if (!this.wanted || this.paused || this.starting) return
-    if (this.stream?.getTracks().some((t) => t.readyState === 'live') && this.analyser) {
+    if (this.micLive() && this.analyser && this.audioContext?.state !== 'closed') {
+      if (this.audioContext.state === 'suspended') {
+        await this.audioContext.resume().catch(() => undefined)
+      }
       if (!this.pollTimer) this.pollLevels()
       if (!this.recording) this.beginSegment()
+      this.armHealthWatch()
       this.emitStatus(true)
       return
+    }
+
+    // Dead/zombie stream — tear down before reacquire
+    if (this.stream || this.audioContext) {
+      this.teardownCapture({ keepHealth: true })
     }
 
     this.starting = true
@@ -261,6 +382,8 @@ export class WakeWordListener {
         return
       }
 
+      this.attachTrackGuards(this.stream)
+
       try {
         void window.albert.warmVoice()
       } catch {
@@ -280,6 +403,7 @@ export class WakeWordListener {
       this.analyser.connect(this.silentGain)
       this.silentGain.connect(this.audioContext.destination)
 
+      this.armHealthWatch()
       this.emitStatus(true)
       this.beginSegment()
       this.pollLevels()
@@ -326,6 +450,7 @@ export class WakeWordListener {
       if (gen !== this.segmentGen) return
       if (this.mediaRecorder === recorder) this.mediaRecorder = null
       this.recording = false
+      this.lastSegmentStopAt = Date.now()
       const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' })
       void this.handleClip(blob)
       // Immediately arm the next slice while armed
@@ -334,6 +459,12 @@ export class WakeWordListener {
           if (this.wanted && !this.paused && !this.recording) this.beginSegment()
         }, 40)
       }
+    }
+
+    recorder.onerror = () => {
+      console.warn('[wake] MediaRecorder error — recovering')
+      this.recording = false
+      void this.recoverIfNeeded('recorder-error')
     }
 
     try {
@@ -347,6 +478,12 @@ export class WakeWordListener {
 
   private pollLevels(): void {
     if (!this.wanted || this.paused || !this.analyser) return
+    this.lastPollAt = Date.now()
+
+    if (!this.micLive()) {
+      void this.recoverIfNeeded('poll-dead-mic')
+      return
+    }
 
     if (this.audioContext?.state === 'suspended') {
       void this.audioContext.resume().catch(() => undefined)
@@ -415,6 +552,7 @@ export class WakeWordListener {
 
   private async transcribeAndFire(blob: Blob): Promise<void> {
     this.busy = true
+    this.busySince = Date.now()
     try {
       const audio = await decodeBlobToMono16k(blob)
       const trimmed = trimSilence(audio)
@@ -439,6 +577,7 @@ export class WakeWordListener {
       console.warn('[wake] whisper failed', err)
     } finally {
       this.busy = false
+      this.busySince = 0
       if (this.pendingQueue.length && this.wanted && !this.paused) {
         const next = this.pendingQueue.shift()!
         void this.transcribeAndFire(next)
