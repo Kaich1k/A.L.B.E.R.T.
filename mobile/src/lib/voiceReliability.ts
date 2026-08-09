@@ -1,4 +1,5 @@
-export const INTERIM_TAIL_SILENCE_MS = 1_150
+/** Match Mac end-of-utterance silence (~3s) before finalizing speech. */
+export const INTERIM_TAIL_SILENCE_MS = 3_000
 export const TTS_START_WATCHDOG_MS = 2_500
 
 export type TranscriptSnapshot = {

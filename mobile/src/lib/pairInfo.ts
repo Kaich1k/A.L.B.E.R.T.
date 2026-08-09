@@ -1,3 +1,29 @@
+/** Rank companion URLs for phone use. IPv4 LAN beats flaky .local mDNS on iOS. */
+function urlPreference(url: string): number {
+  if (/127\.0\.0\.1|localhost/i.test(url)) return 0
+  try {
+    const host = new URL(url).hostname
+    if (/^(\d{1,3}\.){3}\d{1,3}$/.test(host)) return 4
+    if (host.endsWith('.local')) return 1
+    return 3
+  } catch {
+    return 2
+  }
+}
+
+function pickBestUrl(urls: string[]): string | undefined {
+  let best: string | undefined
+  let bestScore = -1
+  for (const url of urls) {
+    const score = urlPreference(url)
+    if (score > bestScore) {
+      best = url
+      bestScore = score
+    }
+  }
+  return best
+}
+
 /** Parse Mac "Copy pair info" clipboard blobs into URL + token. */
 export function parsePairInfo(raw: string): { macBaseUrl?: string; macToken?: string } {
   const text = raw.trim()
@@ -11,14 +37,12 @@ export function parsePairInfo(raw: string): { macBaseUrl?: string; macToken?: st
     text.match(/\bToken:\s*([a-f0-9]{16,})\b/i)
   if (tokenLine?.[1]) out.macToken = tokenLine[1].trim()
 
-  const urls = [
-    ...text.matchAll(/https?:\/\/[^\s\]|'"]+/gi)
-  ].map((m) => m[0].replace(/[.,;)]+$/, ''))
+  const urls = [...text.matchAll(/https?:\/\/[^\s\]|'"]+/gi)].map((m) =>
+    m[0].replace(/[.,;)]+$/, '')
+  )
 
-  const lan = urls.find((u) => !/127\.0\.0\.1|localhost/i.test(u))
-  const local = urls.find((u) => /127\.0\.0\.1|localhost/i.test(u))
-  if (lan) out.macBaseUrl = lan
-  else if (local) out.macBaseUrl = local
+  const preferred = pickBestUrl(urls)
+  if (preferred) out.macBaseUrl = preferred
   else if (/^https?:\/\//i.test(text) && !text.includes('\n')) {
     out.macBaseUrl = text.replace(/\/+$/, '')
   }
@@ -50,4 +74,24 @@ export function normalizeMacUrl(url: string): string {
   if (!parsed.hostname) throw new Error('Mac companion address is missing a host')
   // Sync endpoints are fixed and credentials belong only in Authorization headers.
   return `${parsed.protocol}//${parsed.host}`
+}
+
+/** True when the URL can only work from the Mac itself / iOS Simulator. */
+export function isLoopbackMacUrl(url: string): boolean {
+  try {
+    const host = normalizeMacUrl(url)
+    if (!host) return false
+    return /^(https?:\/\/)?(127\.0\.0\.1|localhost)(:|\/|$)/i.test(host)
+  } catch {
+    return /127\.0\.0\.1|localhost/i.test(url)
+  }
+}
+
+/** True when the URL relies on Bonjour/mDNS, which is often unreliable on iPhone. */
+export function isMdnsMacUrl(url: string): boolean {
+  try {
+    return new URL(normalizeMacUrl(url)).hostname.endsWith('.local')
+  } catch {
+    return /\.local(?::|\/|$)/i.test(url)
+  }
 }

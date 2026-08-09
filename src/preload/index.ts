@@ -100,6 +100,7 @@ const api: AlbertApi = {
   probeOllama: () => ipcRenderer.invoke(IpcChannels.ollamaProbe),
   pullOllamaModel: (model) => ipcRenderer.invoke(IpcChannels.ollamaPull, model),
   probeGroq: () => ipcRenderer.invoke(IpcChannels.groqProbe),
+  probeGemini: () => ipcRenderer.invoke(IpcChannels.geminiProbe),
   getOperations: () => ipcRenderer.invoke(IpcChannels.operationsGet),
   createMission: (input) => ipcRenderer.invoke(IpcChannels.missionCreate, input),
   updateMission: (id, patch) => ipcRenderer.invoke(IpcChannels.missionUpdate, { id, patch }),

@@ -23,6 +23,7 @@ export function Sidebar(): React.JSX.Element {
     settings.anthropicApiKey?.trim() ||
       settings.ollamaApiKey?.trim() ||
       settings.groqApiKey?.trim() ||
+      settings.geminiApiKey?.trim() ||
       settings.localProvider === 'ollama'
   )
 
@@ -66,7 +67,11 @@ export function Sidebar(): React.JSX.Element {
 
       <div
         className="mode-toggle"
-        title={isAuto ? 'Auto: QUICK (Ollama/Groq Cloud) → Haiku → Opus' : routeInfo || undefined}
+        title={
+          isAuto
+            ? 'Auto: QUICK (Ollama/Groq/Gemini) → Haiku → Opus'
+            : routeInfo || undefined
+        }
       >
         <span className="hud-label">Routing mode</span>
         <div className="mode-toggle-row triple">

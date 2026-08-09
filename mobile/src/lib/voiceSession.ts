@@ -21,6 +21,8 @@ export type VoiceHandlers = {
   onStatus?: (msg: string) => void
   speakReplies?: boolean
   speechRate?: number
+  /** expo-speech voice identifier; omit/empty for the system default. */
+  ttsVoiceId?: string
   wakeOnLaunch?: boolean
 }
 
@@ -59,6 +61,8 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
   wakeArmed: boolean
   engage: () => Promise<void>
   requestPermission: () => Promise<void>
+  /** Pause the mic briefly and speak a sample with the configured TTS voice. */
+  previewSpeak: (text?: string) => Promise<void>
   standby: () => void
   toggle: () => Promise<void>
 } {
@@ -95,6 +99,8 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
   const interimTimerRef = useRef<Timer | null>(null)
   const transcriptTailRef = useRef(new InterimTranscriptTail())
   const activeSpeechCancelRef = useRef<(() => void) | null>(null)
+  /** Prefer on-device ASR so wake/listening keep working without Wi‑Fi when the OS supports it. */
+  const preferOnDeviceRef = useRef(true)
 
   const publishStatus = useCallback((note: string) => {
     if (!mountedRef.current) return
@@ -146,12 +152,7 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
     }
   }, [])
 
-  const cancelRecognition = useCallback(() => {
-    clearRestartTimer()
-    clearInterimTimer()
-    desiredModeRef.current = null
-    if (mountedRef.current) setWakeArmed(false)
-    transcriptTailRef.current.clear()
+  const abortNativeRecognition = useCallback(() => {
     const wasActive = recognitionActiveRef.current
     recognitionActiveRef.current = false
     if (!wasActive) return
@@ -166,7 +167,16 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
         /* native session was already gone */
       }
     }
-  }, [clearInterimTimer, clearRestartTimer])
+  }, [])
+
+  const cancelRecognition = useCallback(() => {
+    clearRestartTimer()
+    clearInterimTimer()
+    desiredModeRef.current = null
+    if (mountedRef.current) setWakeArmed(false)
+    transcriptTailRef.current.clear()
+    abortNativeRecognition()
+  }, [abortNativeRecognition, clearInterimTimer, clearRestartTimer])
 
   const scheduleListeningRef = useRef(
     (_mode: ListeningMode, _generation: number, _delayMs?: number): void => undefined
@@ -200,15 +210,26 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
             interimResults: true,
             maxAlternatives: 1,
             contextualStrings: mode === 'standby' ? WAKE_CONTEXT : COMMAND_CONTEXT,
-            // Utterances must stop/finalize after silence. Standby remains continuous,
-            // with the interim-tail timer below as a cross-version wake fallback.
-            continuous: mode === 'standby',
+            // Keep both modes continuous so WE own the ~3s end-of-utterance silence window
+            // (native non-continuous dictation often cuts far earlier than Mac).
+            continuous: true,
             addsPunctuation: true,
+            requiresOnDeviceRecognition: preferOnDeviceRef.current,
             iosTaskHint: mode === 'standby' ? 'confirmation' : 'dictation'
           })
         } catch (err) {
           recognitionActiveRef.current = false
           recognitionAttemptRef.current += 1
+          const message = err instanceof Error ? err.message : String(err)
+          if (
+            preferOnDeviceRef.current &&
+            /on-?device|not available|unsupported|language/i.test(message)
+          ) {
+            preferOnDeviceRef.current = false
+            publishStatus('On-device speech unavailable — using network recognition')
+            scheduleListeningRef.current(mode, generation, 220)
+            return
+          }
           const retryMs = Math.min(6_000, 350 * 2 ** Math.min(recognitionAttemptRef.current, 4))
           publishStatus(err instanceof Error ? `Mic unavailable — ${err.message}` : 'Mic unavailable')
           scheduleListeningRef.current(mode, generation, retryMs)
@@ -271,8 +292,10 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
         }, ttsCompletionWatchdogMs(clean))
 
         try {
+          const voiceId = handlersRef.current.ttsVoiceId?.trim()
           Speech.speak(clean, {
             language: 'en-US',
+            ...(voiceId ? { voice: voiceId } : {}),
             rate: Math.max(0.7, Math.min(1.35, handlersRef.current.speechRate ?? 1.05)),
             useApplicationAudioSession: false,
             onStart: () => {
@@ -368,7 +391,7 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
     cancelRecognition()
     await cancelSpeech()
     if (!isCurrentGeneration(generation)) return
-    setPhaseBoth('listening', 'Listening — pause when you finish speaking')
+    setPhaseBoth('listening', 'Listening — pause ~3 seconds when you finish')
     scheduleListening('utterance', generation)
   }, [
     cancelRecognition,
@@ -399,7 +422,7 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
         await speak('Online, sir.', generation, true)
         if (!isCurrentGeneration(generation)) return
         processingRef.current = false
-        setPhaseBoth('listening', 'Listening — pause when you finish speaking')
+        setPhaseBoth('listening', 'Listening — pause ~3 seconds when you finish')
         scheduleListening('utterance', generation, 220)
         return
       }
@@ -444,7 +467,7 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
         await speak(reply || 'Done, sir.', observedGeneration)
         if (!isCurrentGeneration(observedGeneration)) return
         processingRef.current = false
-        setPhaseBoth('listening', 'Listening — pause when you finish speaking')
+        setPhaseBoth('listening', 'Listening — pause ~3 seconds when you finish')
         scheduleListening('utterance', observedGeneration, 220)
       } catch (err) {
         if (!isCurrentGeneration(observedGeneration)) return
@@ -533,6 +556,12 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
       }
 
       if (code === 'service-not-allowed' || code === 'language-not-supported') {
+        if (preferOnDeviceRef.current) {
+          preferOnDeviceRef.current = false
+          publishStatus('On-device speech unavailable — switching to network recognition')
+          restartDesired(280)
+          return
+        }
         desiredModeRef.current = null
         setSupported(false)
         publishStatus(
@@ -549,13 +578,22 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
         return
       }
 
+      if (code === 'network' && preferOnDeviceRef.current) {
+        // Stay on-device; a transient network blip should not force cloud ASR.
+        publishStatus('Waiting for on-device speech — Wi‑Fi not required')
+        restartDesired(700)
+        return
+      }
+
       const retryMs = speechRetryDelayMs(code, recognitionAttemptRef.current)
       recognitionAttemptRef.current += 1
       if (retryMs != null) {
         if (code !== 'no-speech' && code !== 'speech-timeout') {
           publishStatus(
             code === 'network'
-              ? 'Speech network unavailable — retrying'
+              ? preferOnDeviceRef.current
+                ? 'Speech engine restarting (on-device)'
+                : 'Speech network unavailable — retrying'
               : 'Mic interrupted — retrying'
           )
         }
@@ -698,6 +736,93 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
     else goStandby()
   }, [engage, goStandby, publishStatus])
 
+  const previewSpeak = useCallback(
+    async (text = 'Standing by, sir.'): Promise<void> => {
+      const phrase = text.replace(/\s+/g, ' ').trim() || 'Standing by, sir.'
+      const resumeMode: ListeningMode | null =
+        desiredModeRef.current ||
+        (phaseRef.current === 'listening' || phaseRef.current === 'thinking' || phaseRef.current === 'speaking'
+          ? 'utterance'
+          : armedPreferenceRef.current || phaseRef.current === 'standby'
+            ? 'standby'
+            : null)
+
+      clearRestartTimer()
+      clearInterimTimer()
+      desiredModeRef.current = null
+      abortNativeRecognition()
+      await cancelSpeech()
+      // Give iOS a beat to release the recognition audio session before TTS.
+      await new Promise<void>((resolve) => setTimeout(resolve, 160))
+
+      const voiceId = handlersRef.current.ttsVoiceId?.trim()
+      const rate = Math.max(0.7, Math.min(1.35, handlersRef.current.speechRate ?? 1.05))
+
+      const speakOnce = (useVoice: boolean): Promise<void> =>
+        new Promise((resolve, reject) => {
+          let settled = false
+          const finish = (error?: Error) => {
+            if (settled) return
+            settled = true
+            if (error) reject(error)
+            else resolve()
+          }
+          try {
+            Speech.speak(phrase, {
+              language: 'en-US',
+              ...(useVoice && voiceId ? { voice: voiceId } : {}),
+              rate,
+              volume: 1,
+              useApplicationAudioSession: false,
+              onDone: () => finish(),
+              onStopped: () => finish(),
+              onError: () => {
+                finish(
+                  new Error(
+                    useVoice && voiceId
+                      ? 'Selected speaking voice failed'
+                      : 'Speaking voice preview failed — turn off Silent Mode and raise media volume'
+                  )
+                )
+              }
+            })
+          } catch (error) {
+            finish(error instanceof Error ? error : new Error('Speaking voice preview failed'))
+          }
+        })
+
+      try {
+        try {
+          await speakOnce(Boolean(voiceId))
+        } catch (error) {
+          if (!voiceId) throw error
+          // Stale voice identifiers fail quietly on some iOS builds — fall back once.
+          await speakOnce(false)
+        }
+      } finally {
+        if (!mountedRef.current || !resumeMode) return
+        if (resumeMode === 'standby' && !armedPreferenceRef.current && handlersRef.current.wakeOnLaunch !== true) {
+          return
+        }
+        const generation = generationRef.current
+        if (resumeMode === 'standby') {
+          setPhaseBoth('standby', 'Standing by, sir. Say “Albert, wake up”.')
+          scheduleListening('standby', generation, 280)
+        } else if (phaseRef.current !== 'standby') {
+          scheduleListening('utterance', generation, 280)
+        }
+      }
+    },
+    [
+      abortNativeRecognition,
+      cancelSpeech,
+      clearInterimTimer,
+      clearRestartTimer,
+      scheduleListening,
+      setPhaseBoth
+    ]
+  )
+
   return {
     phase,
     status,
@@ -705,6 +830,7 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
     wakeArmed,
     engage,
     requestPermission,
+    previewSpeak,
     standby: goStandby,
     toggle
   }

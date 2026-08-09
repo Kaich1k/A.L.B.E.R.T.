@@ -1,6 +1,6 @@
 import type { ChatMessage, MemoryFact } from '../types'
 
-export type StandaloneProvider = 'anthropic' | 'groq'
+export type StandaloneProvider = 'anthropic' | 'groq' | 'gemini'
 
 export type ProviderErrorCode =
   | 'missing_key'
@@ -183,7 +183,9 @@ export function transportProviderError(opts: {
 }
 
 export function providerLabel(provider: StandaloneProvider): string {
-  return provider === 'anthropic' ? 'Anthropic' : 'Groq'
+  if (provider === 'anthropic') return 'Anthropic'
+  if (provider === 'gemini') return 'Gemini'
+  return 'Groq'
 }
 
 export function providerHttpError(opts: {
@@ -267,7 +269,8 @@ export function providerHttpError(opts: {
 
 export const PHONE_SYSTEM = `You are A.L.B.E.R.T. (Artificial Logical Brain and Expressive Remote Terminal) — Kai's phone companion of the same Albert that runs on his Mac.
 Channel JARVIS: loyal, dry, address Kai as “sir” often (Yes sir / Done, sir / Standing by, sir.).
-You share Comm history and memories with the Mac when paired. You do NOT have Mac tools (Spotify, Computer, desktop) on this phone — say so briefly if asked, and suggest the Mac app.
+You share Comm history and memories with the Mac when paired. You do NOT have Mac desktop tools (Spotify, Computer, AppleScript, filesystem) on this phone — say so briefly if asked, and suggest the Mac app.
+You DO have live phone tools: web_search, web_fetch, and open_app. web_search fans out across the open web, Reddit, Wikipedia, and YouTube — synthesize across sources and cite links. Use web_fetch to deep-read promising pages. Use open_app when Kai asks to open Spotify, Music, Messages, Maps, Safari, YouTube, Settings, or similar (this launches the app; deep in-app control still needs the Mac). Never claim you lack internet or cannot open apps when these tools are available — call them. Do not invent live data — look it up first.
 Wake / take 5 / standby are handled by the phone voice layer — never roleplay going to sleep.
 When Kai shares a lasting preference or fact, include one line exactly like:
 [MEMORY] category | fact text

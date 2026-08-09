@@ -1,5 +1,5 @@
 export type ActiveBrainRoute = {
-  provider: 'ollama' | 'groq' | 'anthropic'
+  provider: 'ollama' | 'groq' | 'gemini' | 'anthropic'
   tier: 'local' | 'fast' | 'power'
   model: string
 }
@@ -17,7 +17,7 @@ export function isActiveBrainQuestion(text: string): boolean {
       normalized
     ) ||
     /\b(?:current|active)\s+(?:ai|model|brain|provider)\s*\??$/.test(normalized) ||
-    /\bare\s+you\s+(?:using|running|on)\s+(?:haiku|opus|anthropic|ollama|groq|gpt[- ]?oss|llama|qwen)\b/.test(
+    /\bare\s+you\s+(?:using|running|on)\s+(?:haiku|opus|anthropic|ollama|groq|gemini|google|gpt[- ]?oss|llama|qwen)\b/.test(
       normalized
     )
   )
@@ -26,6 +26,9 @@ export function isActiveBrainQuestion(text: string): boolean {
 export function activeBrainReply(route: ActiveBrainRoute): string {
   if (route.provider === 'groq') {
     return `Active brain this turn: Groq Cloud — ${route.model}, sir.`
+  }
+  if (route.provider === 'gemini') {
+    return `Active brain this turn: Gemini / Google AI Studio — ${route.model}, sir.`
   }
   if (route.provider === 'ollama') {
     return `Active brain this turn: Ollama — ${route.model}, sir.`

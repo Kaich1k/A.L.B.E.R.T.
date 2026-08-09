@@ -16,7 +16,7 @@ import { TabBar } from './src/components/TabBar'
 import { Toast } from './src/components/Toast'
 import { chatWithProvider, modelsFor, ProviderRequestError } from './src/lib/chat'
 import { newId } from './src/lib/id'
-import { parsePairInfo } from './src/lib/pairInfo'
+import { isLoopbackMacUrl, normalizeMacUrl, parsePairInfo } from './src/lib/pairInfo'
 import {
   addLocalMissionStep,
   createLocalCapture,
@@ -64,6 +64,7 @@ import {
   type UpdateRoutineInput
 } from './src/screens/OperationsScreen'
 import { PairScreen } from './src/screens/PairScreen'
+import { sizes } from './src/theme'
 import {
   EMPTY_OPERATIONS,
   EMPTY_SYNC_STATE,
@@ -298,6 +299,15 @@ export default function App(): React.JSX.Element {
             updateConfig(currentConfig)
             await saveConfig(currentConfig)
             setRemoteName(enrollment.name)
+            commitData((current) => ({
+              ...current,
+              sync: {
+                ...current.sync,
+                remoteName: enrollment.name,
+                protocolVersion: enrollment.protocolVersion,
+                lastError: undefined
+              }
+            }))
           }
 
           setLinkState('syncing')
@@ -310,7 +320,10 @@ export default function App(): React.JSX.Element {
             ...merged,
             sync: {
               ...merged.sync,
-              remoteName: remoteName || merged.sync.remoteName || 'A.L.B.E.R.T. Mac'
+              remoteName: remoteName || merged.sync.remoteName || 'A.L.B.E.R.T. Mac',
+              protocolVersion: merged.sync.protocolVersion || 2,
+              lastError: undefined,
+              consecutiveFailures: 0
             }
           }
           commitData(next)
@@ -321,8 +334,15 @@ export default function App(): React.JSX.Element {
           if (!quiet) showToast('Mac and phone are synchronized.', 'ok')
           return next
         } catch (error) {
-          const text = messageFor(error)
+          let text = messageFor(error)
           const kind = error instanceof MacSyncError ? error.kind : 'server'
+          if (
+            (kind === 'offline' || kind === 'timeout') &&
+            isLoopbackMacUrl(configRef.current.macBaseUrl)
+          ) {
+            text =
+              'Mac companion is unreachable from this phone — replace localhost with the Mac’s LAN IP from Copy pair info (192.168…)'
+          }
           setLinkState(kind === 'auth' ? 'auth-failed' : kind === 'offline' || kind === 'timeout' ? 'offline' : 'fault')
           setLinkError(text)
           commitData((current) => ({
@@ -386,15 +406,31 @@ export default function App(): React.JSX.Element {
         setLinkState('authenticated')
         setRemoteName(health.name)
         setLinkError(null)
+        if (health.name || health.protocolVersion) {
+          commitData((current) => ({
+            ...current,
+            sync: {
+              ...current.sync,
+              remoteName: health.name || current.sync.remoteName,
+              protocolVersion: health.protocolVersion || current.sync.protocolVersion,
+              lastError: undefined
+            }
+          }))
+        }
       } else {
+        const unreachable =
+          health.error ||
+          (isLoopbackMacUrl(config.macBaseUrl)
+            ? 'Mac companion is unreachable from this phone — replace localhost with the Mac’s LAN IP from Copy pair info (192.168…)'
+            : 'Mac companion is unavailable')
         setLinkState(health.authenticated === false ? 'auth-failed' : 'offline')
-        setLinkError(health.error || 'Mac companion is unavailable')
+        setLinkError(unreachable)
       }
     })
     return () => {
       cancelled = true
     }
-  }, [bootReady, config.autoSync, config.macBaseUrl, config.macCredential, paired])
+  }, [bootReady, commitData, config.autoSync, config.macBaseUrl, config.macCredential, paired])
 
   const runChatTurn = useCallback(
     async (rawText: string, options: ChatTurnOptions = {}): Promise<string> => {
@@ -536,6 +572,7 @@ export default function App(): React.JSX.Element {
     onUserUtterance: (text) => runChatTurn(text),
     speakReplies: config.speakReplies,
     speechRate: config.voiceRate,
+    ttsVoiceId: config.ttsVoiceId,
     wakeOnLaunch: config.wakeOnLaunch
   })
 
@@ -901,14 +938,29 @@ export default function App(): React.JSX.Element {
     if (!parsed.macBaseUrl && !parsed.macToken) {
       throw new Error('Clipboard does not contain A.L.B.E.R.T. Mac pairing information')
     }
+    let macBaseUrl = parsed.macBaseUrl || configRef.current.macBaseUrl
+    if (parsed.macBaseUrl) {
+      try {
+        macBaseUrl = normalizeMacUrl(parsed.macBaseUrl)
+      } catch (error) {
+        throw error instanceof Error ? error : new Error(String(error))
+      }
+    }
     const next = {
       ...configRef.current,
-      macBaseUrl: parsed.macBaseUrl || configRef.current.macBaseUrl,
+      macBaseUrl,
       macToken: parsed.macToken || configRef.current.macToken
     }
     updateConfig(next)
     setLinkError(null)
-    showToast('Mac enrollment information loaded. Review it, then enroll & sync.', 'ok')
+    if (isLoopbackMacUrl(macBaseUrl)) {
+      showToast(
+        'Loaded localhost — that only works in the Simulator. On a phone, use the Mac’s 192.168… address.',
+        'warn'
+      )
+    } else {
+      showToast('Mac enrollment information loaded. Review it, then enroll & sync.', 'ok')
+    }
   }, [showToast, updateConfig])
 
   const statusLabel = useMemo(() => {
@@ -941,7 +993,9 @@ export default function App(): React.JSX.Element {
       .sort((a, b) => rank[b.priority] - rank[a.priority] || b.updatedAt - a.updatedAt)[0] || null
   }, [data.operations.missions])
   const pendingApprovals = data.operations.approvals.filter((approval) => approval.state === 'pending').length
-  const brainConfigured = Boolean(config.anthropicApiKey.trim() || config.groqApiKey.trim())
+  const brainConfigured = Boolean(
+    config.anthropicApiKey.trim() || config.groqApiKey.trim() || config.geminiApiKey.trim()
+  )
   const systemsAttention = !brainConfigured || linkState === 'auth-failed' || linkState === 'fault'
 
   if (!bootReady || !fontsReady) {
@@ -1022,6 +1076,7 @@ export default function App(): React.JSX.Element {
                 voiceSupported={voice.supported}
                 linkState={linkState}
                 routeLabel={routeLabel}
+                bottomChromeHeight={sizes.bottomNav + sizes.minTarget}
                 onChangeDraft={setDraft}
                 onSend={() => void sendMessage()}
                 onPurge={purgeChat}
@@ -1100,6 +1155,7 @@ export default function App(): React.JSX.Element {
                 onPastePairInfo={pastePairInfo}
                 onUnpair={unpair}
                 onRequestVoicePermission={voice.requestPermission}
+                onPreviewVoice={() => voice.previewSpeak('Standing by, sir.')}
                 onOpenPrivacy={() => Alert.alert(
                   'Privacy & network behavior',
                   'Provider requests go directly from this phone using your own key. API keys and the Mac device credential use secure device storage. Mac sync stays local to the URL you configure and never places credentials in the URL. Operations remain local or approval-gated on the Mac.'

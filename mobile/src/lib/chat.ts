@@ -1,6 +1,11 @@
 import type { ChatMessage, CompanionConfig, MemoryFact, LlmProvider } from '../types'
 import { chatWithClaude } from './claude'
 import {
+  DEFAULT_GEMINI_MODEL,
+  GEMINI_MODELS,
+  chatWithGemini
+} from './gemini'
+import {
   availableGroqModels,
   chatWithGroq,
   GROQ_STABLE_MODELS,
@@ -30,9 +35,23 @@ const GROQ_MODEL_LABELS: Record<string, string> = {
   'llama-3.3-70b-versatile': 'Llama 70B (temporary bridge; retires Aug 16)'
 }
 
+const GEMINI_MODEL_LABELS: Record<string, string> = {
+  'gemini-2.5-flash': '2.5 Flash (recommended free tier)',
+  'gemini-2.5-flash-lite': '2.5 Flash-Lite (fastest)',
+  'gemini-3.5-flash-lite': '3.5 Flash-Lite',
+  'gemini-2.5-pro': '2.5 Pro (tighter free quotas)'
+}
+
 export function groqModelsForDate(nowMs = Date.now()): ReadonlyArray<{ value: string; label: string }> {
   return availableGroqModels(nowMs)
     .map((value) => ({ value, label: GROQ_MODEL_LABELS[value] || value }))
+}
+
+export function geminiModels(): ReadonlyArray<{ value: string; label: string }> {
+  return GEMINI_MODELS.map((value) => ({
+    value,
+    label: GEMINI_MODEL_LABELS[value] || value
+  }))
 }
 
 /** Compatibility snapshot for consumers that display models without calling modelsFor. */
@@ -43,18 +62,31 @@ const ALL_KNOWN_GROQ_MODEL_IDS = new Set<string>([
   ...GROQ_STABLE_MODELS,
   ...GROQ_TRANSITION_MODELS
 ])
-const DEFAULT_ROUTE_TIMEOUT_MS = 36_000
+const ALL_KNOWN_GEMINI_MODEL_IDS = new Set<string>(GEMINI_MODELS)
+/** Includes room for one or two web_search / web_fetch rounds. */
+const DEFAULT_ROUTE_TIMEOUT_MS = 48_000
+
+const FALLBACK_PROVIDER_ORDER: StandaloneProvider[] = ['groq', 'gemini', 'anthropic']
+
+function isGeminiModel(model: string): boolean {
+  return ALL_KNOWN_GEMINI_MODEL_IDS.has(model) || model.startsWith('gemini-')
+}
 
 export function defaultModelFor(provider: LlmProvider): string {
-  return provider === 'anthropic' ? ANTHROPIC_MODELS[0].value : GROQ_STABLE_MODELS[0]
+  if (provider === 'anthropic') return ANTHROPIC_MODELS[0].value
+  if (provider === 'gemini') return DEFAULT_GEMINI_MODEL
+  return GROQ_STABLE_MODELS[0]
 }
 
 export function modelsFor(provider: LlmProvider): ReadonlyArray<{ value: string; label: string }> {
   if (provider === 'anthropic') return ANTHROPIC_MODELS
   const groqModels = groqModelsForDate()
+  const gemini = geminiModels()
   if (provider === 'groq') return groqModels
+  if (provider === 'gemini') return gemini
   return [
     ...groqModels.map((model) => ({ ...model, label: `Groq · ${model.label}` })),
+    ...gemini.map((model) => ({ ...model, label: `Gemini · ${model.label}` })),
     ...ANTHROPIC_MODELS.map((model) => ({ ...model, label: `Anthropic · ${model.label}` }))
   ]
 }
@@ -66,25 +98,47 @@ export function isModelForProvider(provider: LlmProvider, model: string): boolea
 function modelForProvider(provider: StandaloneProvider, selected: string): string {
   const model = selected.trim()
   if (provider === 'anthropic') {
-    return ALL_KNOWN_GROQ_MODEL_IDS.has(model) || !model ? ANTHROPIC_MODELS[0].value : model
+    if (ALL_KNOWN_GROQ_MODEL_IDS.has(model) || isGeminiModel(model) || !model) {
+      return ANTHROPIC_MODELS[0].value
+    }
+    return model
   }
-  return ANTHROPIC_MODEL_IDS.has(model) || !model ? GROQ_STABLE_MODELS[0] : model
+  if (provider === 'gemini') {
+    if (ANTHROPIC_MODEL_IDS.has(model) || ALL_KNOWN_GROQ_MODEL_IDS.has(model) || !model) {
+      return DEFAULT_GEMINI_MODEL
+    }
+    return model
+  }
+  if (ANTHROPIC_MODEL_IDS.has(model) || isGeminiModel(model) || !model) {
+    return GROQ_STABLE_MODELS[0]
+  }
+  return model
 }
 
-/** Auto is an explicit privacy boundary: it crosses providers only with both keys present. */
+/** Auto is an explicit privacy boundary: it crosses providers only with user keys present. */
 export function autoRouteOrder(opts: {
   anthropicApiKey: string
   groqApiKey: string
+  geminiApiKey?: string
   model: string
 }): StandaloneProvider[] {
-  const hasAnthropic = Boolean(opts.anthropicApiKey.trim())
-  const hasGroq = Boolean(opts.groqApiKey.trim())
-  if (!hasAnthropic && !hasGroq) return []
-  if (!hasAnthropic) return ['groq']
-  if (!hasGroq) return ['anthropic']
-  return ANTHROPIC_MODEL_IDS.has(opts.model.trim())
-    ? ['anthropic', 'groq']
-    : ['groq', 'anthropic']
+  const available = FALLBACK_PROVIDER_ORDER.filter((provider) => {
+    if (provider === 'groq') return Boolean(opts.groqApiKey.trim())
+    if (provider === 'gemini') return Boolean(opts.geminiApiKey?.trim())
+    return Boolean(opts.anthropicApiKey.trim())
+  })
+  if (available.length <= 1) return available
+
+  const model = opts.model.trim()
+  let preferred: StandaloneProvider = 'groq'
+  if (ANTHROPIC_MODEL_IDS.has(model)) preferred = 'anthropic'
+  else if (isGeminiModel(model)) preferred = 'gemini'
+  else preferred = 'groq'
+
+  if (!available.includes(preferred)) {
+    preferred = available[0]!
+  }
+  return [preferred, ...available.filter((provider) => provider !== preferred)]
 }
 
 export async function chatWithProvider(opts: {
@@ -117,6 +171,18 @@ export async function chatWithProvider(opts: {
         candidateNowMs: opts.candidateNowMs
       })
     }
+    if (provider === 'gemini') {
+      return chatWithGemini({
+        apiKey: config.geminiApiKey,
+        model,
+        messages,
+        memories,
+        signal: opts.signal,
+        timeoutMs,
+        fetchImpl: opts.fetchImpl,
+        now
+      })
+    }
     return chatWithClaude({
       apiKey: config.anthropicApiKey,
       model,
@@ -129,7 +195,7 @@ export async function chatWithProvider(opts: {
     })
   }
 
-  if (config.provider === 'anthropic' || config.provider === 'groq') {
+  if (config.provider === 'anthropic' || config.provider === 'groq' || config.provider === 'gemini') {
     const result = await run(config.provider, totalTimeoutMs)
     return { ...result, latencyMs: Math.max(0, now() - startedAt) }
   }
@@ -137,7 +203,7 @@ export async function chatWithProvider(opts: {
   const route = autoRouteOrder(config)
   if (route.length === 0) {
     throw new ProviderRequestError({
-      message: 'Auto needs a user-supplied Groq or Anthropic API key in Systems.',
+      message: 'Auto needs a Groq, Gemini, or Anthropic API key in Systems.',
       code: 'missing_key',
       provider: 'auto'
     })
@@ -147,59 +213,42 @@ export async function chatWithProvider(opts: {
     return { ...result, latencyMs: Math.max(0, now() - startedAt) }
   }
 
-  const primary = route[0]!
-  const secondary = route[1]!
-  const primaryBudgetMs = Math.max(1, Math.min(22_000, Math.floor(totalTimeoutMs * 0.62)))
-  let primaryError: ProviderRequestError
-  try {
-    const result = await run(primary, primaryBudgetMs)
-    return { ...result, latencyMs: Math.max(0, now() - startedAt) }
-  } catch (error) {
-    primaryError = error instanceof ProviderRequestError
-      ? error
-      : new ProviderRequestError({
-          message: `${primary} failed unexpectedly.`,
-          code: 'provider_unavailable',
-          provider: primary,
-          retryable: true
-        })
-    if (primaryError.code === 'cancelled' || opts.signal?.aborted) throw primaryError
+  let lastError: ProviderRequestError | null = null
+  for (let index = 0; index < route.length; index += 1) {
+    const provider = route[index]!
+    const remainingMs = totalTimeoutMs - (now() - startedAt)
+    if (remainingMs <= 0) break
+    const isLast = index === route.length - 1
+    const budgetMs = isLast
+      ? remainingMs
+      : Math.max(1, Math.min(22_000, Math.floor(remainingMs * (index === 0 ? 0.62 : 0.5))))
+    try {
+      const result = await run(provider, budgetMs)
+      return {
+        ...result,
+        fallbackFrom: index === 0 ? undefined : route[0],
+        latencyMs: Math.max(0, now() - startedAt)
+      }
+    } catch (error) {
+      lastError = error instanceof ProviderRequestError
+        ? error
+        : new ProviderRequestError({
+            message: `${provider} failed unexpectedly.`,
+            code: 'provider_unavailable',
+            provider,
+            retryable: true
+          })
+      if (lastError.code === 'cancelled' || opts.signal?.aborted) throw lastError
+    }
   }
 
-  const remainingMs = totalTimeoutMs - (now() - startedAt)
-  if (remainingMs <= 0) {
-    throw new ProviderRequestError({
-      message: `Auto routing did not answer before its deadline. ${primaryError.message}`,
-      code: 'timeout',
-      provider: 'auto',
-      retryable: true
-    })
-  }
-  try {
-    const result = await run(secondary, remainingMs)
-    return {
-      ...result,
-      fallbackFrom: primary,
-      latencyMs: Math.max(0, now() - startedAt)
-    }
-  } catch (error) {
-    const secondaryError = error instanceof ProviderRequestError
-      ? error
-      : new ProviderRequestError({
-          message: `${secondary} failed unexpectedly.`,
-          code: 'provider_unavailable',
-          provider: secondary,
-          retryable: true
-        })
-    if (secondaryError.code === 'cancelled') throw secondaryError
-    throw new ProviderRequestError({
-      message: `Auto routing could not answer. ${primaryError.message} ${secondaryError.message}`,
-      code: secondaryError.code,
-      provider: 'auto',
-      model: secondaryError.model,
-      status: secondaryError.status,
-      retryAfterMs: secondaryError.retryAfterMs,
-      retryable: primaryError.retryable || secondaryError.retryable
-    })
-  }
+  throw new ProviderRequestError({
+    message: `Auto routing could not answer. ${lastError?.message || 'No provider responded.'}`,
+    code: lastError?.code || 'provider_unavailable',
+    provider: 'auto',
+    model: lastError?.model,
+    status: lastError?.status,
+    retryAfterMs: lastError?.retryAfterMs,
+    retryable: lastError?.retryable ?? true
+  })
 }

@@ -1,5 +1,6 @@
 import { getSettings, setSettings } from '../config'
 import {
+  DEFAULT_GEMINI_MODEL,
   DEFAULT_GROQ_MODEL,
   DEFAULT_SETTINGS,
   type LocalProvider,
@@ -21,32 +22,53 @@ const EXPLICIT_POWER =
 const EXPLICIT_FAST =
   /\b(use haiku|switch to haiku|haiku mode|mid mode)\b/i
 const EXPLICIT_LOCAL =
-  /\b(use (ollama|local|groq|quick)|switch to (ollama|local|groq|quick)|local mode|quick mode|ollama mode|groq mode|cheap mode|keep it (cheap|local|quick))\b/i
+  /\b(use (ollama|local|groq|gemini|google|quick)|switch to (ollama|local|groq|gemini|google|quick)|local mode|quick mode|ollama mode|groq mode|gemini mode|google mode|cheap mode|keep it (cheap|local|quick))\b/i
 const EXPLICIT_AUTO = /\b(auto mode|auto routing|unlock routing)\b/i
 const EXPLICIT_GROQ_PROVIDER = /\b(use groq|switch to groq|groq mode)\b/i
+const EXPLICIT_GEMINI_PROVIDER =
+  /\b(use (gemini|google( ai)?( studio)?)|switch to (gemini|google)|gemini mode|google mode)\b/i
 const EXPLICIT_OLLAMA_PROVIDER = /\b(use ollama|switch to ollama|ollama mode)\b/i
+
+function quickLabel(provider: LocalProvider): string {
+  if (provider === 'groq') return 'Groq Cloud (QUICK)'
+  if (provider === 'gemini') return 'Gemini / Google AI Studio (QUICK)'
+  return 'Ollama (QUICK)'
+}
 
 function resolveLocalRoute(locked: boolean): {
   tier: 'local'
   model: string
   reason: string
-  provider: 'ollama' | 'groq'
+  provider: LocalProvider
 } {
   const settings = getSettings()
-  const provider: LocalProvider = settings.localProvider === 'groq' ? 'groq' : 'ollama'
+  const provider: LocalProvider =
+    settings.localProvider === 'groq'
+      ? 'groq'
+      : settings.localProvider === 'gemini'
+        ? 'gemini'
+        : 'ollama'
   if (provider === 'groq') {
     return {
       tier: 'local',
       model: settings.groqModel || DEFAULT_GROQ_MODEL,
       provider: 'groq',
-      reason: locked ? 'Locked to Groq Cloud (QUICK)' : 'Routing locked to Groq Cloud (QUICK)'
+      reason: locked ? `Locked to ${quickLabel(provider)}` : `Routing locked to ${quickLabel(provider)}`
+    }
+  }
+  if (provider === 'gemini') {
+    return {
+      tier: 'local',
+      model: settings.geminiModel || DEFAULT_GEMINI_MODEL,
+      provider: 'gemini',
+      reason: locked ? `Locked to ${quickLabel(provider)}` : `Routing locked to ${quickLabel(provider)}`
     }
   }
   return {
     tier: 'local',
     model: settings.localModel || DEFAULT_SETTINGS.localModel,
     provider: 'ollama',
-    reason: locked ? 'Locked to Ollama (QUICK)' : 'Routing locked to Ollama (QUICK)'
+    reason: locked ? `Locked to ${quickLabel(provider)}` : `Routing locked to ${quickLabel(provider)}`
   }
 }
 
@@ -69,6 +91,10 @@ export function applyExplicitRoutingLock(userText: string): RoutingMode | null {
     setSettings({ routingMode: 'local', localProvider: 'groq' })
     return 'local'
   }
+  if (EXPLICIT_GEMINI_PROVIDER.test(text)) {
+    setSettings({ routingMode: 'local', localProvider: 'gemini' })
+    return 'local'
+  }
   if (EXPLICIT_OLLAMA_PROVIDER.test(text)) {
     setSettings({ routingMode: 'local', localProvider: 'ollama' })
     return 'local'
@@ -87,7 +113,7 @@ export function selectModelTier(
   tier: ModelTier
   model: string
   reason: string
-  provider: 'ollama' | 'groq' | 'anthropic'
+  provider: LocalProvider | 'anthropic'
 } {
   const locked = applyExplicitRoutingLock(userText)
   const settings = getSettings()
@@ -114,17 +140,7 @@ export function selectModelTier(
   }
   if (mode === 'local') {
     const local = resolveLocalRoute(locked === 'local')
-    return {
-      ...local,
-      reason:
-        locked === 'local'
-          ? local.provider === 'groq'
-            ? 'Locked to Groq Cloud (QUICK)'
-            : 'Locked to Ollama (QUICK)'
-          : local.provider === 'groq'
-            ? 'Routing locked to Groq Cloud (QUICK)'
-            : 'Routing locked to Ollama (QUICK)'
-    }
+    return local
   }
 
   // auto: images → Haiku vision (QUICK-provider vision is best-effort)
@@ -184,10 +200,7 @@ export function selectModelTier(
     const local = resolveLocalRoute(false)
     return {
       ...local,
-      reason:
-        local.provider === 'groq'
-          ? 'Casual chat → Groq Cloud (QUICK)'
-          : 'Casual chat → Ollama (QUICK)'
+      reason: `Casual chat → ${quickLabel(local.provider)}`
     }
   }
 

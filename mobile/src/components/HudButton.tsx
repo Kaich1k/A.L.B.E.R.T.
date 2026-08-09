@@ -62,7 +62,6 @@ export function HudButton({
         style
       ]}
     >
-      <View pointerEvents="none" style={styles.corner} />
       {loading ? (
         <ActivityIndicator
           size="small"
@@ -122,16 +121,6 @@ const styles = StyleSheet.create({
   selected: { borderColor: colors.accentStrong, backgroundColor: colors.accentSoft },
   disabled: { opacity: 0.42 },
   pressed: { opacity: 0.76, transform: [{ scale: 0.985 }] },
-  corner: {
-    position: 'absolute',
-    top: -1,
-    left: -1,
-    width: 12,
-    height: 12,
-    borderLeftWidth: 2,
-    borderTopWidth: 2,
-    borderColor: colors.accent
-  },
   glyph: {
     minWidth: 18,
     color: colors.accent,

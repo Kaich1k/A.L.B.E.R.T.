@@ -19,7 +19,9 @@ function brainLabel(settings: {
 }): string {
   const mode = settings.routingMode || 'auto'
   if (mode === 'local') {
-    return settings.localProvider === 'groq' ? 'QUICK·GROQ CLOUD' : 'QUICK·OLLAMA'
+    if (settings.localProvider === 'groq') return 'QUICK·GROQ CLOUD'
+    if (settings.localProvider === 'gemini') return 'QUICK·GEMINI'
+    return 'QUICK·OLLAMA'
   }
   if (mode === 'fast') return 'HAIKU'
   if (mode === 'power') return 'OPUS'
@@ -47,6 +49,7 @@ export function HomePanel({ onTalk }: Props): React.JSX.Element {
     settings.anthropicApiKey?.trim() ||
       settings.ollamaApiKey?.trim() ||
       settings.groqApiKey?.trim() ||
+      settings.geminiApiKey?.trim() ||
       settings.localProvider === 'ollama'
   )
   const wakeOn = settings.wakeWordEnabled !== false

@@ -333,7 +333,6 @@ export function MemoryScreen({
             const confidence = item.confidence == null ? null : Math.round(Math.max(0, Math.min(1, item.confidence)) * 100)
             return (
               <View style={styles.card}>
-                <View pointerEvents="none" style={styles.cardCorner} />
                 <View style={styles.cardHeader}>
                   <View style={styles.categoryPill}>
                     <View style={styles.categoryDot} />
@@ -350,25 +349,23 @@ export function MemoryScreen({
                   </View>
                   <View style={styles.cardActions}>
                     {onEditMemory ? (
-                      <Pressable
+                      <HudButton
+                        label="Edit"
+                        compact
                         onPress={() => { setEditorError(null); setEditor({ mode: 'edit', memory: item }) }}
-                        accessibilityRole="button"
                         accessibilityLabel={`Edit memory: ${item.content}`}
-                        style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
-                      >
-                        <Text style={styles.iconButtonText}>EDIT</Text>
-                      </Pressable>
+                        style={styles.actionButton}
+                      />
                     ) : null}
-                    <Pressable
-                      onPress={() => setPendingDelete(item)}
+                    <HudButton
+                      label="Delete"
+                      variant="danger"
+                      compact
                       disabled={busy}
-                      accessibilityRole="button"
+                      onPress={() => setPendingDelete(item)}
                       accessibilityLabel={`Delete memory: ${item.content}`}
-                      accessibilityState={{ disabled: busy }}
-                      style={({ pressed }) => [styles.iconButton, styles.deleteButton, pressed && styles.pressed]}
-                    >
-                      <Text style={[styles.iconButtonText, styles.deleteText]}>DELETE</Text>
-                    </Pressable>
+                      style={styles.actionButton}
+                    />
                   </View>
                 </View>
               </View>
@@ -450,8 +447,15 @@ const styles = StyleSheet.create({
   filterTextActive: { color: colors.accentStrong },
   list: { width: '100%', maxWidth: 760, alignSelf: 'center', paddingHorizontal: 14, paddingTop: 10, paddingBottom: 32, gap: 10 },
   emptyList: { flexGrow: 1 },
-  card: { position: 'relative', overflow: 'hidden', borderWidth: 1, borderColor: colors.line, backgroundColor: 'rgba(3,10,15,0.87)', padding: 13 },
-  cardCorner: { position: 'absolute', top: -1, left: -1, width: 15, height: 15, borderTopWidth: 2, borderLeftWidth: 2, borderColor: colors.accent },
+  card: {
+    position: 'relative',
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 8,
+    backgroundColor: 'rgba(3,10,15,0.87)',
+    padding: 13
+  },
   cardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   categoryPill: { minHeight: 28, flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 1, borderColor: colors.line, paddingHorizontal: 8 },
   categoryDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: colors.accent },
@@ -461,11 +465,8 @@ const styles = StyleSheet.create({
   cardFooter: { marginTop: 12, paddingTop: 9, borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.lineDim, flexDirection: 'row', alignItems: 'flex-end', gap: 10 },
   metadata: { flex: 1, gap: 3 },
   metaText: { fontFamily: fonts.mono, fontSize: 9, lineHeight: 13, letterSpacing: 0.6, color: colors.inkFaint },
-  cardActions: { flexDirection: 'row', gap: 6 },
-  iconButton: { minWidth: 54, minHeight: 44, paddingHorizontal: 9, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.line },
-  iconButtonText: { fontFamily: fonts.mono, fontSize: 9, letterSpacing: 0.8, color: colors.accentStrong },
-  deleteButton: { borderColor: 'rgba(255,107,99,0.32)' },
-  deleteText: { color: colors.danger },
+  cardActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'flex-end' },
+  actionButton: { minWidth: 88 },
   loadingState: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 16 },
   loadingText: { fontFamily: fonts.mono, fontSize: 11, letterSpacing: 1.5, color: colors.inkMuted },
   empty: { flex: 1, minHeight: 230, alignItems: 'center', justifyContent: 'center', padding: 24, borderWidth: 1, borderColor: colors.line, borderStyle: 'dashed' },

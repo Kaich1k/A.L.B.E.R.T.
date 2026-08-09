@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Animated, Easing, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { APP_NAME, APP_PRIVACY_LINE, APP_PROTOCOL } from '../brand'
-import { colors, fonts, sizes, spacing, typeScale } from '../theme'
+import { colors, fonts, radii, sizes, spacing, typeScale } from '../theme'
 import { AlbertCore } from './AlbertCore'
 import { HudButton } from './HudButton'
 import { useReducedMotion } from './useReducedMotion'
@@ -38,6 +39,7 @@ export function StartupSequence({
   onContinueOffline
 }: StartupSequenceProps): React.JSX.Element | null {
   const reduceMotion = useReducedMotion(reducedMotion)
+  const insets = useSafeAreaInsets()
   const { width, height } = useWindowDimensions()
   const [rendered, setRendered] = useState(visible)
   const [stageIndex, setStageIndex] = useState(0)
@@ -45,7 +47,11 @@ export function StartupSequence({
   const opacity = useRef(new Animated.Value(visible ? 1 : 0)).current
   const coreScale = useRef(new Animated.Value(reduceMotion ? 1 : 0.78)).current
   const stage = STAGES[stageIndex]
-  const coreSize = Math.max(186, Math.min(250, width - 96, height * 0.39))
+  const shortPhone = height < 740
+  const coreSize = Math.max(
+    shortPhone ? 140 : 168,
+    Math.min(shortPhone ? 190 : 230, width - 112, height * (shortPhone ? 0.28 : 0.34))
+  )
 
   const greeting = useMemo(() => {
     const hour = new Date().getHours()
@@ -122,7 +128,16 @@ export function StartupSequence({
   return (
     <Animated.View
       accessibilityViewIsModal
-      style={[styles.root, { opacity }]}
+      style={[
+        styles.root,
+        {
+          opacity,
+          paddingTop: Math.max(insets.top, spacing.md) + spacing.sm,
+          paddingBottom: Math.max(insets.bottom, spacing.md),
+          paddingLeft: Math.max(insets.left, spacing.md),
+          paddingRight: Math.max(insets.right, spacing.md)
+        }
+      ]}
     >
       <View pointerEvents="none" style={StyleSheet.absoluteFill}>
         <View style={styles.beamOne} />
@@ -131,7 +146,7 @@ export function StartupSequence({
       </View>
 
       <View style={styles.header}>
-        <View>
+        <View style={styles.headerCopy}>
           <Text style={styles.eyebrow}>ADVANCED INTELLIGENCE INTERFACE</Text>
           <Text style={styles.brand}>{APP_NAME}</Text>
         </View>
@@ -143,7 +158,7 @@ export function StartupSequence({
         </View>
       </View>
 
-      <View style={styles.stage}>
+      <View style={[styles.stage, shortPhone && styles.stageCompact]}>
         <Animated.View style={{ transform: [{ scale: coreScale }] }}>
           <AlbertCore
             phase={fault ? 'fault' : ready && stageIndex === STAGES.length - 1 ? 'standby' : 'arming'}
@@ -222,9 +237,7 @@ const styles = StyleSheet.create({
     left: 0,
     zIndex: 100,
     backgroundColor: '#00070b',
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.xxl,
-    paddingBottom: spacing.lg
+    overflow: 'hidden'
   },
   beamOne: {
     position: 'absolute',
@@ -253,6 +266,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.line
   },
   header: { flexDirection: 'row', justifyContent: 'space-between', gap: spacing.md },
+  headerCopy: { flex: 1, minWidth: 0 },
   eyebrow: { color: colors.accent, fontFamily: fonts.mono, fontSize: 10, letterSpacing: 1.15 },
   brand: {
     marginTop: spacing.xs,
@@ -263,16 +277,19 @@ const styles = StyleSheet.create({
     textShadowColor: colors.accentGlow,
     textShadowRadius: 10
   },
-  sequenceId: { alignItems: 'flex-end' },
+  sequenceId: { alignItems: 'flex-end', flexShrink: 0 },
   sequenceLabel: { color: colors.inkMuted, fontFamily: fonts.mono, fontSize: 10, letterSpacing: 0.8 },
   sequenceCount: { marginTop: spacing.xs, color: colors.accent, fontFamily: fonts.mono, fontSize: 14 },
-  stage: { flex: 1, minHeight: 190, alignItems: 'center', justifyContent: 'center' },
+  stage: { flex: 1, minHeight: 120, alignItems: 'center', justifyContent: 'center' },
+  stageCompact: { minHeight: 100 },
   readout: {
     borderWidth: 1,
     borderColor: colors.lineStrong,
+    borderRadius: radii.lg,
     backgroundColor: 'rgba(3,12,18,0.9)',
     padding: spacing.lg,
-    alignItems: 'center'
+    alignItems: 'center',
+    overflow: 'hidden'
   },
   readoutFault: { borderColor: 'rgba(255,107,99,0.6)', backgroundColor: colors.dangerSoft },
   stageCode: { color: colors.accent, fontFamily: fonts.mono, fontSize: 12, letterSpacing: 1.5 },
@@ -299,7 +316,13 @@ const styles = StyleSheet.create({
   dot: { width: 5, height: 5, borderRadius: 3, backgroundColor: colors.line },
   dotOn: { backgroundColor: colors.accent },
   faultActions: { width: '100%', gap: spacing.sm, marginTop: spacing.lg },
-  footer: { minHeight: sizes.minTarget, flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  footer: {
+    minHeight: sizes.minTarget,
+    marginTop: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm
+  },
   privacy: { flex: 1, color: colors.inkFaint, fontFamily: fonts.mono, fontSize: 9, letterSpacing: 0.45 },
   protocol: { color: colors.inkFaint, fontFamily: fonts.mono, fontSize: 9, letterSpacing: 0.45 },
   skip: { minWidth: sizes.minTarget, minHeight: sizes.minTarget, alignItems: 'center', justifyContent: 'center' },

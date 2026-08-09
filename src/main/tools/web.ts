@@ -4,6 +4,49 @@ type SearchHit = {
   title: string
   url: string
   snippet: string
+  source?: 'web' | 'reddit' | 'wikipedia' | 'youtube' | 'other'
+}
+
+function classifySource(url: string): NonNullable<SearchHit['source']> {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '')
+    if (host === 'reddit.com' || host.endsWith('.reddit.com')) return 'reddit'
+    if (host === 'wikipedia.org' || host.endsWith('.wikipedia.org')) return 'wikipedia'
+    if (host === 'youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com')) return 'youtube'
+  } catch {
+    /* fall through */
+  }
+  return 'web'
+}
+
+function dedupeHits(hits: SearchHit[]): SearchHit[] {
+  const seen = new Set<string>()
+  const out: SearchHit[] = []
+  for (const hit of hits) {
+    let key = hit.url
+    try {
+      const parsed = new URL(hit.url)
+      parsed.hash = ''
+      key = `${parsed.hostname}${parsed.pathname}`.toLowerCase().replace(/\/+$/, '')
+    } catch {
+      key = hit.url.toLowerCase()
+    }
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(hit)
+  }
+  return out
+}
+
+function formatHitGroup(label: string, hits: SearchHit[]): string[] {
+  if (!hits.length) return []
+  const lines = [`${label}:`]
+  hits.forEach((hit, index) => {
+    lines.push(`${index + 1}. ${hit.title}`)
+    lines.push(`   ${hit.url}`)
+    if (hit.snippet) lines.push(`   ${hit.snippet}`)
+  })
+  return lines
 }
 
 function stripTags(html: string): string {
@@ -162,14 +205,14 @@ export const webTools: ToolDefinition[] = [
   {
     name: 'web_search',
     description:
-      'Search the public web for current facts, news, docs, or how-tos. Use this when you need up-to-date information beyond training knowledge. Returns titles, URLs, and snippets.',
+      'Search the live public web across multiple sources (general web, Reddit, Wikipedia, YouTube). Use for current facts, opinions, how-tos, news, or anything that can go stale. Synthesize across sources; follow with web_fetch on the best links.',
     parameters: {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Search query' },
         limit: {
           type: 'number',
-          description: 'Max organic results (1–8, default 5)'
+          description: 'Max results per source lane (1–6, default 4)'
         }
       },
       required: ['query']
@@ -177,36 +220,72 @@ export const webTools: ToolDefinition[] = [
     execute: async (args) => {
       const query = String(args.query ?? '').trim()
       if (!query) return { ok: false, result: 'Query is required.' }
-      const limit = Math.min(8, Math.max(1, Number(args.limit) || 5))
+      const limit = Math.min(6, Math.max(1, Number(args.limit) || 4))
 
       try {
-        const [instant, organic, wiki] = await Promise.all([
+        const [instant, general, reddit, youtube, wikiSite, wikiApi] = await Promise.all([
           duckDuckGoInstant(query).catch(() => null),
-          duckDuckGoHtml(query, limit).catch(() => [] as SearchHit[]),
+          duckDuckGoHtml(query, limit + 2).catch(() => [] as SearchHit[]),
+          duckDuckGoHtml(`${query} site:reddit.com`, limit).catch(() => [] as SearchHit[]),
+          duckDuckGoHtml(`${query} site:youtube.com`, limit).catch(() => [] as SearchHit[]),
+          duckDuckGoHtml(`${query} site:wikipedia.org`, Math.min(limit, 3)).catch(() => [] as SearchHit[]),
           wikipediaSearch(query, Math.min(limit, 4)).catch(() => [] as SearchHit[])
         ])
 
-        const lines: string[] = [`Search: ${query}`]
-        if (instant?.answer) lines.push(`Answer: ${instant.answer}`)
+        const taggedGeneral = general.map((hit) => ({ ...hit, source: classifySource(hit.url) }))
+        const webOnly = dedupeHits(
+          taggedGeneral.filter((hit) => hit.source === 'web' || hit.source === 'other')
+        ).slice(0, limit + 1)
+        const redditHits = dedupeHits([
+          ...reddit.map((hit) => ({ ...hit, source: 'reddit' as const })),
+          ...taggedGeneral.filter((hit) => hit.source === 'reddit')
+        ]).slice(0, limit)
+        const youtubeHits = dedupeHits([
+          ...youtube.map((hit) => ({ ...hit, source: 'youtube' as const })),
+          ...taggedGeneral.filter((hit) => hit.source === 'youtube')
+        ]).slice(0, limit)
+        const wikiHits = dedupeHits([
+          ...wikiApi.map((hit) => ({ ...hit, source: 'wikipedia' as const })),
+          ...wikiSite.map((hit) => ({ ...hit, source: 'wikipedia' as const }))
+        ]).slice(0, limit)
+
+        const lines: string[] = [
+          `Multi-source search: ${query}`,
+          'Synthesize across these sources. Prefer primary docs / Wikipedia for facts; Reddit for lived experience; YouTube for demos/reviews.'
+        ]
+        if (instant?.answer) lines.push(`Quick answer: ${instant.answer}`)
         if (instant?.abstract) {
           lines.push(
-            `Summary: ${instant.abstract}${instant.abstractUrl ? ` (${instant.abstractUrl})` : ''}`
+            `Encyclopedia-style summary: ${instant.abstract}${instant.abstractUrl ? ` (${instant.abstractUrl})` : ''}`
           )
         }
-        const merged = organic.length ? organic : wiki
-        if (merged.length) {
-          lines.push(organic.length ? 'Results:' : 'Results (Wikipedia):')
-          merged.forEach((h, i) => {
-            lines.push(`${i + 1}. ${h.title}`)
-            lines.push(`   ${h.url}`)
-            if (h.snippet) lines.push(`   ${h.snippet}`)
-          })
-        } else if (instant?.related?.length) {
+        lines.push(...formatHitGroup('Web', webOnly))
+        lines.push(...formatHitGroup('Reddit', redditHits))
+        lines.push(...formatHitGroup('Wikipedia', wikiHits))
+        lines.push(...formatHitGroup('YouTube', youtubeHits))
+
+        if (instant?.related?.length && webOnly.length + redditHits.length + wikiHits.length === 0) {
           lines.push('Related:')
           instant.related.forEach((r, i) => lines.push(`${i + 1}. ${r}`))
         }
 
-        if (lines.length <= 1) {
+        const deep = dedupeHits([...wikiHits, ...redditHits, ...webOnly]).slice(0, 2)
+        if (deep.length) {
+          lines.push('Deep reads (auto-fetched excerpts):')
+          for (const hit of deep) {
+            try {
+              const excerpt = await fetchPageText(hit.url, 1_800)
+              lines.push(`• ${hit.title} — ${hit.url}`)
+              lines.push(`  ${excerpt}`)
+            } catch (err) {
+              lines.push(
+                `• ${hit.title} — ${hit.url} (fetch failed: ${err instanceof Error ? err.message : String(err)})`
+              )
+            }
+          }
+        }
+
+        if (lines.length <= 2) {
           return {
             ok: false,
             result: 'No web results. Try a different query or open Computer to browse.'
@@ -222,7 +301,7 @@ export const webTools: ToolDefinition[] = [
   {
     name: 'web_fetch',
     description:
-      'Fetch a public URL and return readable text (HTML stripped). Use after web_search to read a promising page. Prefer https URLs.',
+      'Fetch a public URL and return readable text (HTML stripped). Use after web_search to deep-read Reddit threads, docs, news, or Wikipedia. Prefer https URLs.',
     parameters: {
       type: 'object',
       properties: {

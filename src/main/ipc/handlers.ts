@@ -28,6 +28,7 @@ import { synthesizeElevenLabs } from '../voice/elevenlabs'
 import { synthesizeKokoro, warmKokoro } from '../voice/kokoro'
 import { probeOllama, pullOllamaModel } from '../ollama/client'
 import { probeGroq } from '../groq/client'
+import { probeGemini } from '../gemini/client'
 import { randomBytes } from 'crypto'
 import type { AlbertSettings } from '../../shared/types'
 import {
@@ -99,6 +100,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   ipcMain.handle(IpcChannels.ollamaProbe, () => probeOllama())
   ipcMain.handle(IpcChannels.ollamaPull, (_e, model?: string) => pullOllamaModel(model))
   ipcMain.handle(IpcChannels.groqProbe, () => probeGroq())
+  ipcMain.handle(IpcChannels.geminiProbe, () => probeGemini())
 
   /** Open the relevant macOS Privacy & Security pane for desktop automation. */
   ipcMain.handle(

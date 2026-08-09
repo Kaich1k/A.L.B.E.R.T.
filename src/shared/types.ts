@@ -163,7 +163,7 @@ export type ModelTier = 'local' | 'fast' | 'power'
 export type OllamaEndpointMode = 'auto' | 'cloud' | 'local'
 
 /** Which backend powers the internal QUICK tier (legacy key remains `local`) */
-export type LocalProvider = 'ollama' | 'groq'
+export type LocalProvider = 'ollama' | 'groq' | 'gemini'
 
 export interface AlbertSettings {
   /** Anthropic API key — primary brain (Claude) */
@@ -174,6 +174,8 @@ export interface AlbertSettings {
   ollamaApiKey: string
   /** Groq API key — alternate QUICK provider (fast free cloud tier) */
   groqApiKey: string
+  /** Google AI Studio / Gemini API key — free-tier QUICK provider */
+  geminiApiKey: string
   /** @deprecated migrated into openaiApiKey */
   apiKey?: string
   /** @deprecated use powerModel */
@@ -182,13 +184,15 @@ export interface AlbertSettings {
   localModel: string
   /** Groq model id when localProvider is groq */
   groqModel: string
+  /** Gemini model id when localProvider is gemini */
+  geminiModel: string
   /** Cheap/fast model for light-complex work (Haiku) */
   fastModel: string
   /** Strong model for hard tasks (Opus) */
   powerModel: string
   /** auto routes per message; local/fast/power force one tier */
   routingMode: RoutingMode
-  /** ollama = cloud/on-device option; groq = Groq Cloud; both live in QUICK */
+  /** ollama / groq / gemini — all live in the QUICK tier */
   localProvider: LocalProvider
   /** Prefer Ollama cloud, local daemon, or auto */
   ollamaEndpoint: OllamaEndpointMode
@@ -284,15 +288,19 @@ export interface RealtimeToolDefinition {
 
 export const CLAUDE_DASHBOARD_URL = 'https://platform.claude.com/dashboard'
 export const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-20b'
+/** Free-tier friendly default from Google AI Studio / Gemini API. */
+export const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash'
 
 export const DEFAULT_SETTINGS: AlbertSettings = {
   anthropicApiKey: '',
   openaiApiKey: '',
   ollamaApiKey: '',
   groqApiKey: '',
+  geminiApiKey: '',
   model: 'claude-opus-5',
   localModel: 'qwen3.5:4b',
   groqModel: DEFAULT_GROQ_MODEL,
+  geminiModel: DEFAULT_GEMINI_MODEL,
   fastModel: 'claude-haiku-4-5',
   powerModel: 'claude-opus-5',
   routingMode: 'auto',

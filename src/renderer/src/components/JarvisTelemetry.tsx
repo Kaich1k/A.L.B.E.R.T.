@@ -64,6 +64,7 @@ function hasConfiguredBrain(settings: AlbertSettings): boolean {
     settings.anthropicApiKey?.trim() ||
       settings.ollamaApiKey?.trim() ||
       settings.groqApiKey?.trim() ||
+      settings.geminiApiKey?.trim() ||
       settings.localProvider === 'ollama'
   )
 }
@@ -75,7 +76,9 @@ function shortenModel(model: string): string {
 function routeLabel(settings: AlbertSettings): string {
   switch (settings.routingMode) {
     case 'local':
-      return settings.localProvider === 'groq' ? 'QUICK · GROQ CLOUD' : 'QUICK · OLLAMA'
+      if (settings.localProvider === 'groq') return 'QUICK · GROQ CLOUD'
+      if (settings.localProvider === 'gemini') return 'QUICK · GEMINI'
+      return 'QUICK · OLLAMA'
     case 'fast':
       return `FAST · ${shortenModel(settings.fastModel)}`
     case 'power':

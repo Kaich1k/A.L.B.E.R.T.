@@ -20,37 +20,24 @@ import {
   toOpenAITools
 } from './phoneTools'
 
-const GROQ_BASE = 'https://api.groq.com/openai/v1'
+/** Google AI Studio / Gemini OpenAI-compatible endpoint. */
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/openai'
 const DEFAULT_TIMEOUT_MS = 42_000
 const DEFAULT_ATTEMPT_TIMEOUT_MS = 14_000
 const MAX_TOOL_ROUNDS = 3
 
-export const GROQ_TRANSITION_CUTOFF_MS = Date.parse('2026-08-16T00:00:00Z')
-export const GROQ_STABLE_MODELS = [
-  'openai/gpt-oss-20b',
-  'openai/gpt-oss-120b',
-  'qwen/qwen3.6-27b'
-] as const
-export const GROQ_TRANSITION_MODELS = [
-  'llama-3.1-8b-instant',
-  'llama-3.3-70b-versatile'
+export const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash'
+
+export const GEMINI_MODELS = [
+  DEFAULT_GEMINI_MODEL,
+  'gemini-2.5-flash-lite',
+  'gemini-3.5-flash-lite',
+  'gemini-2.5-pro'
 ] as const
 
-export function availableGroqModels(nowMs = Date.now()): string[] {
-  return [
-    ...GROQ_STABLE_MODELS,
-    ...(nowMs < GROQ_TRANSITION_CUTOFF_MS ? GROQ_TRANSITION_MODELS : [])
-  ]
-}
-
-export function groqModelCandidates(primary: string, nowMs = Date.now()): string[] {
-  const requested = primary.trim()
-  const transitionExpired =
-    nowMs >= GROQ_TRANSITION_CUTOFF_MS &&
-    (GROQ_TRANSITION_MODELS as readonly string[]).includes(requested)
-  const preferred = transitionExpired || !requested ? GROQ_STABLE_MODELS[0] : requested
-  return [preferred, ...availableGroqModels(nowMs)]
-    .filter((model, index, all) => all.indexOf(model) === index)
+export function geminiModelCandidates(primary: string): string[] {
+  const requested = primary.trim() || DEFAULT_GEMINI_MODEL
+  return [requested, ...GEMINI_MODELS].filter((model, index, all) => all.indexOf(model) === index)
 }
 
 function remoteErrorMessage(data: Record<string, unknown> | null): string | undefined {
@@ -96,7 +83,7 @@ function toolsUnsupported(error: ProviderRequestError): boolean {
   return /tool|function.?call|functions/i.test(error.message)
 }
 
-export async function chatWithGroq(opts: {
+export async function chatWithGemini(opts: {
   apiKey: string
   model: string
   messages: ChatMessage[]
@@ -106,15 +93,14 @@ export async function chatWithGroq(opts: {
   attemptTimeoutMs?: number
   fetchImpl?: FetchLike
   now?: () => number
-  candidateNowMs?: number
 }): Promise<ProviderReply> {
   const apiKey = opts.apiKey.trim()
-  const requestedModel = opts.model.trim() || GROQ_STABLE_MODELS[0]
+  const requestedModel = opts.model.trim() || DEFAULT_GEMINI_MODEL
   if (!apiKey) {
     throw new ProviderRequestError({
-      message: 'Add your Groq API key in Systems.',
+      message: 'Add your Gemini API key in Systems (aistudio.google.com/apikey).',
       code: 'missing_key',
-      provider: 'groq',
+      provider: 'gemini',
       model: requestedModel
     })
   }
@@ -123,7 +109,7 @@ export async function chatWithGroq(opts: {
   const startedAt = now()
   const totalTimeoutMs = Math.max(1, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS)
   const deadlineAt = startedAt + totalTimeoutMs
-  const candidates = groqModelCandidates(requestedModel, opts.candidateNowMs ?? Date.now())
+  const candidates = geminiModelCandidates(requestedModel)
   const system = `${PHONE_SYSTEM}\n\nKnown memories:\n${memoryBlock(opts.memories)}`
   const tools = toOpenAITools()
   let lastError: ProviderRequestError | null = null
@@ -131,9 +117,9 @@ export async function chatWithGroq(opts: {
   for (const model of candidates) {
     if (opts.signal?.aborted) {
       throw new ProviderRequestError({
-        message: 'Groq request cancelled.',
+        message: 'Gemini request cancelled.',
         code: 'cancelled',
-        provider: 'groq',
+        provider: 'gemini',
         model
       })
     }
@@ -151,9 +137,9 @@ export async function chatWithGroq(opts: {
           const roundRemaining = deadlineAt - now()
           if (roundRemaining <= 0) {
             throw new ProviderRequestError({
-              message: 'Groq did not respond before the request deadline.',
+              message: 'Gemini did not respond before the request deadline.',
               code: 'timeout',
-              provider: 'groq',
+              provider: 'gemini',
               model,
               retryable: true
             })
@@ -171,7 +157,7 @@ export async function chatWithGroq(opts: {
             timeoutMs: Math.min(opts.attemptTimeoutMs ?? DEFAULT_ATTEMPT_TIMEOUT_MS, roundRemaining),
             signal: opts.signal,
             run: async (signal) => {
-              const response = await (opts.fetchImpl || fetch)(`${GROQ_BASE}/chat/completions`, {
+              const response = await (opts.fetchImpl || fetch)(`${GEMINI_BASE}/chat/completions`, {
                 method: 'POST',
                 headers: {
                   'content-type': 'application/json',
@@ -188,20 +174,20 @@ export async function chatWithGroq(opts: {
           if (!response.ok) {
             const remoteMessage = remoteErrorMessage(data)
             let error = providerHttpError({
-              provider: 'groq',
+              provider: 'gemini',
               model,
               status: response.status,
               remoteMessage,
               retryAfterMs: parseRetryAfterMs(response.headers.get('retry-after'), now())
             })
             if (
-              (response.status === 400 || response.status === 422) &&
-              /model|decommission|retir|no longer|not (?:available|supported)/i.test(remoteMessage || '')
+              (response.status === 400 || response.status === 404) &&
+              /model|not found|unsupported|unknown/i.test(remoteMessage || '')
             ) {
               error = new ProviderRequestError({
-                message: remoteMessage || `${model} is no longer available on Groq.`,
+                message: remoteMessage || `${model} is not available on Gemini.`,
                 code: 'model_unavailable',
-                provider: 'groq',
+                provider: 'gemini',
                 model,
                 status: response.status,
                 retryable: true
@@ -211,9 +197,9 @@ export async function chatWithGroq(opts: {
           }
           if (!data) {
             throw new ProviderRequestError({
-              message: 'Groq returned a malformed response. Trying another model may help.',
+              message: 'Gemini returned a malformed response. Trying another model may help.',
               code: 'invalid_response',
-              provider: 'groq',
+              provider: 'gemini',
               model,
               retryable: true
             })
@@ -222,9 +208,9 @@ export async function chatWithGroq(opts: {
           const message = successfulMessage(data)
           if (!message) {
             throw new ProviderRequestError({
-              message: 'Groq returned an empty response. Trying another model may help.',
+              message: 'Gemini returned an empty response. Trying another model may help.',
               code: 'invalid_response',
-              provider: 'groq',
+              provider: 'gemini',
               model,
               retryable: true
             })
@@ -253,21 +239,21 @@ export async function chatWithGroq(opts: {
           return {
             reply: parsed.reply,
             newMemories: parsed.memories,
-            provider: 'groq',
+            provider: 'gemini',
             model: safeRemoteMessage(data.model) || model,
             latencyMs: Math.max(0, now() - startedAt)
           }
         }
 
         throw new ProviderRequestError({
-          message: 'Groq exceeded the web-tool loop limit without a final reply.',
+          message: 'Gemini exceeded the web-tool loop limit without a final reply.',
           code: 'invalid_response',
-          provider: 'groq',
+          provider: 'gemini',
           model,
           retryable: true
         })
       } catch (error) {
-        lastError = transportProviderError({ error, provider: 'groq', model })
+        lastError = transportProviderError({ error, provider: 'gemini', model })
         if (useTools && toolsUnsupported(lastError)) continue
         if (!shouldTryAnotherModel(lastError)) throw lastError
         break
@@ -277,9 +263,9 @@ export async function chatWithGroq(opts: {
 
   if (lastError) throw lastError
   throw new ProviderRequestError({
-    message: 'Groq did not respond before the request deadline.',
+    message: 'Gemini did not respond before the request deadline.',
     code: 'timeout',
-    provider: 'groq',
+    provider: 'gemini',
     model: requestedModel,
     retryable: true
   })

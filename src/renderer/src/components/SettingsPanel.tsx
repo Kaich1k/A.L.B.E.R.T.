@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   CLAUDE_DASHBOARD_URL,
+  DEFAULT_GEMINI_MODEL,
   DEFAULT_GROQ_MODEL,
   DEFAULT_PERSONALITY,
   PERSONALITY_META,
@@ -73,6 +74,13 @@ const GROQ_MODEL_OPTIONS = [
     : [])
 ]
 
+const GEMINI_MODEL_OPTIONS = [
+  { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash — recommended free tier' },
+  { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite — fastest / lightest' },
+  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite — newer lite route' },
+  { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro — stronger (tighter free quotas)' }
+]
+
 const PERSONALITY_KEYS = Object.keys(PERSONALITY_META) as PersonalityKey[]
 
 type CompanionStatus = {
@@ -104,6 +112,7 @@ export function SettingsPanel(): React.JSX.Element {
   const [copied, setCopied] = useState(false)
   const [ollamaStatus, setOllamaStatus] = useState<string>('')
   const [groqStatus, setGroqStatus] = useState<string>('')
+  const [geminiStatus, setGeminiStatus] = useState<string>('')
   const [kokoroStatus, setKokoroStatus] = useState<string>('')
   const lastSavedJson = useRef(JSON.stringify(settingsPayload(settings)))
   const saveTimer = useRef(0)
@@ -194,8 +203,13 @@ export function SettingsPanel(): React.JSX.Element {
       ? companion.urls
       : [`http://127.0.0.1:${form.companionPort || 47831}`]
     const token = companion?.token || form.companionToken || '(no token yet)'
+    // Prefer IPv4 LAN for phones — .local mDNS often fails on iOS.
     const primary =
-      urls.find((u) => !/127\.0\.0\.1|localhost/i.test(u)) || urls[0] || '(no url)'
+      urls.find((u) => /https?:\/\/(\d{1,3}\.){3}\d{1,3}(?::\d+)?\/?$/i.test(u)) ||
+      urls.find((u) => !/127\.0\.0\.1|localhost|\.local(?::|\/|$)/i.test(u)) ||
+      urls.find((u) => !/127\.0\.0\.1|localhost/i.test(u)) ||
+      urls[0] ||
+      '(no url)'
     const text = [
       `${APP_NAME} phone companion`,
       `URL=${primary}`,
@@ -295,7 +309,7 @@ export function SettingsPanel(): React.JSX.Element {
           <div>
             <h2 className="section-title">Systems</h2>
             <p className="section-sub">
-              Changes save automatically. Auto-routing: QUICK (Ollama/Groq Cloud) → Haiku → Opus
+              Changes save automatically. Auto-routing: QUICK (Ollama/Groq/Gemini) → Haiku → Opus
               — or lock via the sidebar. Voice can use Kokoro, macOS speech, or ElevenLabs.
             </p>
           </div>
@@ -583,9 +597,9 @@ export function SettingsPanel(): React.JSX.Element {
             QUICK brain provider
           </h3>
           <p className="section-sub">
-            Casual Auto routes and the QUICK lock use this provider. Groq is free cloud inference
-            with rate limits; Ollama can run in its cloud or genuinely on-device. Get a key at
-            console.groq.com/keys.
+            Casual Auto routes and the QUICK lock use this provider. Groq and Gemini are free cloud
+            tiers with rate limits; Ollama can run in its cloud or genuinely on-device. Gemini keys:
+            aistudio.google.com/apikey (free-tier prompts may improve Google products).
           </p>
           <div className="field">
             <label htmlFor="localProvider">Provider</label>
@@ -596,7 +610,8 @@ export function SettingsPanel(): React.JSX.Element {
                 setForm({ ...form, localProvider: e.target.value as LocalProvider })
               }
             >
-              <option value="groq">Groq (recommended free/fast)</option>
+              <option value="groq">Groq (fast free cloud)</option>
+              <option value="gemini">Gemini / Google AI Studio (free tier)</option>
               <option value="ollama">Ollama (cloud or local daemon)</option>
             </select>
           </div>
@@ -649,6 +664,51 @@ export function SettingsPanel(): React.JSX.Element {
                 Test Groq connection
               </button>
               {groqStatus ? <p className="section-sub">{groqStatus}</p> : null}
+            </>
+          ) : (form.localProvider || 'ollama') === 'gemini' ? (
+            <>
+              <div className="field">
+                <label htmlFor="geminiApiKey">Gemini API key</label>
+                <input
+                  id="geminiApiKey"
+                  type="password"
+                  value={form.geminiApiKey || ''}
+                  onChange={(e) => setForm({ ...form, geminiApiKey: e.target.value })}
+                  placeholder="from aistudio.google.com/apikey"
+                  autoComplete="off"
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="geminiModel">Gemini model</label>
+                <select
+                  id="geminiModel"
+                  value={form.geminiModel || DEFAULT_GEMINI_MODEL}
+                  onChange={(e) => setForm({ ...form, geminiModel: e.target.value })}
+                >
+                  {GEMINI_MODEL_OPTIONS.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className="section-sub">
+                Free tier has RPM/day quotas. Albert still uses its own web_search tools for live
+                lookup; Google Search grounding is not enabled on the free path.
+              </p>
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => {
+                  void (async () => {
+                    const r = await window.albert.probeGemini()
+                    setGeminiStatus(r.ok ? `OK · ${r.detail}` : `Fail · ${r.detail}`)
+                  })()
+                }}
+              >
+                Test Gemini connection
+              </button>
+              {geminiStatus ? <p className="section-sub">{geminiStatus}</p> : null}
             </>
           ) : (
             <>

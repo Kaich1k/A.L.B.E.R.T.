@@ -26,10 +26,6 @@ export function HudBackground({ children }: { children: ReactNode }): React.JSX.
           ))}
         </View>
         <View style={styles.horizon} />
-        <View style={[styles.corner, styles.topLeft]} />
-        <View style={[styles.corner, styles.topRight]} />
-        <View style={[styles.corner, styles.bottomLeft]} />
-        <View style={[styles.corner, styles.bottomRight]} />
         <View style={styles.scanline} />
       </View>
       <View style={styles.content}>{children}</View>
@@ -82,10 +78,5 @@ const styles = StyleSheet.create({
     height: 1,
     backgroundColor: 'rgba(184,228,248,0.09)'
   },
-  corner: { position: 'absolute', width: 28, height: 28, borderColor: colors.lineStrong },
-  topLeft: { top: 8, left: 8, borderTopWidth: 1, borderLeftWidth: 1 },
-  topRight: { top: 8, right: 8, borderTopWidth: 1, borderRightWidth: 1 },
-  bottomLeft: { bottom: 8, left: 8, borderBottomWidth: 1, borderLeftWidth: 1 },
-  bottomRight: { bottom: 8, right: 8, borderBottomWidth: 1, borderRightWidth: 1 },
   content: { flex: 1, zIndex: 1 }
 })

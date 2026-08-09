@@ -33,9 +33,11 @@ test('Mac Copy pair info format pastes the LAN URL and bootstrap token exactly',
     `TOKEN=${token}`,
     'Mac URLs:',
     '  http://127.0.0.1:47831',
+    '  http://albert-mac.local:47831',
     '  http://192.168.1.8:47831'
   ].join('\n'))
-  assert.equal(parsed.macBaseUrl, 'http://albert-mac.local:47831')
+  // Prefer IPv4 over .local — Bonjour often fails on physical iPhones.
+  assert.equal(parsed.macBaseUrl, 'http://192.168.1.8:47831')
   assert.equal(parsed.macToken, token)
 })
 

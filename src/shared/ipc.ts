@@ -20,6 +20,7 @@ export const IpcChannels = {
   ollamaProbe: 'albert:ollama:probe',
   ollamaPull: 'albert:ollama:pull',
   groqProbe: 'albert:groq:probe',
+  geminiProbe: 'albert:gemini:probe',
   voiceWarm: 'albert:voice:warm',
   voiceTranscribe: 'albert:voice:transcribe',
   companionStatus: 'albert:companion:status',

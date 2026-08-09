@@ -1,8 +1,8 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Alert,
   FlatList,
-  KeyboardAvoidingView,
+  Keyboard,
   Platform,
   StyleSheet,
   Text,
@@ -10,6 +10,7 @@ import {
   View,
   useWindowDimensions
 } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { APP_NAME } from '../brand'
 import { HudButton } from '../components/HudButton'
 import { HudCard } from '../components/HudCard'
@@ -32,7 +33,8 @@ export interface ChatScreenProps {
   routeLabel?: string
   streamingText?: string
   interimTranscript?: string
-  keyboardVerticalOffset?: number
+  /** Height of StatusRail + TabBar sitting below this screen (covered when the keyboard opens). */
+  bottomChromeHeight?: number
   onChangeDraft: (value: string) => void
   onSend: () => void
   onPurge: () => void
@@ -73,7 +75,7 @@ export function ChatScreen({
   routeLabel,
   streamingText,
   interimTranscript,
-  keyboardVerticalOffset = 0,
+  bottomChromeHeight = sizes.bottomNav + sizes.minTarget,
   onChangeDraft,
   onSend,
   onPurge,
@@ -88,7 +90,9 @@ export function ChatScreen({
 }: ChatScreenProps): React.JSX.Element {
   const listRef = useRef<FlatList<ChatMessage>>(null)
   const autoFollowRef = useRef(true)
+  const insets = useSafeAreaInsets()
   const { width } = useWindowDimensions()
+  const [keyboardLift, setKeyboardLift] = useState(0)
   const wide = width >= sizes.tabletBreakpoint
   const voiceEngaged = voicePhase !== 'standby' && voicePhase !== 'permission' && voicePhase !== 'fault'
   const linkTone =
@@ -106,20 +110,10 @@ export function ChatScreen({
                 ? 'warn'
                 : 'neutral'
 
-  useEffect(() => {
-    if (!autoFollowRef.current) return
-    listRef.current?.scrollToEnd({ animated: messages.length > 1 })
-  }, [messages.length, streamingText])
-
-  const confirmPurge = (): void => {
-    Alert.alert(
-      'Clear Comm history?',
-      'This clears the phone thread and requests the paired Mac copy be cleared. This cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Clear history', style: 'destructive', onPress: onPurge }
-      ]
-    )
+  const scrollToLatest = (animated = true): void => {
+    requestAnimationFrame(() => {
+      listRef.current?.scrollToEnd({ animated })
+    })
   }
 
   const data = streamingText
@@ -135,12 +129,40 @@ export function ChatScreen({
       ]
     : messages
 
+  useEffect(() => {
+    if (!autoFollowRef.current) return
+    scrollToLatest(data.length > 1)
+  }, [data.length, streamingText, keyboardLift])
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow'
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide'
+    const showSub = Keyboard.addListener(showEvent, (event) => {
+      // Chrome below Comm is covered by the keyboard; lift only the overlapping portion.
+      const covered = bottomChromeHeight + insets.bottom
+      setKeyboardLift(Math.max(0, event.endCoordinates.height - covered))
+      if (autoFollowRef.current) scrollToLatest(true)
+    })
+    const hideSub = Keyboard.addListener(hideEvent, () => setKeyboardLift(0))
+    return () => {
+      showSub.remove()
+      hideSub.remove()
+    }
+  }, [bottomChromeHeight, insets.bottom])
+
+  const confirmPurge = (): void => {
+    Alert.alert(
+      'Clear Comm history?',
+      'This clears the phone thread and requests the paired Mac copy be cleared. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Clear history', style: 'destructive', onPress: onPurge }
+      ]
+    )
+  }
+
   return (
-    <KeyboardAvoidingView
-      style={styles.flex}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={keyboardVerticalOffset}
-    >
+    <View style={[styles.flex, keyboardLift > 0 && { paddingBottom: keyboardLift }]}>
       <View style={[styles.shell, wide && styles.shellWide]}>
         <View style={styles.hero}>
           <View style={styles.heroRow}>
@@ -221,13 +243,19 @@ export function ChatScreen({
           contentContainerStyle={[styles.list, data.length === 0 && styles.listEmpty]}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+          onContentSizeChange={() => {
+            if (autoFollowRef.current) scrollToLatest(true)
+          }}
+          onLayout={() => {
+            if (autoFollowRef.current) scrollToLatest(false)
+          }}
           onScroll={({ nativeEvent }) => {
             const distance =
               nativeEvent.contentSize.height -
               (nativeEvent.contentOffset.y + nativeEvent.layoutMeasurement.height)
-            autoFollowRef.current = distance < 96
+            autoFollowRef.current = distance < 140
           }}
-          scrollEventThrottle={48}
+          scrollEventThrottle={32}
           ListEmptyComponent={
             <View style={styles.empty}>
               <Text allowFontScaling={false} style={styles.emptyGlyph}>◇</Text>
@@ -287,7 +315,7 @@ export function ChatScreen({
           )}
         </View>
       </View>
-    </KeyboardAvoidingView>
+    </View>
   )
 }
 

@@ -82,10 +82,11 @@ export default function App(): React.JSX.Element {
       current.anthropicApiKey?.trim() ||
         current.ollamaApiKey?.trim() ||
         current.groqApiKey?.trim() ||
+        current.geminiApiKey?.trim() ||
         current.localProvider === 'ollama'
     )
     if (!hasBrain) {
-      setError('Add an Anthropic, Groq, or Ollama API key under Systems to talk.')
+      setError('Add an Anthropic, Groq, Gemini, or Ollama key under Systems to talk.')
       setPanel('settings')
       return
     }
@@ -351,6 +352,7 @@ export default function App(): React.JSX.Element {
             settings.anthropicApiKey?.trim() ||
             settings.ollamaApiKey?.trim() ||
             settings.groqApiKey?.trim() ||
+            settings.geminiApiKey?.trim() ||
             settings.localProvider === 'ollama'
           )}
         />

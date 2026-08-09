@@ -20,6 +20,11 @@ import {
   ProviderRequestError,
   providerTextResult
 } from '../src/lib/prompt.ts'
+import {
+  executePhoneTool,
+  parseToolArguments,
+  toOpenAITools
+} from '../src/lib/phoneTools.ts'
 
 const messages = [
   { id: 'm1', role: 'user', content: 'Status?', createdAt: 1 }
@@ -29,6 +34,7 @@ const config = (overrides = {}) => ({
   provider: 'auto',
   anthropicApiKey: '',
   groqApiKey: '',
+  geminiApiKey: '',
   model: 'openai/gpt-oss-20b',
   macBaseUrl: '',
   macToken: '',
@@ -38,6 +44,7 @@ const config = (overrides = {}) => ({
   autoSync: true,
   speakReplies: true,
   voiceRate: 1,
+  ttsVoiceId: '',
   wakeOnLaunch: false,
   reducedMotion: false,
   ...overrides
@@ -80,7 +87,9 @@ test('Auto exposes both model families and defaults to fast free Groq', () => {
   assert.equal(defaultModelFor('auto'), 'openai/gpt-oss-20b')
   assert.equal(isModelForProvider('auto', 'claude-haiku-4-5'), true)
   assert.equal(isModelForProvider('auto', 'openai/gpt-oss-20b'), true)
+  assert.equal(isModelForProvider('auto', 'gemini-2.5-flash'), true)
   assert.ok(modelsFor('auto').some((entry) => entry.label.startsWith('Groq ·')))
+  assert.ok(modelsFor('auto').some((entry) => entry.label.startsWith('Gemini ·')))
   assert.ok(modelsFor('auto').some((entry) => entry.label.startsWith('Anthropic ·')))
 })
 
@@ -108,6 +117,24 @@ test('Auto crosses providers only when both user keys exist', () => {
       model: 'openai/gpt-oss-20b'
     }),
     ['groq', 'anthropic']
+  )
+  assert.deepEqual(
+    autoRouteOrder({
+      anthropicApiKey: 'sk_user',
+      groqApiKey: 'gsk_user',
+      geminiApiKey: 'AIza_user',
+      model: 'gemini-2.5-flash'
+    }),
+    ['gemini', 'groq', 'anthropic']
+  )
+  assert.deepEqual(
+    autoRouteOrder({
+      anthropicApiKey: '',
+      groqApiKey: '',
+      geminiApiKey: 'AIza_user',
+      model: 'openai/gpt-oss-20b'
+    }),
+    ['gemini']
   )
 })
 
@@ -145,8 +172,12 @@ test('Anthropic returns cleaned text, memories, and actual route metadata', asyn
     })(),
     fetchImpl: async (url, init) => {
       calls.push({ url: String(url), init })
+      const body = JSON.parse(String(init?.body || '{}'))
+      assert.ok(Array.isArray(body.tools))
+      assert.ok(body.tools.some((tool) => tool.name === 'web_search'))
       return jsonResponse({
         model: 'claude-haiku-4-5-20261001',
+        stop_reason: 'end_turn',
         content: [{ type: 'text', text: 'Online, sir.\n[MEMORY] preference | Likes fast replies' }]
       })
     }
@@ -159,6 +190,66 @@ test('Anthropic returns cleaned text, memories, and actual route metadata', asyn
   assert.equal(result.provider, 'anthropic')
   assert.equal(result.model, 'claude-haiku-4-5-20261001')
   assert.equal(result.latencyMs, 37)
+})
+
+test('phone tool helpers include web + open_app and block private fetches', async () => {
+  assert.deepEqual(parseToolArguments('{"query":"DeepSeek"}'), { query: 'DeepSeek' })
+  assert.ok(toOpenAITools().some((tool) => tool.function.name === 'web_fetch'))
+  assert.ok(toOpenAITools().some((tool) => tool.function.name === 'open_app'))
+  assert.match(
+    toOpenAITools().find((tool) => tool.function.name === 'web_search')?.function.description || '',
+    /Reddit|YouTube|Wikipedia/i
+  )
+  const blocked = await executePhoneTool('web_fetch', { url: 'http://192.168.1.1/admin' })
+  assert.equal(blocked.ok, false)
+  assert.match(blocked.result, /private/i)
+})
+
+test('Groq runs a web_search tool round before answering', async () => {
+  const bodies = []
+  const result = await chatWithGroq({
+    apiKey: 'gsk_user',
+    model: 'openai/gpt-oss-20b',
+    messages: [{ id: 'm1', role: 'user', content: 'What is DeepSeek?', createdAt: 1 }],
+    memories: [],
+    candidateNowMs: GROQ_TRANSITION_CUTOFF_MS,
+    fetchImpl: async (url, init) => {
+      const href = String(url)
+      if (href.includes('duckduckgo.com') || href.includes('wikipedia.org')) {
+        return jsonResponse({
+          AbstractText: 'DeepSeek is an AI company.',
+          AbstractURL: 'https://example.com/deepseek',
+          Answer: '',
+          RelatedTopics: []
+        })
+      }
+      const body = JSON.parse(String(init?.body || '{}'))
+      bodies.push(body)
+      if (bodies.length === 1) {
+        assert.ok(Array.isArray(body.tools))
+        return jsonResponse({
+          model: 'openai/gpt-oss-20b',
+          choices: [{
+            message: {
+              content: null,
+              tool_calls: [{
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'web_search', arguments: '{"query":"DeepSeek AI"}' }
+              }]
+            }
+          }]
+        })
+      }
+      assert.ok(body.messages.some((row) => row.role === 'tool'))
+      return jsonResponse({
+        model: 'openai/gpt-oss-20b',
+        choices: [{ message: { content: 'DeepSeek is an AI company, sir.' } }]
+      })
+    }
+  })
+  assert.equal(result.reply, 'DeepSeek is an AI company, sir.')
+  assert.equal(bodies.length, 2)
 })
 
 test('Anthropic reports malformed and empty successful responses safely', async () => {

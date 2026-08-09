@@ -25,6 +25,7 @@ const KEYS = {
   draft: 'albert.mobile.draft.v2',
   apiKey: 'albert.mobile.secret.anthropic',
   groqApiKey: 'albert.mobile.secret.groq',
+  geminiApiKey: 'albert.mobile.secret.gemini',
   macToken: 'albert.mobile.secret.enrollment',
   macCredential: 'albert.mobile.secret.deviceCredential'
 } as const
@@ -47,6 +48,7 @@ export const DEFAULT_CONFIG: CompanionConfig = {
   provider: 'auto',
   anthropicApiKey: '',
   groqApiKey: '',
+  geminiApiKey: '',
   model: 'openai/gpt-oss-20b',
   macBaseUrl: '',
   macToken: '',
@@ -56,6 +58,7 @@ export const DEFAULT_CONFIG: CompanionConfig = {
   autoSync: true,
   speakReplies: true,
   voiceRate: 1.03,
+  ttsVoiceId: '',
   wakeOnLaunch: false,
   reducedMotion: false
 }
@@ -111,7 +114,10 @@ async function writeSecret(key: string, value: string): Promise<void> {
 }
 
 function normalizeConfig(value: Partial<CompanionConfig>): CompanionConfig {
-  const provider = value.provider === 'anthropic' || value.provider === 'groq' ? value.provider : 'auto'
+  const provider =
+    value.provider === 'anthropic' || value.provider === 'groq' || value.provider === 'gemini'
+      ? value.provider
+      : 'auto'
   const voiceRate = typeof value.voiceRate === 'number' && Number.isFinite(value.voiceRate)
     ? Math.max(0.7, Math.min(1.35, value.voiceRate))
     : DEFAULT_CONFIG.voiceRate
@@ -129,28 +135,40 @@ function normalizeConfig(value: Partial<CompanionConfig>): CompanionConfig {
     speakReplies: value.speakReplies !== false,
     wakeOnLaunch: value.wakeOnLaunch === true,
     reducedMotion: value.reducedMotion === true,
-    voiceRate
+    voiceRate,
+    ttsVoiceId: typeof value.ttsVoiceId === 'string' ? value.ttsVoiceId.trim() : DEFAULT_CONFIG.ttsVoiceId
   }
 }
 
 export async function loadConfig(): Promise<CompanionConfig> {
-  const [publicPart, anthropicApiKey, groqApiKey, macToken, macCredential] = await Promise.all([
-    readJsonWithLegacy<Partial<CompanionConfig>>(KEYS.publicConfig, LEGACY_KEYS.publicConfig, {}),
-    readSecretWithLegacy(KEYS.apiKey, LEGACY_KEYS.apiKey),
-    readSecretWithLegacy(KEYS.groqApiKey, LEGACY_KEYS.groqApiKey),
-    readSecretWithLegacy(KEYS.macToken, LEGACY_KEYS.macToken),
-    readSecret(KEYS.macCredential)
-  ])
-  return normalizeConfig({ ...publicPart, anthropicApiKey, groqApiKey, macToken, macCredential })
+  const [publicPart, anthropicApiKey, groqApiKey, geminiApiKey, macToken, macCredential] =
+    await Promise.all([
+      readJsonWithLegacy<Partial<CompanionConfig>>(KEYS.publicConfig, LEGACY_KEYS.publicConfig, {}),
+      readSecretWithLegacy(KEYS.apiKey, LEGACY_KEYS.apiKey),
+      readSecretWithLegacy(KEYS.groqApiKey, LEGACY_KEYS.groqApiKey),
+      readSecret(KEYS.geminiApiKey),
+      readSecretWithLegacy(KEYS.macToken, LEGACY_KEYS.macToken),
+      readSecret(KEYS.macCredential)
+    ])
+  return normalizeConfig({
+    ...publicPart,
+    anthropicApiKey,
+    groqApiKey,
+    geminiApiKey,
+    macToken,
+    macCredential
+  })
 }
 
 export async function saveConfig(config: CompanionConfig): Promise<void> {
   const normalized = normalizeConfig(config)
-  const { anthropicApiKey, groqApiKey, macToken, macCredential, ...publicPart } = normalized
+  const { anthropicApiKey, groqApiKey, geminiApiKey, macToken, macCredential, ...publicPart } =
+    normalized
   await Promise.all([
     AsyncStorage.setItem(KEYS.publicConfig, JSON.stringify(publicPart)),
     writeSecret(KEYS.apiKey, anthropicApiKey.trim()),
     writeSecret(KEYS.groqApiKey, groqApiKey.trim()),
+    writeSecret(KEYS.geminiApiKey, geminiApiKey.trim()),
     writeSecret(KEYS.macToken, macToken.trim()),
     writeSecret(KEYS.macCredential, macCredential.trim()),
     AsyncStorage.removeItem(LEGACY_KEYS.publicConfig),
@@ -164,6 +182,7 @@ export async function clearCredentials(): Promise<void> {
   await Promise.all([
     writeSecret(KEYS.apiKey, ''),
     writeSecret(KEYS.groqApiKey, ''),
+    writeSecret(KEYS.geminiApiKey, ''),
     writeSecret(KEYS.macToken, ''),
     writeSecret(KEYS.macCredential, '')
   ])

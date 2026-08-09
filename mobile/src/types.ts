@@ -17,19 +17,20 @@ export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   createdAt: number
-  provider?: 'anthropic' | 'groq' | 'offline' | 'mac'
+  provider?: 'anthropic' | 'groq' | 'gemini' | 'offline' | 'mac'
   model?: string
   origin?: 'phone' | 'mac'
   delivery?: MessageDelivery
   error?: string
 }
 
-export type LlmProvider = 'auto' | 'anthropic' | 'groq'
+export type LlmProvider = 'auto' | 'anthropic' | 'groq' | 'gemini'
 
 export interface CompanionConfig {
   provider: LlmProvider
   anthropicApiKey: string
   groqApiKey: string
+  geminiApiKey: string
   model: string
   macBaseUrl: string
   /** Bootstrap pairing token copied from the Mac; cleared on the phone after enrollment. */
@@ -41,6 +42,8 @@ export interface CompanionConfig {
   autoSync: boolean
   speakReplies: boolean
   voiceRate: number
+  /** System TTS voice identifier from expo-speech; empty uses the device default. */
+  ttsVoiceId: string
   wakeOnLaunch: boolean
   reducedMotion: boolean
 }

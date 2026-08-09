@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -147,13 +148,7 @@ function StatusPill({ label, tone = 'neutral' }: { label: string; tone?: ReturnT
 }
 
 function Frame({ children }: { children: React.ReactNode }): React.JSX.Element {
-  return (
-    <View style={styles.frame}>
-      <View pointerEvents="none" style={[styles.corner, styles.cornerTl]} />
-      <View pointerEvents="none" style={[styles.corner, styles.cornerBr]} />
-      {children}
-    </View>
-  )
+  return <View style={styles.frame}>{children}</View>
 }
 
 function EmptyState({ title, detail }: { title: string; detail: string }): React.JSX.Element {
@@ -1134,7 +1129,10 @@ export function OperationsScreen({
           return (
             <Pressable
               key={item.id}
-              onPress={() => setSection(item.id)}
+              onPress={() => {
+                Keyboard.dismiss()
+                setSection(item.id)
+              }}
               accessibilityRole="tab"
               accessibilityState={{ selected }}
               accessibilityLabel={`${item.label}, ${counts[item.id]}`}
@@ -1158,7 +1156,9 @@ export function OperationsScreen({
           contentContainerStyle={styles.content}
           refreshControl={onRefresh ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.accent} /> : undefined}
           keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
           showsVerticalScrollIndicator={false}
+          onScrollBeginDrag={() => Keyboard.dismiss()}
         >
           {section === 'missions' ? (
             <>
@@ -1272,12 +1272,25 @@ export function OperationsScreen({
                     </Pressable>
                   ))}
                 </ScrollView>
-                <HudButton
-                  label={captureBusy ? 'Transmitting…' : 'Add to inbox'}
-                  onPress={() => void submitCapture()}
-                  primary
-                  disabled={!captureText.trim() || !onAddCapture || captureBusy}
-                />
+                <View style={styles.captureActions}>
+                  <HudButton
+                    label="Done"
+                    variant="quiet"
+                    onPress={() => Keyboard.dismiss()}
+                    accessibilityLabel="Dismiss keyboard"
+                    style={styles.captureActionButton}
+                  />
+                  <HudButton
+                    label={captureBusy ? 'Transmitting…' : 'Add to inbox'}
+                    onPress={() => {
+                      Keyboard.dismiss()
+                      void submitCapture()
+                    }}
+                    primary
+                    disabled={!captureText.trim() || !onAddCapture || captureBusy}
+                    style={styles.captureActionButton}
+                  />
+                </View>
               </Frame>
               {operations.captures.length ? operations.captures
                 .slice()
@@ -1379,10 +1392,15 @@ const styles = StyleSheet.create({
   sectionActionButton: { minWidth: 142 },
   loadingState: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 16 },
   loadingText: { fontFamily: fonts.mono, fontSize: 11, letterSpacing: 1.6, color: colors.inkMuted },
-  frame: { position: 'relative', borderWidth: 1, borderColor: colors.line, backgroundColor: 'rgba(3,10,15,0.88)', padding: 14 },
-  corner: { position: 'absolute', width: 13, height: 13, borderColor: colors.accent },
-  cornerTl: { top: -1, left: -1, borderTopWidth: 2, borderLeftWidth: 2 },
-  cornerBr: { bottom: -1, right: -1, borderBottomWidth: 2, borderRightWidth: 2 },
+  frame: {
+    position: 'relative',
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 8,
+    backgroundColor: 'rgba(3,10,15,0.88)',
+    padding: 14,
+    overflow: 'hidden'
+  },
   cardHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
   cardHeaderCopy: { flex: 1 },
   eyebrow: { fontFamily: fonts.mono, fontSize: 10, letterSpacing: 1.4, color: colors.accent },
@@ -1427,6 +1445,8 @@ const styles = StyleSheet.create({
   captureText: { marginTop: 5, fontFamily: fonts.bodyBold, fontSize: 17, lineHeight: 22, color: colors.ink },
   captureInput: { minHeight: 92, marginTop: 10, borderWidth: 1, borderColor: colors.line, padding: 12, textAlignVertical: 'top', fontFamily: fonts.body, fontSize: 16, lineHeight: 21, color: colors.ink, backgroundColor: 'rgba(0,0,0,0.38)' },
   kindRow: { gap: 7, paddingVertical: 10 },
+  captureActions: { flexDirection: 'row', gap: 8, marginTop: 4 },
+  captureActionButton: { flex: 1 },
   kindChip: { minHeight: 44, minWidth: 68, paddingHorizontal: 11, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.line },
   kindChipActive: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
   kindText: { fontFamily: fonts.mono, fontSize: 9, letterSpacing: 0.8, color: colors.inkMuted },

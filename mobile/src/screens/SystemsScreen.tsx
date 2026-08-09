@@ -1,3 +1,4 @@
+import * as Speech from 'expo-speech'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
@@ -16,8 +17,16 @@ import { HudButton } from '../components/HudButton'
 import { HudCard } from '../components/HudCard'
 import { StatusChip } from '../components/StatusChip'
 import { defaultModelFor, isModelForProvider } from '../lib/chat'
+import { isLoopbackMacUrl, isMdnsMacUrl } from '../lib/pairInfo'
 import type { CompanionConfig, LlmProvider, MacLinkState, SyncState } from '../types'
 import { colors, fonts, sizes, spacing, typeScale } from '../theme'
+
+type TtsVoiceOption = {
+  identifier: string
+  name: string
+  language: string
+  quality: string
+}
 
 export interface ModelOption {
   value: string
@@ -40,6 +49,8 @@ export interface SystemsScreenProps {
   onPastePairInfo?: () => void | Promise<void>
   onUnpair?: () => void | Promise<void>
   onRequestVoicePermission?: () => void | Promise<void>
+  /** Pause mic briefly and speak a sample with the configured TTS voice. */
+  onPreviewVoice?: () => void | Promise<void>
   onOpenPrivacy?: () => void
 }
 
@@ -48,6 +59,8 @@ const FALLBACK_MODELS: Record<LlmProvider, ReadonlyArray<ModelOption>> = {
     { value: 'openai/gpt-oss-20b', label: 'Groq · GPT-OSS 20B', note: 'Fastest available configured brain' },
     { value: 'openai/gpt-oss-120b', label: 'Groq · GPT-OSS 120B', note: 'Higher-capability free-cloud route' },
     { value: 'qwen/qwen3.6-27b', label: 'Groq · Qwen 27B', note: 'Preview route' },
+    { value: 'gemini-2.5-flash', label: 'Gemini · 2.5 Flash', note: 'Google AI Studio free tier' },
+    { value: 'gemini-2.5-flash-lite', label: 'Gemini · 2.5 Flash-Lite', note: 'Lightest Gemini free route' },
     { value: 'claude-haiku-4-5', label: 'Anthropic · Haiku', note: 'Fast, concise voice and chat' },
     { value: 'claude-sonnet-4-6', label: 'Anthropic · Sonnet', note: 'Balanced reasoning' },
     { value: 'claude-opus-4-8', label: 'Anthropic · Opus', note: 'Deep work' }
@@ -61,7 +74,31 @@ const FALLBACK_MODELS: Record<LlmProvider, ReadonlyArray<ModelOption>> = {
     { value: 'openai/gpt-oss-20b', label: 'GPT-OSS 20B', note: 'Fast free-cloud route' },
     { value: 'openai/gpt-oss-120b', label: 'GPT-OSS 120B', note: 'Higher-capability free-cloud route' },
     { value: 'qwen/qwen3.6-27b', label: 'Qwen 27B', note: 'Preview route' }
+  ],
+  gemini: [
+    { value: 'gemini-2.5-flash', label: '2.5 Flash', note: 'Recommended free tier' },
+    { value: 'gemini-2.5-flash-lite', label: '2.5 Flash-Lite', note: 'Fastest / lightest' },
+    { value: 'gemini-3.5-flash-lite', label: '3.5 Flash-Lite', note: 'Newer lite route' },
+    { value: 'gemini-2.5-pro', label: '2.5 Pro', note: 'Stronger; tighter free quotas' }
   ]
+}
+
+function providerDisplayName(provider: Exclude<LlmProvider, 'auto'>): string {
+  if (provider === 'groq') return 'Groq'
+  if (provider === 'gemini') return 'Gemini'
+  return 'Anthropic'
+}
+
+function providerKeyFor(config: CompanionConfig): string {
+  if (config.provider === 'groq') return config.groqApiKey
+  if (config.provider === 'gemini') return config.geminiApiKey
+  return config.anthropicApiKey
+}
+
+function providerKeyPlaceholder(provider: Exclude<LlmProvider, 'auto'>): string {
+  if (provider === 'groq') return 'gsk_…'
+  if (provider === 'gemini') return 'AIza…'
+  return 'sk-ant-…'
 }
 
 function linkLabel(state: MacLinkState): string {
@@ -107,6 +144,7 @@ export function SystemsScreen({
   onPastePairInfo,
   onUnpair,
   onRequestVoicePermission,
+  onPreviewVoice,
   onOpenPrivacy
 }: SystemsScreenProps): React.JSX.Element {
   const { width } = useWindowDimensions()
@@ -115,9 +153,12 @@ export function SystemsScreen({
   const [showEnrollmentToken, setShowEnrollmentToken] = useState(false)
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'fault'>('idle')
   const [localFault, setLocalFault] = useState<string | null>(null)
+  const [ttsVoices, setTtsVoices] = useState<TtsVoiceOption[]>([])
   const saveResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const options = modelOptions ?? FALLBACK_MODELS[config.provider]
-  const providerKey = config.provider === 'groq' ? config.groqApiKey : config.anthropicApiKey
+  const providerKey = providerKeyFor(config)
+  const loopbackUrl = isLoopbackMacUrl(config.macBaseUrl)
+  const mdnsUrl = isMdnsMacUrl(config.macBaseUrl)
 
   useEffect(
     () => () => {
@@ -126,16 +167,84 @@ export function SystemsScreen({
     []
   )
 
+  useEffect(() => {
+    let cancelled = false
+    void Speech.getAvailableVoicesAsync()
+      .then((voices) => {
+        if (cancelled) return
+        const english = voices
+          .filter((voice) => /^en([-_]|$)/i.test(voice.language || ''))
+          .map((voice) => ({
+            identifier: voice.identifier,
+            name: voice.name || voice.identifier,
+            language: voice.language || 'en',
+            quality: String(voice.quality || 'Default')
+          }))
+          .sort((a, b) => {
+            const qualityRank = (value: string) =>
+              /enhanced|premium|quality/i.test(value) ? 0 : 1
+            return qualityRank(a.quality) - qualityRank(b.quality) || a.name.localeCompare(b.name)
+          })
+        setTtsVoices(english)
+      })
+      .catch(() => {
+        if (!cancelled) setTtsVoices([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const paired = Boolean(config.macCredential || (config.macBaseUrl.trim() && config.macToken.trim()))
+  const protocolLabel = useMemo(() => {
+    if (syncState?.protocolVersion) return `V${syncState.protocolVersion}`
+    if (linkState === 'authenticated' || linkState === 'syncing') return 'V2 READY'
+    if (linkState === 'enrolling' || linkState === 'checking') return 'CHECKING'
+    if (linkState === 'offline' || linkState === 'fault' || linkState === 'auth-failed') {
+      return syncState?.lastSyncAt ? 'LAST KNOWN V2' : 'UNREACHABLE'
+    }
+    return config.macCredential || config.macToken ? 'NOT LINKED' : 'IDLE'
+  }, [config.macCredential, config.macToken, linkState, syncState?.lastSyncAt, syncState?.protocolVersion])
+
   const diagnostics = useMemo(
     () => [
       ['REMOTE', remoteName || syncState?.remoteName || 'NOT IDENTIFIED'],
-      ['PROTOCOL', syncState?.protocolVersion ? `V${syncState.protocolVersion}` : 'NEGOTIATING'],
+      ['PROTOCOL', protocolLabel],
       ['LAST SYNC', formatSyncTime(syncState?.lastSyncAt)],
       ['PENDING', String(syncState?.outbox.length || 0)]
     ],
-    [remoteName, syncState]
+    [protocolLabel, remoteName, syncState]
   )
+
+  const previewVoice = async (): Promise<void> => {
+    setLocalFault(null)
+    try {
+      if (onPreviewVoice) {
+        await onPreviewVoice()
+        return
+      }
+      await Speech.stop()
+      await new Promise<void>((resolve) => setTimeout(resolve, 160))
+      const voiceId = config.ttsVoiceId.trim()
+      await new Promise<void>((resolve, reject) => {
+        Speech.speak('Standing by, sir.', {
+          language: 'en-US',
+          ...(voiceId ? { voice: voiceId } : {}),
+          rate: Math.max(0.7, Math.min(1.35, config.voiceRate)),
+          volume: 1,
+          useApplicationAudioSession: false,
+          onDone: () => resolve(),
+          onStopped: () => resolve(),
+          onError: () =>
+            reject(
+              new Error('Speaking voice preview failed — turn off Silent Mode and raise media volume')
+            )
+        })
+      })
+    } catch (caught) {
+      setLocalFault(caught instanceof Error ? caught.message : 'Voice preview failed')
+    }
+  }
 
   const setProvider = (provider: LlmProvider): void => {
     const nextModel = isModelForProvider(provider, config.model)
@@ -214,10 +323,14 @@ export function SystemsScreen({
               </Text>
               <FieldLabel text="Provider" />
               <View style={styles.segmentRow}>
-                {(['auto', 'anthropic', 'groq'] as const).map((provider) => (
+                {(['auto', 'anthropic', 'groq', 'gemini'] as const).map((provider) => (
                   <HudButton
                     key={provider}
-                    label={provider === 'auto' ? 'Auto' : provider === 'anthropic' ? 'Anthropic' : 'Groq'}
+                    label={
+                      provider === 'auto'
+                        ? 'Auto'
+                        : providerDisplayName(provider)
+                    }
                     selected={config.provider === provider}
                     primary={config.provider === provider}
                     onPress={() => setProvider(provider)}
@@ -272,10 +385,36 @@ export function SystemsScreen({
                       style={styles.revealButton}
                     />
                   </View>
+                  <FieldLabel text="Gemini API key" />
+                  <View style={styles.inputRow}>
+                    <TextInput
+                      value={config.geminiApiKey}
+                      onChangeText={(geminiApiKey) => onChange({ ...config, geminiApiKey })}
+                      accessibilityLabel="Gemini API key"
+                      placeholder="AIza… from aistudio.google.com/apikey"
+                      placeholderTextColor={colors.inkFaint}
+                      secureTextEntry={!showProviderKey}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      autoComplete="off"
+                      style={styles.input}
+                    />
+                    <HudButton
+                      label={showProviderKey ? 'Hide' : 'Show'}
+                      variant="quiet"
+                      accessibilityLabel={showProviderKey ? 'Hide provider keys' : 'Show provider keys'}
+                      onPress={() => setShowProviderKey((value) => !value)}
+                      style={styles.revealButton}
+                    />
+                  </View>
+                  <Text style={styles.help}>
+                    Free-tier Gemini prompts may be used to improve Google products. Prefer local Mac
+                    Ollama for private work.
+                  </Text>
                 </>
               ) : (
                 <>
-                  <FieldLabel text={`${config.provider === 'groq' ? 'Groq' : 'Anthropic'} API key`} />
+                  <FieldLabel text={`${providerDisplayName(config.provider)} API key`} />
                   <View style={styles.inputRow}>
                     <TextInput
                       value={providerKey}
@@ -283,11 +422,13 @@ export function SystemsScreen({
                         onChange(
                           config.provider === 'groq'
                             ? { ...config, groqApiKey: value }
-                            : { ...config, anthropicApiKey: value }
+                            : config.provider === 'gemini'
+                              ? { ...config, geminiApiKey: value }
+                              : { ...config, anthropicApiKey: value }
                         )
                       }
                       accessibilityLabel={`${config.provider} API key`}
-                      placeholder={config.provider === 'groq' ? 'gsk_…' : 'sk-ant-…'}
+                      placeholder={providerKeyPlaceholder(config.provider)}
                       placeholderTextColor={colors.inkFaint}
                       secureTextEntry={!showProviderKey}
                       autoCapitalize="none"
@@ -303,6 +444,11 @@ export function SystemsScreen({
                       style={styles.revealButton}
                     />
                   </View>
+                  {config.provider === 'gemini' ? (
+                    <Text style={styles.help}>
+                      Free tier from aistudio.google.com/apikey. Prompts may improve Google products.
+                    </Text>
+                  ) : null}
                 </>
               )}
 
@@ -373,6 +519,56 @@ export function SystemsScreen({
                   style={styles.rateButton}
                 />
               </View>
+              <FieldLabel text="Speaking voice" />
+              <Text style={styles.help}>
+                Phone replies use on-device system voices so listening stays reliable. Kokoro neural TTS stays on the Mac companion. Preview briefly pauses the mic — on iPhone, turn off Silent Mode and use media volume.
+              </Text>
+              <View style={styles.modelStack}>
+                <Pressable
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: !config.ttsVoiceId }}
+                  accessibilityLabel="System default speaking voice"
+                  onPress={() => onChange({ ...config, ttsVoiceId: '' })}
+                  style={({ pressed }) => [
+                    styles.modelOption,
+                    !config.ttsVoiceId && styles.modelOptionOn,
+                    pressed && styles.pressed
+                  ]}
+                >
+                  <View style={[styles.radio, !config.ttsVoiceId && styles.radioOn]} />
+                  <View style={styles.modelCopy}>
+                    <Text style={styles.modelLabel}>System default</Text>
+                    <Text style={styles.modelNote}>Device English voice</Text>
+                  </View>
+                </Pressable>
+                {ttsVoices.slice(0, 12).map((voice) => (
+                  <Pressable
+                    key={voice.identifier}
+                    accessibilityRole="radio"
+                    accessibilityState={{ checked: config.ttsVoiceId === voice.identifier }}
+                    accessibilityLabel={`${voice.name}. ${voice.language}. ${voice.quality}`}
+                    onPress={() => onChange({ ...config, ttsVoiceId: voice.identifier })}
+                    style={({ pressed }) => [
+                      styles.modelOption,
+                      config.ttsVoiceId === voice.identifier && styles.modelOptionOn,
+                      pressed && styles.pressed
+                    ]}
+                  >
+                    <View style={[styles.radio, config.ttsVoiceId === voice.identifier && styles.radioOn]} />
+                    <View style={styles.modelCopy}>
+                      <Text style={styles.modelLabel}>{voice.name}</Text>
+                      <Text style={styles.modelNote}>
+                        {voice.language.toUpperCase()} · {voice.quality}
+                      </Text>
+                    </View>
+                  </Pressable>
+                ))}
+              </View>
+              <HudButton
+                label="Preview speaking voice"
+                variant="quiet"
+                onPress={() => void runAction(previewVoice, 'Speaking voice preview failed')}
+              />
               {onRequestVoicePermission ? (
                 <HudButton
                   label="Check microphone access"
@@ -418,6 +614,16 @@ export function SystemsScreen({
                 keyboardType="url"
                 style={styles.input}
               />
+              {loopbackUrl ? (
+                <Text style={styles.faultText} accessibilityRole="alert">
+                  This address only works on the Mac or iOS Simulator. On a physical iPhone, paste the Mac’s LAN IP (192.168.x.x) from Copy pair info.
+                </Text>
+              ) : null}
+              {mdnsUrl && !loopbackUrl ? (
+                <Text style={styles.help}>
+                  `.local` names are often unreliable on iPhone. Prefer the `192.168…` URL from Mac Systems → Copy pair info.
+                </Text>
+              ) : null}
               {!config.macCredential ? (
                 <>
                   <FieldLabel text="Mac pairing token" />

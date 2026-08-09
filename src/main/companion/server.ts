@@ -176,19 +176,20 @@ function notifyDesktopChatSync(): void {
 }
 
 export function listLanUrls(port: number): string[] {
-  const urls: string[] = [`http://127.0.0.1:${port}`]
-  const host = hostname().trim().replace(/\.local$/i, '').replace(/[^a-zA-Z0-9-]/g, '-')
-  if (host) urls.push(`http://${host}.local:${port}`)
+  const ipv4: string[] = []
   const nets = networkInterfaces()
   for (const entries of Object.values(nets)) {
     if (!entries) continue
     for (const entry of entries) {
       if (entry.internal) continue
       if (String(entry.family) !== 'IPv4') continue
-      urls.push(`http://${entry.address}:${port}`)
+      ipv4.push(`http://${entry.address}:${port}`)
     }
   }
-  return [...new Set(urls)]
+  const host = hostname().trim().replace(/\.local$/i, '').replace(/[^a-zA-Z0-9-]/g, '-')
+  const mdns = host ? [`http://${host}.local:${port}`] : []
+  // IPv4 first so phones paste a reachable LAN address instead of flaky .local.
+  return [...new Set([...ipv4, ...mdns, `http://127.0.0.1:${port}`])]
 }
 
 export function ensureCompanionToken(): string {

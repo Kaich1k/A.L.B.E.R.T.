@@ -115,6 +115,7 @@ export interface AlbertApi {
   probeOllama: () => Promise<{ ok: boolean; mode: 'cloud' | 'local'; detail: string }>
   pullOllamaModel: (model?: string) => Promise<{ ok: boolean; detail: string }>
   probeGroq: () => Promise<{ ok: boolean; mode: 'cloud'; detail: string }>
+  probeGemini: () => Promise<{ ok: boolean; mode: 'cloud'; detail: string }>
   getOperations: () => Promise<OperationsSnapshot>
   createMission: (input: { title: string; outcome?: string; priority?: MissionPriority; deadline?: number; risk?: Mission['risk']; steps?: string[] }) => Promise<Mission>
   updateMission: (id: string, patch: Partial<Mission>) => Promise<Mission | null>

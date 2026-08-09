@@ -14,7 +14,7 @@ const config: ExpoConfig = {
   ios: {
     supportsTablet: true,
     bundleIdentifier: 'com.kaichik.albert',
-    buildNumber: '5',
+    buildNumber: '6',
     infoPlist: {
       NSMicrophoneUsageDescription:
         'A.L.B.E.R.T. uses the microphone for wake phrases, voice commands, and conversations while the app is active.',
@@ -28,7 +28,27 @@ const config: ExpoConfig = {
       NSAppTransportSecurity: {
         NSAllowsLocalNetworking: true,
         NSAllowsArbitraryLoads: false
-      }
+      },
+      // Lets Albert try to open common apps via open_app without canOpenURL false-negatives.
+      LSApplicationQueriesSchemes: [
+        'spotify',
+        'music',
+        'messages',
+        'sms',
+        'tel',
+        'mailto',
+        'maps',
+        'http',
+        'https',
+        'youtube',
+        'instagram',
+        'twitter',
+        'calshow',
+        'mobilenotes',
+        'photos-redirect',
+        'App-Prefs',
+        'prefs'
+      ]
     },
     config: { usesNonExemptEncryption: false }
   },

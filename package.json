@@ -30,7 +30,6 @@
     "@anthropic-ai/sdk": "^0.115.0",
     "@huggingface/transformers": "^4.2.0",
     "better-sqlite3": "^11.9.1",
-    "expo": "^57.0.9",
     "kokoro-js": "^1.2.1",
     "onnxruntime-node": "^1.27.0",
     "openai": "^4.104.0",

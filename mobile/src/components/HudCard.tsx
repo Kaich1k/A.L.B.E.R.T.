@@ -36,8 +36,6 @@ export function HudCard({
         style
       ]}
     >
-      <View pointerEvents="none" style={styles.cornerTop} />
-      <View pointerEvents="none" style={styles.cornerBottom} />
       {eyebrow || title || trailing ? (
         <View style={styles.header}>
           <View style={styles.headingCopy}>
@@ -67,26 +65,6 @@ const styles = StyleSheet.create({
   ok: { borderColor: 'rgba(61,207,122,0.44)', backgroundColor: colors.okSoft },
   warn: { borderColor: 'rgba(240,184,90,0.48)', backgroundColor: colors.warnSoft },
   danger: { borderColor: 'rgba(255,107,99,0.5)', backgroundColor: colors.dangerSoft },
-  cornerTop: {
-    position: 'absolute',
-    width: 18,
-    height: 18,
-    top: -1,
-    left: -1,
-    borderTopWidth: 2,
-    borderLeftWidth: 2,
-    borderColor: colors.accent
-  },
-  cornerBottom: {
-    position: 'absolute',
-    width: 18,
-    height: 18,
-    right: -1,
-    bottom: -1,
-    borderRightWidth: 2,
-    borderBottomWidth: 2,
-    borderColor: colors.accentDeep
-  },
   header: {
     flexDirection: 'row',
     alignItems: 'flex-start',

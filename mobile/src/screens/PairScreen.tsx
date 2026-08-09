@@ -19,6 +19,7 @@ export interface PairScreenProps {
   onPastePairInfo?: () => void | Promise<void>
   onUnpair?: () => void | Promise<void>
   onRequestVoicePermission?: () => void | Promise<void>
+  onPreviewVoice?: () => void | Promise<void>
   onOpenPrivacy?: () => void
 }
 

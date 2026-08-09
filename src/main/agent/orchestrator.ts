@@ -14,6 +14,7 @@ import {
 import { executeTool, getAnthropicToolSchemas } from '../tools/registry'
 import { ollamaChatCompletion, type OllamaChatMessage } from '../ollama/client'
 import { groqChatCompletion } from '../groq/client'
+import { geminiChatCompletion } from '../gemini/client'
 import {
   extractTextToolCalls,
   looksLikeTextToolCall,
@@ -269,7 +270,13 @@ export async function runChatTurn(
       : ''
 
   const localLabel =
-    route.provider === 'groq' ? 'Groq Cloud' : route.provider === 'ollama' ? 'Ollama' : null
+    route.provider === 'groq'
+      ? 'Groq Cloud'
+      : route.provider === 'gemini'
+        ? 'Gemini / Google AI Studio'
+        : route.provider === 'ollama'
+          ? 'Ollama'
+          : null
 
   const routingNote =
     localLabel
@@ -279,6 +286,7 @@ You ARE on ${localLabel} right now — not Haiku, not Opus.
 If chat history has you saying you were on Haiku, that was an older turn. Do NOT claim Haiku/fallback unless THIS system message says fallback.
 If Kai asks which brain you're on, answer ${localLabel} and name ${route.model}.
 ${route.provider === 'groq' ? 'Groq is cloud inference, not an on-device/local-private model.' : ''}
+${route.provider === 'gemini' ? 'Gemini free tier is Google cloud inference; free-tier prompts may be used to improve Google products. Not on-device/private.' : ''}
 Keep it light; for heavy coding, suggest Haiku/Opus.
 ${images.length ? `Kai attached image(s). Vision on ${localLabel} is best-effort — describe what you can; if you cannot see them, say so briefly and suggest Haiku.` : ''}
 === END BRAIN ===`
@@ -325,7 +333,7 @@ ${images.length ? 'Kai attached image(s) in this message — look at them and re
     routingNote +
     personalityTail
 
-  if (route.provider === 'ollama' || route.provider === 'groq') {
+  if (route.provider === 'ollama' || route.provider === 'groq' || route.provider === 'gemini') {
     return runOpenAiLocalTurn(displayContent, system, route.model, win, route.provider)
   }
 
@@ -337,16 +345,21 @@ async function runOpenAiLocalTurn(
   system: string,
   model: string,
   win: BrowserWindow | null,
-  provider: 'ollama' | 'groq'
+  provider: 'ollama' | 'groq' | 'gemini'
 ): Promise<ChatMessage> {
-  const label = provider === 'groq' ? 'Groq' : 'Ollama'
-  const chat = provider === 'groq' ? groqChatCompletion : ollamaChatCompletion
+  const label = provider === 'groq' ? 'Groq' : provider === 'gemini' ? 'Gemini' : 'Ollama'
+  const chat =
+    provider === 'groq'
+      ? groqChatCompletion
+      : provider === 'gemini'
+        ? geminiChatCompletion
+        : ollamaChatCompletion
   // Free cloud models can reject fat histories + long system prompts — keep QUICK tight
-  const history = getRecentMessages(provider === 'groq' ? 8 : 18)
+  const history = getRecentMessages(provider === 'ollama' ? 18 : 8)
   const messages: OllamaChatMessage[] = await ollamaMessagesFromHistory(
     system,
     history,
-    provider === 'groq' ? 8 : 14
+    provider === 'ollama' ? 14 : 8
   )
 
   let loops = 0

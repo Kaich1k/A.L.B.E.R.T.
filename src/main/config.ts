@@ -121,6 +121,12 @@ function migrateSettings(raw: Partial<AlbertSettings>): AlbertSettings {
   if (typeof settings.groqApiKey !== 'string') {
     settings.groqApiKey = ''
   }
+  if (typeof settings.geminiApiKey !== 'string') {
+    settings.geminiApiKey = ''
+  }
+  if (!settings.geminiModel?.trim()) {
+    settings.geminiModel = DEFAULT_SETTINGS.geminiModel
+  }
   if (!settings.localModel) {
     settings.localModel = DEFAULT_SETTINGS.localModel
   }
@@ -136,7 +142,11 @@ function migrateSettings(raw: Partial<AlbertSettings>): AlbertSettings {
       ? groqModelMigrations[settings.groqModel] || settings.groqModel
       : DEFAULT_GROQ_MODEL
   )
-  if (settings.localProvider !== 'ollama' && settings.localProvider !== 'groq') {
+  if (
+    settings.localProvider !== 'ollama' &&
+    settings.localProvider !== 'groq' &&
+    settings.localProvider !== 'gemini'
+  ) {
     settings.localProvider = DEFAULT_SETTINGS.localProvider
   }
   if (
@@ -166,6 +176,9 @@ function migrateSettings(raw: Partial<AlbertSettings>): AlbertSettings {
   }
   if (!settings.groqApiKey && process.env.GROQ_API_KEY) {
     settings.groqApiKey = process.env.GROQ_API_KEY
+  }
+  if (!settings.geminiApiKey && (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY)) {
+    settings.geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || ''
   }
 
   return settings
