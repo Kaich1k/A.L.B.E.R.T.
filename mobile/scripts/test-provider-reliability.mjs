@@ -47,6 +47,7 @@ const config = (overrides = {}) => ({
   ttsVoiceId: '',
   wakeOnLaunch: false,
   reducedMotion: false,
+  personality: { sarcasm: 82, warmth: 82, verbosity: 35 },
   ...overrides
 })
 
@@ -135,6 +136,16 @@ test('Auto crosses providers only when both user keys exist', () => {
       model: 'openai/gpt-oss-20b'
     }),
     ['gemini']
+  )
+  assert.deepEqual(
+    autoRouteOrder({
+      anthropicApiKey: 'sk_user',
+      groqApiKey: 'gsk_user',
+      geminiApiKey: 'AIza_user',
+      model: 'openai/gpt-oss-20b',
+      hasImages: true
+    }),
+    ['anthropic', 'gemini']
   )
 })
 

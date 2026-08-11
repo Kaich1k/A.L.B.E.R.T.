@@ -15,6 +15,15 @@ import { StatusRail } from './src/components/StatusRail'
 import { TabBar } from './src/components/TabBar'
 import { Toast } from './src/components/Toast'
 import { chatWithProvider, modelsFor, ProviderRequestError } from './src/lib/chat'
+import {
+  MAX_CHAT_IMAGES,
+  chatImagePlaceholder,
+  draftImagesToRefs,
+  pickChatImages,
+  promptAttachSource,
+  refsToPayloads
+} from './src/lib/chatImages'
+import { activeSurfaceReply, isActiveSurfaceQuestion } from './src/lib/surfaceIdentity'
 import { newId } from './src/lib/id'
 import { isLoopbackMacUrl, normalizeMacUrl, parsePairInfo } from './src/lib/pairInfo'
 import {
@@ -70,6 +79,7 @@ import {
   EMPTY_SYNC_STATE,
   type ActivityEntry,
   type CaptureItem,
+  type ChatImagePayload,
   type ChatMessage,
   type CompanionConfig,
   type LocalData,
@@ -87,6 +97,7 @@ type ToastState = {
 type ChatTurnOptions = {
   existingUserId?: string
   contextMessages?: ChatMessage[]
+  images?: ChatImagePayload[]
 }
 
 type OperationsLanding = {
@@ -143,6 +154,7 @@ export default function App(): React.JSX.Element {
   const [config, setConfigState] = useState<CompanionConfig>(DEFAULT_CONFIG)
   const [data, setData] = useState<LocalData>(emptyLocalData)
   const [draft, setDraft] = useState('')
+  const [draftImages, setDraftImages] = useState<ChatImagePayload[]>([])
   const [chatBusy, setChatBusy] = useState(false)
   const [syncBusy, setSyncBusy] = useState(false)
   const [operationBusy, setOperationBusy] = useState(false)
@@ -435,8 +447,13 @@ export default function App(): React.JSX.Element {
   const runChatTurn = useCallback(
     async (rawText: string, options: ChatTurnOptions = {}): Promise<string> => {
       const text = rawText.replace(/\s+/g, ' ').trim()
-      if (!text) throw new Error('Enter a message first')
+      const imagePayloads = (options.images || []).slice(0, MAX_CHAT_IMAGES)
+      const imageRefs = draftImagesToRefs(imagePayloads)
+      if (!text && !imageRefs.length) throw new Error('Enter a message or attach a photo first')
       if (chatTaskRef.current) throw new Error('Albert is already processing a transmission')
+
+      const displayContent =
+        text || chatImagePlaceholder(imageRefs.length)
 
       const controller = new AbortController()
       chatAbortRef.current = controller
@@ -451,7 +468,13 @@ export default function App(): React.JSX.Element {
           committed = commitData((current) => ({
             ...current,
             messages: current.messages.map((message) => message.id === userId
-              ? { ...message, content: text, delivery: paired ? 'pending' : 'local', error: undefined }
+              ? {
+                  ...message,
+                  content: displayContent,
+                  images: imageRefs.length ? imageRefs : message.images,
+                  delivery: paired ? 'pending' : 'local',
+                  error: undefined
+                }
               : message),
             sync: recordLocalMutation(current.sync, 'chat', userId!, 'upsert', now)
           }))
@@ -460,10 +483,11 @@ export default function App(): React.JSX.Element {
           const userMessage: ChatMessage = {
             id: userId,
             role: 'user',
-            content: text,
+            content: displayContent,
             createdAt: now,
             origin: 'phone',
-            delivery: paired ? 'pending' : 'local'
+            delivery: paired ? 'pending' : 'local',
+            images: imageRefs.length ? imageRefs : undefined
           }
           committed = commitData((current) => ({
             ...current,
@@ -474,17 +498,33 @@ export default function App(): React.JSX.Element {
 
         const providerMessages = options.contextMessages
           ? options.contextMessages.map((message) => message.id === userId
-              ? { ...message, content: text, delivery: paired ? 'pending' as const : 'local' as const, error: undefined }
+              ? {
+                  ...message,
+                  content: displayContent,
+                  images: imageRefs.length ? imageRefs : message.images,
+                  delivery: paired ? 'pending' as const : 'local' as const,
+                  error: undefined
+                }
               : message)
           : committed.messages
 
         try {
-          const result = await chatWithProvider({
-            config: configRef.current,
-            messages: providerMessages,
-            memories: dataRef.current.memories,
-            signal: controller.signal
-          })
+          const surfaceHit = !imageRefs.length && isActiveSurfaceQuestion(text)
+          const result = surfaceHit
+            ? {
+                reply: activeSurfaceReply('phone'),
+                newMemories: [] as { category: string; content: string }[],
+                provider: 'offline' as const,
+                model: 'surface',
+                latencyMs: 0,
+                fallbackFrom: undefined as undefined
+              }
+            : await chatWithProvider({
+                config: configRef.current,
+                messages: providerMessages,
+                memories: dataRef.current.memories,
+                signal: controller.signal
+              })
           if (controller.signal.aborted) throw new ProviderRequestError({
             message: 'Response cancelled.',
             code: 'cancelled',
@@ -497,7 +537,7 @@ export default function App(): React.JSX.Element {
             role: 'assistant',
             content: result.reply,
             createdAt: completedAt,
-            provider: result.provider,
+            provider: result.provider === 'offline' ? 'offline' : result.provider,
             model: result.model,
             origin: 'phone',
             delivery: paired ? 'pending' : 'local'
@@ -578,19 +618,50 @@ export default function App(): React.JSX.Element {
 
   const sendMessage = useCallback(async () => {
     const text = draft.trim()
-    if (!text || chatBusy) return
+    const images = draftImages.slice(0, MAX_CHAT_IMAGES)
+    if ((!text && !images.length) || chatBusy) return
     setDraft('')
+    setDraftImages([])
     try {
-      await runChatTurn(text)
+      await runChatTurn(text, { images })
     } catch {
-      setDraft((current) => current.trim() ? current : text)
+      setDraft((current) => (current.trim() ? current : text))
+      setDraftImages((current) => (current.length ? current : images))
     }
-  }, [chatBusy, draft, runChatTurn])
+  }, [chatBusy, draft, draftImages, runChatTurn])
+
+  const attachImages = useCallback(() => {
+    if (chatBusy) return
+    promptAttachSource((source) => {
+      void (async () => {
+        try {
+          const picked = await pickChatImages(source)
+          if (!picked.length) return
+          setDraftImages((current) => {
+            const next = [...current, ...picked].slice(0, MAX_CHAT_IMAGES)
+            if (current.length + picked.length > MAX_CHAT_IMAGES) {
+              showToast(`Up to ${MAX_CHAT_IMAGES} images per message.`, 'warn')
+            }
+            return next
+          })
+        } catch (error) {
+          showToast(messageFor(error), 'warn')
+        }
+      })()
+    })
+  }, [chatBusy, showToast])
 
   const retryMessage = useCallback((message: ChatMessage) => {
     const index = dataRef.current.messages.findIndex((candidate) => candidate.id === message.id)
     const context = index >= 0 ? dataRef.current.messages.slice(0, index + 1) : undefined
-    void runChatTurn(message.content, { existingUserId: message.id, contextMessages: context }).catch(() => undefined)
+    const images = refsToPayloads(message.images)
+    const text =
+      message.content === '(image)' || /^\(\d+ images\)$/.test(message.content) ? '' : message.content
+    void runChatTurn(text, {
+      existingUserId: message.id,
+      contextMessages: context,
+      images
+    }).catch(() => undefined)
   }, [runChatTurn])
 
   const regenerateMessage = useCallback((assistant: ChatMessage) => {
@@ -599,9 +670,13 @@ export default function App(): React.JSX.Element {
     const user = [...before].reverse().find((message) => message.role === 'user')
     if (!user) return
     const userIndex = before.findIndex((message) => message.id === user.id)
-    void runChatTurn(user.content, {
+    const images = refsToPayloads(user.images)
+    const text =
+      user.content === '(image)' || /^\(\d+ images\)$/.test(user.content) ? '' : user.content
+    void runChatTurn(text, {
       existingUserId: user.id,
-      contextMessages: before.slice(0, userIndex + 1)
+      contextMessages: before.slice(0, userIndex + 1),
+      images
     }).catch(() => undefined)
   }, [runChatTurn])
 
@@ -1066,6 +1141,7 @@ export default function App(): React.JSX.Element {
               <ChatScreen
                 messages={data.messages}
                 draft={draft}
+                draftImages={draftImages}
                 busy={chatBusy}
                 statusLabel={statusLabel}
                 statusTone={statusTone}
@@ -1082,6 +1158,10 @@ export default function App(): React.JSX.Element {
                 onPurge={purgeChat}
                 onToggleVoice={() => void voice.toggle()}
                 onCancel={cancelChat}
+                onAttach={attachImages}
+                onRemoveDraftImage={(index) => {
+                  setDraftImages((current) => current.filter((_, i) => i !== index))
+                }}
                 onRetryMessage={retryMessage}
                 onCopyMessage={(message) => {
                   void Clipboard.setStringAsync(message.content)

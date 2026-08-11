@@ -98,6 +98,15 @@ export function extractTextToolCalls(content: string): {
   }
 }
 
+function extractThoughtSignature(row: Record<string, unknown>): string | undefined {
+  const extra = row.extra_content
+  if (!extra || typeof extra !== 'object' || Array.isArray(extra)) return undefined
+  const google = (extra as Record<string, unknown>).google
+  if (!google || typeof google !== 'object' || Array.isArray(google)) return undefined
+  const signature = (google as Record<string, unknown>).thought_signature
+  return typeof signature === 'string' && signature.trim() ? signature : undefined
+}
+
 /** Normalize API tool_calls so arguments is always a JSON string. */
 export function normalizeToolCalls(raw: unknown): OllamaToolCall[] {
   if (!Array.isArray(raw)) return []
@@ -114,11 +123,34 @@ export function normalizeToolCalls(raw: unknown): OllamaToolCall[] {
     if (typeof args === 'string') argStr = args
     else if (args && typeof args === 'object') argStr = JSON.stringify(args)
     else argStr = '{}'
-    out.push({
+    const thoughtSignature = extractThoughtSignature(row)
+    const call: OllamaToolCall = {
       id: String(row.id || `call_${uuid().slice(0, 8)}`),
       type: 'function',
       function: { name, arguments: argStr }
-    })
+    }
+    if (thoughtSignature) {
+      call.extra_content = { google: { thought_signature: thoughtSignature } }
+    }
+    out.push(call)
   }
   return out
+}
+
+/** Gemini requires a thought_signature on the first tool call of a step. */
+export function ensureGeminiThoughtSignatures(calls: OllamaToolCall[]): OllamaToolCall[] {
+  if (!calls.length) return calls
+  return calls.map((call, index) => {
+    const existing = call.extra_content?.google?.thought_signature?.trim()
+    if (existing) return call
+    if (index !== 0) return call
+    return {
+      ...call,
+      extra_content: {
+        google: {
+          thought_signature: 'skip_thought_signature_validator'
+        }
+      }
+    }
+  })
 }

@@ -259,6 +259,7 @@ export interface AgentStreamEvent {
     | 'standby'
     | 'chat_cleared'
     | 'chat_synced'
+    | 'settings'
   content?: string
   message?: ChatMessage
   toolName?: string
@@ -269,6 +270,7 @@ export interface AgentStreamEvent {
   model?: string
   tier?: ModelTier
   reason?: string
+  settings?: AlbertSettings
 }
 
 export interface RealtimeSessionConfig {

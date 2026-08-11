@@ -1,3 +1,4 @@
+/** Keep in sync with src/shared/personality.ts */
 /** Personality dials — 0–100. Injected into the system prompt each turn. */
 
 export type PersonalityKey = 'sarcasm' | 'warmth' | 'verbosity'

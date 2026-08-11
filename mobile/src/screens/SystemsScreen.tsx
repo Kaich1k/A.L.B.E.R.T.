@@ -18,8 +18,77 @@ import { HudCard } from '../components/HudCard'
 import { StatusChip } from '../components/StatusChip'
 import { defaultModelFor, isModelForProvider } from '../lib/chat'
 import { isLoopbackMacUrl, isMdnsMacUrl } from '../lib/pairInfo'
+import {
+  DEFAULT_PERSONALITY,
+  PERSONALITY_META,
+  clampScale,
+  normalizePersonality,
+  type PersonalityKey
+} from '../lib/personality'
 import type { CompanionConfig, LlmProvider, MacLinkState, SyncState } from '../types'
 import { colors, fonts, sizes, spacing, typeScale } from '../theme'
+
+const PERSONALITY_KEYS = Object.keys(PERSONALITY_META) as PersonalityKey[]
+
+function PersonalityDial({
+  dialKey,
+  value,
+  onChange
+}: {
+  dialKey: PersonalityKey
+  value: number
+  onChange: (next: number) => void
+}): React.JSX.Element {
+  const meta = PERSONALITY_META[dialKey]
+  const trackWidth = useRef(0)
+
+  const setFromX = (x: number): void => {
+    const width = trackWidth.current
+    if (width <= 0) return
+    onChange(clampScale((x / width) * 100))
+  }
+
+  return (
+    <View style={styles.dialBlock}>
+      <View style={styles.dialHead}>
+        <Text style={styles.dialLabel}>
+          {meta.label.toUpperCase()} ({meta.low.toUpperCase()} → {meta.high.toUpperCase()})
+        </Text>
+        <Text style={styles.dialValue}>{value}</Text>
+      </View>
+      <View
+        style={styles.dialTrack}
+        onLayout={(event) => {
+          trackWidth.current = event.nativeEvent.layout.width
+        }}
+        onStartShouldSetResponder={() => true}
+        onMoveShouldSetResponder={() => true}
+        onResponderGrant={(event) => setFromX(event.nativeEvent.locationX)}
+        onResponderMove={(event) => setFromX(event.nativeEvent.locationX)}
+        accessibilityRole="adjustable"
+        accessibilityLabel={`${meta.label} ${value}`}
+        accessibilityValue={{ min: 0, max: 100, now: value }}
+      >
+        <View style={[styles.dialFill, { width: `${Math.max(2, value)}%` }]} />
+        <View style={[styles.dialThumb, { left: `${Math.max(0, Math.min(100, value))}%` }]} />
+      </View>
+      <View style={styles.dialButtons}>
+        <HudButton
+          label="−10"
+          variant="quiet"
+          onPress={() => onChange(clampScale(value - 10))}
+          style={styles.dialStep}
+        />
+        <HudButton
+          label="+10"
+          variant="quiet"
+          onPress={() => onChange(clampScale(value + 10))}
+          style={styles.dialStep}
+        />
+      </View>
+    </View>
+  )
+}
 
 type TtsVoiceOption = {
   identifier: string
@@ -477,6 +546,35 @@ export function SystemsScreen({
               </View>
             </HudCard>
 
+            <HudCard eyebrow="PERSONALITY DIALS" title="How Albert talks">
+              <Text style={styles.help}>
+                High sarcasm = dry TARS/JARVIS. High warmth = buddy on the line. Low verbosity =
+                one short sentence. These override the phone brain every reply — Save after changes.
+              </Text>
+              {PERSONALITY_KEYS.map((key) => (
+                <PersonalityDial
+                  key={key}
+                  dialKey={key}
+                  value={normalizePersonality(config.personality)[key]}
+                  onChange={(next) =>
+                    onChange({
+                      ...config,
+                      personality: {
+                        ...normalizePersonality(config.personality),
+                        [key]: next
+                      }
+                    })
+                  }
+                />
+              ))}
+              <HudButton
+                label="Reset personality defaults"
+                variant="quiet"
+                onPress={() => onChange({ ...config, personality: { ...DEFAULT_PERSONALITY } })}
+                style={styles.resetPersonality}
+              />
+            </HudCard>
+
             <HudCard eyebrow="VOICE MATRIX" title="Listening & speech">
               <SettingToggle
                 label="Speak replies"
@@ -799,6 +897,31 @@ const styles = StyleSheet.create({
   toggleThumbOn: { alignSelf: 'flex-end', backgroundColor: colors.accentStrong, shadowColor: colors.accent, shadowOpacity: 0.8, shadowRadius: 6 },
   rateRow: { flexDirection: 'row', gap: spacing.xs },
   rateButton: { flex: 1 },
+  dialBlock: { marginTop: spacing.md, gap: spacing.xs },
+  dialHead: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: spacing.md },
+  dialLabel: { flex: 1, color: colors.inkMuted, fontFamily: fonts.mono, fontSize: typeScale.micro, letterSpacing: 0.7 },
+  dialValue: { color: colors.accentStrong, fontFamily: fonts.mono, fontSize: typeScale.body },
+  dialTrack: {
+    height: 28,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    overflow: 'hidden'
+  },
+  dialFill: { position: 'absolute', left: 0, top: 0, bottom: 0, backgroundColor: colors.accentSoft },
+  dialThumb: {
+    position: 'absolute',
+    top: 4,
+    width: 4,
+    height: 18,
+    marginLeft: -2,
+    backgroundColor: colors.accentStrong
+  },
+  dialButtons: { flexDirection: 'row', gap: spacing.xs },
+  dialStep: { flex: 1 },
+  resetPersonality: { marginTop: spacing.md },
   actionStack: { marginTop: spacing.md, gap: spacing.sm },
   diagnostics: { gap: spacing.xs },
   diagnosticRow: { minHeight: 30, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.md, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.lineDim },

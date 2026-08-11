@@ -13,6 +13,7 @@ import {
 } from './groq'
 import {
   ProviderRequestError,
+  messagesHaveImages,
   type FetchLike,
   type ProviderReply,
   type StandaloneProvider
@@ -121,17 +122,26 @@ export function autoRouteOrder(opts: {
   groqApiKey: string
   geminiApiKey?: string
   model: string
+  /** Groq can't see images — prefer Claude/Gemini when photos are attached. */
+  hasImages?: boolean
 }): StandaloneProvider[] {
   const available = FALLBACK_PROVIDER_ORDER.filter((provider) => {
-    if (provider === 'groq') return Boolean(opts.groqApiKey.trim())
+    if (provider === 'groq') {
+      if (opts.hasImages) return false
+      return Boolean(opts.groqApiKey.trim())
+    }
     if (provider === 'gemini') return Boolean(opts.geminiApiKey?.trim())
     return Boolean(opts.anthropicApiKey.trim())
   })
   if (available.length <= 1) return available
 
   const model = opts.model.trim()
-  let preferred: StandaloneProvider = 'groq'
-  if (ANTHROPIC_MODEL_IDS.has(model)) preferred = 'anthropic'
+  let preferred: StandaloneProvider = opts.hasImages ? 'anthropic' : 'groq'
+  if (opts.hasImages) {
+    if (available.includes('anthropic')) preferred = 'anthropic'
+    else if (available.includes('gemini')) preferred = 'gemini'
+    else preferred = available[0]!
+  } else if (ANTHROPIC_MODEL_IDS.has(model)) preferred = 'anthropic'
   else if (isGeminiModel(model)) preferred = 'gemini'
   else preferred = 'groq'
 
@@ -155,15 +165,25 @@ export async function chatWithProvider(opts: {
   const now = opts.now || Date.now
   const startedAt = now()
   const totalTimeoutMs = Math.max(1, opts.timeoutMs ?? DEFAULT_ROUTE_TIMEOUT_MS)
+  const hasImages = messagesHaveImages(messages)
 
   const run = async (provider: StandaloneProvider, timeoutMs: number): Promise<ProviderReply> => {
     const model = modelForProvider(provider, config.model)
     if (provider === 'groq') {
+      if (hasImages) {
+        throw new ProviderRequestError({
+          message: 'Groq cannot see images. Switch to Claude or Gemini in Systems, or use Auto with those keys.',
+          code: 'invalid_request',
+          provider: 'groq',
+          model
+        })
+      }
       return chatWithGroq({
         apiKey: config.groqApiKey,
         model,
         messages,
         memories,
+        personality: config.personality,
         signal: opts.signal,
         timeoutMs,
         fetchImpl: opts.fetchImpl,
@@ -177,6 +197,7 @@ export async function chatWithProvider(opts: {
         model,
         messages,
         memories,
+        personality: config.personality,
         signal: opts.signal,
         timeoutMs,
         fetchImpl: opts.fetchImpl,
@@ -188,6 +209,7 @@ export async function chatWithProvider(opts: {
       model,
       messages,
       memories,
+      personality: config.personality,
       signal: opts.signal,
       timeoutMs,
       fetchImpl: opts.fetchImpl,
@@ -200,10 +222,12 @@ export async function chatWithProvider(opts: {
     return { ...result, latencyMs: Math.max(0, now() - startedAt) }
   }
 
-  const route = autoRouteOrder(config)
+  const route = autoRouteOrder({ ...config, hasImages })
   if (route.length === 0) {
     throw new ProviderRequestError({
-      message: 'Auto needs a Groq, Gemini, or Anthropic API key in Systems.',
+      message: hasImages
+        ? 'Images need a Claude or Gemini API key in Systems (Groq cannot see photos).'
+        : 'Auto needs a Groq, Gemini, or Anthropic API key in Systems.',
       code: 'missing_key',
       provider: 'auto'
     })

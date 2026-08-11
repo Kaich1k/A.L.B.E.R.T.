@@ -12,6 +12,23 @@ export interface MemoryFact {
 
 export type MessageDelivery = 'local' | 'pending' | 'synced' | 'failed'
 
+export type ChatImageMediaType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'
+
+/** Image bytes for the brain (base64, no data: prefix). */
+export interface ChatImagePayload {
+  mediaType: ChatImageMediaType
+  data: string
+}
+
+/** Stored / displayed chat image on the phone. */
+export interface ChatImageRef {
+  id: string
+  mediaType: ChatImageMediaType
+  fileName: string
+  /** data URL for UI + vision providers */
+  dataUrl?: string
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
@@ -22,9 +39,16 @@ export interface ChatMessage {
   origin?: 'phone' | 'mac'
   delivery?: MessageDelivery
   error?: string
+  images?: ChatImageRef[]
 }
 
 export type LlmProvider = 'auto' | 'anthropic' | 'groq' | 'gemini'
+
+export interface PersonalityScales {
+  sarcasm: number
+  warmth: number
+  verbosity: number
+}
 
 export interface CompanionConfig {
   provider: LlmProvider
@@ -46,6 +70,8 @@ export interface CompanionConfig {
   ttsVoiceId: string
   wakeOnLaunch: boolean
   reducedMotion: boolean
+  /** Same dials as Mac Systems — tone and length for phone brain replies. */
+  personality: PersonalityScales
 }
 
 export type TabId = 'home' | 'chat' | 'operations' | 'memory' | 'systems'

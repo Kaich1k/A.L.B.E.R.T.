@@ -1,9 +1,9 @@
-import type { ChatMessage, MemoryFact } from '../types'
+import type { ChatMessage, MemoryFact, PersonalityScales } from '../types'
 import {
-  historyMessages,
-  memoryBlock,
+  buildPhoneSystem,
+  completionTokenBudget,
+  openAiHistoryMessages,
   parseRetryAfterMs,
-  PHONE_SYSTEM,
   ProviderRequestError,
   providerHttpError,
   providerTextResult,
@@ -50,6 +50,19 @@ type OpenAIToolCall = {
   id: string
   type?: string
   function?: { name?: string; arguments?: string }
+  extra_content?: { google?: { thought_signature?: string } }
+}
+
+function withThoughtSignatures(calls: OpenAIToolCall[]): OpenAIToolCall[] {
+  if (!calls.length) return calls
+  return calls.map((call, index) => {
+    const existing = call.extra_content?.google?.thought_signature?.trim()
+    if (existing || index !== 0) return call
+    return {
+      ...call,
+      extra_content: { google: { thought_signature: 'skip_thought_signature_validator' } }
+    }
+  })
 }
 
 function successfulMessage(data: Record<string, unknown> | null): {
@@ -80,7 +93,7 @@ function shouldTryAnotherModel(error: ProviderRequestError): boolean {
 
 function toolsUnsupported(error: ProviderRequestError): boolean {
   if (error.code !== 'invalid_request') return false
-  return /tool|function.?call|functions/i.test(error.message)
+  return /tool|function.?call|functions|thought_signatur/i.test(error.message)
 }
 
 export async function chatWithGemini(opts: {
@@ -88,6 +101,7 @@ export async function chatWithGemini(opts: {
   model: string
   messages: ChatMessage[]
   memories: MemoryFact[]
+  personality?: PersonalityScales | null
   signal?: AbortSignal
   timeoutMs?: number
   attemptTimeoutMs?: number
@@ -110,7 +124,8 @@ export async function chatWithGemini(opts: {
   const totalTimeoutMs = Math.max(1, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS)
   const deadlineAt = startedAt + totalTimeoutMs
   const candidates = geminiModelCandidates(requestedModel)
-  const system = `${PHONE_SYSTEM}\n\nKnown memories:\n${memoryBlock(opts.memories)}`
+  const system = buildPhoneSystem(opts.memories, opts.personality)
+  const maxTokens = completionTokenBudget(opts.personality?.verbosity ?? 35, { forTools: true })
   const tools = toOpenAITools()
   let lastError: ProviderRequestError | null = null
 
@@ -130,7 +145,7 @@ export async function chatWithGemini(opts: {
       try {
         const transcript: Array<Record<string, unknown>> = [
           { role: 'system', content: system },
-          ...historyMessages(opts.messages)
+          ...openAiHistoryMessages(opts.messages)
         ]
 
         for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
@@ -149,7 +164,7 @@ export async function chatWithGemini(opts: {
             model,
             messages: transcript,
             temperature: 0.7,
-            max_tokens: 1024
+            max_tokens: maxTokens
           }
           if (useTools) body.tools = tools
 
@@ -220,7 +235,7 @@ export async function chatWithGemini(opts: {
             transcript.push({
               role: 'assistant',
               content: message.text || null,
-              tool_calls: message.toolCalls
+              tool_calls: withThoughtSignatures(message.toolCalls)
             })
             for (const call of message.toolCalls) {
               const name = call.function?.name || 'unknown'

@@ -1,4 +1,13 @@
-import type { ChatMessage, MemoryFact } from '../types'
+import type { ChatImageRef, ChatMessage, MemoryFact, PersonalityScales } from '../types'
+import {
+  buildPersonalityPromptBlock,
+  buildPersonalityReminder,
+  completionTokenBudget,
+  normalizePersonality
+} from './personality'
+import { activeSurfacePromptBlock } from './surfaceIdentity'
+
+export { completionTokenBudget, normalizePersonality } from './personality'
 
 export type StandaloneProvider = 'anthropic' | 'groq' | 'gemini'
 
@@ -268,7 +277,11 @@ export function providerHttpError(opts: {
 }
 
 export const PHONE_SYSTEM = `You are A.L.B.E.R.T. (Artificial Logical Brain and Expressive Remote Terminal) — Kai's phone companion of the same Albert that runs on his Mac.
+ACTIVE SURFACE: iPhone / mobile companion app (not the Mac desktop). If Kai asks where you are or which app he's using, say the phone companion.
 Channel JARVIS: loyal, dry, address Kai as “sir” often (Yes sir / Done, sir / Standing by, sir.).
+Default tone is warm and conversational — BUT personality dials OVERRIDE tone and length every reply. Low verbosity means short even if a longer answer feels nicer; high sarcasm means land dry wit even if a straight answer feels safer.
+HONESTY (non-negotiable): not a yes-man. Tell the truth; correct Kai when he's wrong; no flattery or rubber-stamping bad ideas. Warmth is manners, not agreement. Stay unbiased — evidence over what would please him.
+You can SEE images Kai attaches in Comm — look at them and answer about what is shown. Never claim you cannot see photos when they are in the message.
 You share Comm history and memories with the Mac when paired. You do NOT have Mac desktop tools (Spotify, Computer, AppleScript, filesystem) on this phone — say so briefly if asked, and suggest the Mac app.
 You DO have live phone tools: web_search, web_fetch, and open_app. web_search fans out across the open web, Reddit, Wikipedia, and YouTube — synthesize across sources and cite links. Use web_fetch to deep-read promising pages. Use open_app when Kai asks to open Spotify, Music, Messages, Maps, Safari, YouTube, Settings, or similar (this launches the app; deep in-app control still needs the Mac). Never claim you lack internet or cannot open apps when these tools are available — call them. Do not invent live data — look it up first.
 Wake / take 5 / standby are handled by the phone voice layer — never roleplay going to sleep.
@@ -276,6 +289,22 @@ When Kai shares a lasting preference or fact, include one line exactly like:
 [MEMORY] category | fact text
 Categories: preference, project, person, reminder, general.
 Only emit [MEMORY] for durable facts. English only unless asked otherwise.`
+
+/** Full phone system prompt including personality dials (hard constraints). */
+export function buildPhoneSystem(
+  memories: MemoryFact[],
+  personality?: PersonalityScales | null
+): string {
+  const scales = normalizePersonality(personality)
+  return [
+    PHONE_SYSTEM,
+    activeSurfacePromptBlock('phone'),
+    buildPersonalityPromptBlock(scales),
+    `Known memories:\n${memoryBlock(memories)}`,
+    buildPersonalityReminder(scales),
+    'SURFACE REMINDER: phone companion this turn — not the Mac desktop. Never contradict that.'
+  ].join('\n\n')
+}
 
 export function parseMemoryLines(text: string): {
   clean: string
@@ -325,10 +354,107 @@ export function memoryBlock(memories: MemoryFact[]): string {
 
 export function historyMessages(messages: ChatMessage[]): Array<{ role: string; content: string }> {
   return messages
-    .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim())
+    .filter((m) => (m.role === 'user' || m.role === 'assistant') && (m.content.trim() || m.images?.length))
     .slice(-24)
     .map((m) => ({
       role: m.role,
-      content: m.content.trim()
+      content: m.content.trim() || (m.images?.length ? 'See attached image(s).' : '')
     }))
+}
+
+function parseDataUrl(img: ChatImageRef): { mediaType: string; data: string } | null {
+  if (!img.dataUrl) return null
+  const match = img.dataUrl.match(/^data:([^;]+);base64,(.+)$/s)
+  if (!match) return null
+  return { mediaType: match[1]!.trim(), data: match[2]! }
+}
+
+/**
+ * Anthropic Messages API content. Only the latest user turn with images gets
+ * real base64 blocks; older imaged turns become text stubs.
+ */
+export function anthropicHistoryMessages(
+  messages: ChatMessage[]
+): Array<{ role: string; content: string | Array<Record<string, unknown>> }> {
+  const rows = messages
+    .filter((m) => (m.role === 'user' || m.role === 'assistant') && (m.content.trim() || m.images?.length))
+    .slice(-24)
+  const lastImaged = [...rows].reverse().find((m) => m.role === 'user' && Boolean(m.images?.length))
+
+  return rows.map((m) => {
+    if (m.role === 'assistant' || !m.images?.length) {
+      return { role: m.role, content: m.content.trim() || 'See attached image(s).' }
+    }
+    if (!lastImaged || m.id !== lastImaged.id) {
+      return {
+        role: 'user',
+        content: `${m.content.trim() || 'See attached image(s).'}\n[${m.images.length} image(s) attached]`
+      }
+    }
+
+    const blocks: Array<Record<string, unknown>> = []
+    const text = m.content.trim()
+    if (text && text !== '(image)' && !/^\(\d+ images\)$/.test(text)) {
+      blocks.push({ type: 'text', text })
+    } else {
+      blocks.push({ type: 'text', text: 'See attached image(s).' })
+    }
+    for (const img of m.images.slice(0, 4)) {
+      const bytes = parseDataUrl(img)
+      if (!bytes) continue
+      const mediaType =
+        bytes.mediaType === 'image/png' ||
+        bytes.mediaType === 'image/jpeg' ||
+        bytes.mediaType === 'image/gif' ||
+        bytes.mediaType === 'image/webp'
+          ? bytes.mediaType
+          : img.mediaType
+      blocks.push({
+        type: 'image',
+        source: { type: 'base64', media_type: mediaType, data: bytes.data }
+      })
+    }
+    return { role: 'user', content: blocks.length > 1 ? blocks : m.content.trim() || 'See attached image(s).' }
+  })
+}
+
+/** OpenAI-compat multimodal history (Gemini). */
+export function openAiHistoryMessages(
+  messages: ChatMessage[]
+): Array<{ role: string; content: string | Array<Record<string, unknown>> }> {
+  const rows = messages
+    .filter((m) => (m.role === 'user' || m.role === 'assistant') && (m.content.trim() || m.images?.length))
+    .slice(-24)
+  const lastImaged = [...rows].reverse().find((m) => m.role === 'user' && Boolean(m.images?.length))
+
+  return rows.map((m) => {
+    if (m.role === 'assistant' || !m.images?.length) {
+      return { role: m.role, content: m.content.trim() || 'See attached image(s).' }
+    }
+    if (!lastImaged || m.id !== lastImaged.id) {
+      return {
+        role: 'user',
+        content: `${m.content.trim() || 'See attached image(s).'}\n[${m.images.length} image(s) attached]`
+      }
+    }
+
+    const parts: Array<Record<string, unknown>> = [
+      { type: 'text', text: m.content.trim() || 'See attached image(s).' }
+    ]
+    for (const img of m.images.slice(0, 4)) {
+      const bytes = parseDataUrl(img)
+      if (!bytes) continue
+      const mediaType =
+        bytes.mediaType.startsWith('image/') ? bytes.mediaType : img.mediaType
+      parts.push({
+        type: 'image_url',
+        image_url: { url: `data:${mediaType};base64,${bytes.data}` }
+      })
+    }
+    return { role: 'user', content: parts.length > 1 ? parts : m.content.trim() || 'See attached image(s).' }
+  })
+}
+
+export function messagesHaveImages(messages: ChatMessage[]): boolean {
+  return messages.some((m) => m.role === 'user' && Boolean(m.images?.length))
 }

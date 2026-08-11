@@ -6,12 +6,17 @@ type ToolCallDelta = {
   id?: string
   type?: string
   function?: { name?: string; arguments?: string }
+  extra_content?: {
+    google?: {
+      thought_signature?: string
+    }
+  }
 }
 
 /**
  * Parse an OpenAI-compatible chat.completions SSE body.
  * Emits content deltas via onToken as they arrive (so TTS can start early).
- * Accumulates tool_call deltas when present.
+ * Accumulates tool_call deltas when present (including Gemini thought signatures).
  */
 export async function streamOpenAiChatCompletions(
   response: Response,
@@ -33,15 +38,20 @@ export async function streamOpenAiChatCompletions(
   const mergeToolDelta = (delta: ToolCallDelta): void => {
     const index = delta.index ?? 0
     const existing = toolMap.get(index)
+    const signature = delta.extra_content?.google?.thought_signature?.trim()
     if (!existing) {
-      toolMap.set(index, {
+      const created: OllamaToolCall = {
         id: delta.id || `call_${index}`,
         type: 'function',
         function: {
           name: delta.function?.name || '',
           arguments: delta.function?.arguments || ''
         }
-      })
+      }
+      if (signature) {
+        created.extra_content = { google: { thought_signature: signature } }
+      }
+      toolMap.set(index, created)
       return
     }
     if (delta.id) existing.id = delta.id
@@ -51,6 +61,9 @@ export async function streamOpenAiChatCompletions(
     if (delta.function?.arguments) {
       existing.function.arguments =
         (existing.function.arguments || '') + delta.function.arguments
+    }
+    if (signature) {
+      existing.extra_content = { google: { thought_signature: signature } }
     }
   }
 

@@ -22,6 +22,15 @@ export type OllamaToolCall = {
   id: string
   type: 'function'
   function: { name: string; arguments: string }
+  /**
+   * Gemini OpenAI-compat: must round-trip thought signatures on tool calls or
+   * the next turn returns 400 "Function call is missing a thought_signature".
+   */
+  extra_content?: {
+    google?: {
+      thought_signature?: string
+    }
+  }
 }
 
 export type OllamaChatResult = {
@@ -129,7 +138,8 @@ async function postOpenAIChat(
   attempt: ChatAttempt,
   model: string,
   onToken?: (delta: string) => void,
-  timeoutMs = attempt.mode === 'local' ? 75_000 : 20_000
+  timeoutMs = attempt.mode === 'local' ? 75_000 : 20_000,
+  maxTokens?: number
 ): Promise<OllamaChatResult> {
   const useTools = attempt.tools
   const tools = useTools ? getOpenAIToolSchemasForOllama() : undefined
@@ -141,7 +151,8 @@ async function postOpenAIChat(
     model,
     messages: serializeOpenAIMessages(attempt.messages),
     // Stream whenever the UI/TTS wants tokens (tools OK — deltas may include tool_calls)
-    stream: wantStream
+    stream: wantStream,
+    max_tokens: Math.max(64, maxTokens ?? 1024)
   }
   if (/^qwen3(?:\.|:|$)/i.test(model)) body.think = false
   if (tools?.length) {
@@ -207,6 +218,7 @@ export async function ollamaChatCompletion(opts: {
   messages: OllamaChatMessage[]
   tools?: boolean
   onToken?: (delta: string) => void
+  maxTokens?: number
 }): Promise<OllamaChatResult> {
   const primary = resolveOllamaEndpoint()
   const turnBudgetMs = primary.mode === 'local' ? 90_000 : 40_000
@@ -283,7 +295,8 @@ export async function ollamaChatCompletion(opts: {
         attempt,
         opts.model,
         opts.onToken,
-        Math.min(attempt.mode === 'local' ? 75_000 : 20_000, remaining)
+        Math.min(attempt.mode === 'local' ? 75_000 : 20_000, remaining),
+        opts.maxTokens
       )
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err))
@@ -315,7 +328,8 @@ export async function ollamaChatCompletion(opts: {
           },
           opts.model,
           opts.onToken,
-          Math.min(75_000, Math.max(1, deadline - Date.now()))
+          Math.min(75_000, Math.max(1, deadline - Date.now())),
+          opts.maxTokens
         )
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err))

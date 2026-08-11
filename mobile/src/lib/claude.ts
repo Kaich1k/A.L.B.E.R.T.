@@ -1,9 +1,9 @@
-import type { ChatMessage, MemoryFact } from '../types'
+import type { ChatMessage, MemoryFact, PersonalityScales } from '../types'
 import {
-  historyMessages,
-  memoryBlock,
+  buildPhoneSystem,
+  completionTokenBudget,
+  anthropicHistoryMessages,
   parseRetryAfterMs,
-  PHONE_SYSTEM,
   ProviderRequestError,
   providerHttpError,
   providerTextResult,
@@ -72,6 +72,7 @@ export async function chatWithClaude(opts: {
   model: string
   messages: ChatMessage[]
   memories: MemoryFact[]
+  personality?: PersonalityScales | null
   signal?: AbortSignal
   timeoutMs?: number
   fetchImpl?: FetchLike
@@ -92,10 +93,9 @@ export async function chatWithClaude(opts: {
   const startedAt = now()
   const deadlineAt = startedAt + Math.max(1, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS)
   const tools = toAnthropicTools()
-  const transcript = historyMessages(opts.messages).map((message) => ({
-    role: message.role,
-    content: message.content
-  })) as Array<Record<string, unknown>>
+  const system = buildPhoneSystem(opts.memories, opts.personality)
+  const maxTokens = completionTokenBudget(opts.personality?.verbosity ?? 35, { forTools: true })
+  const transcript = anthropicHistoryMessages(opts.messages) as Array<Record<string, unknown>>
 
   try {
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
@@ -123,8 +123,8 @@ export async function chatWithClaude(opts: {
             },
             body: JSON.stringify({
               model,
-              max_tokens: 1024,
-              system: `${PHONE_SYSTEM}\n\nKnown memories:\n${memoryBlock(opts.memories)}`,
+              max_tokens: maxTokens,
+              system,
               messages: transcript,
               tools
             }),

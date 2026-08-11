@@ -5,7 +5,7 @@ import { ALBERT_SYSTEM_PROMPT } from './prompt'
 import { selectModelTier } from './router'
 import { createAnthropic } from '../anthropic/client'
 import { persistChatImages, loadChatImageData } from '../chat/images'
-import { getSettings } from '../config'
+import { getSettings, setSettings } from '../config'
 import {
   addMessage,
   getRecentMessages,
@@ -20,9 +20,23 @@ import {
   looksLikeTextToolCall,
   normalizeToolCalls
 } from './textToolCalls'
-import { buildPersonalityPromptBlock, normalizePersonality } from '../../shared/personality'
+import {
+  applyPersonalityAdjust,
+  buildPersonalityPromptBlock,
+  buildPersonalityReminder,
+  completionTokenBudget,
+  normalizePersonality,
+  parsePersonalityVoiceCommand,
+  personalityAdjustReply
+} from '../../shared/personality'
 import { isEndVoiceCommand } from '../../shared/voiceCommands'
-import { activeBrainReply, isActiveBrainQuestion } from '../../shared/brainIdentity'
+import {
+  activeBrainReply,
+  activeSurfacePromptBlock,
+  activeSurfaceReply,
+  isActiveBrainQuestion,
+  isActiveSurfaceQuestion
+} from '../../shared/brainIdentity'
 import type {
   AgentStreamEvent,
   ChatImageRef,
@@ -241,6 +255,25 @@ export async function runChatTurn(
     return assistantMessage
   }
 
+  // Personality dials — apply in the app layer so the model can't fake a change
+  if (text && !images.length) {
+    const personalityAdj = parsePersonalityVoiceCommand(text)
+    if (personalityAdj) {
+      const nextPersonality = applyPersonalityAdjust(
+        getSettings().personality,
+        personalityAdj
+      )
+      const nextSettings = setSettings({ personality: nextPersonality })
+      const content = personalityAdjustReply(personalityAdj, nextPersonality)
+      const assistantMessage = addMessage({ role: 'assistant', content })
+      emit(win, { type: 'settings', settings: nextSettings })
+      emit(win, { type: 'token', content })
+      emit(win, { type: 'message', message: assistantMessage })
+      emit(win, { type: 'done' })
+      return assistantMessage
+    }
+  }
+
   const route = selectModelTier(text || 'look at this image', { hasImages: images.length > 0 })
   emit(win, {
     type: 'route',
@@ -254,6 +287,15 @@ export async function runChatTurn(
   // spoken answer and Route readout can never contradict each other.
   if (text && !images.length && isActiveBrainQuestion(text)) {
     const content = activeBrainReply(route)
+    const assistantMessage = addMessage({ role: 'assistant', content })
+    emit(win, { type: 'token', content })
+    emit(win, { type: 'message', message: assistantMessage })
+    emit(win, { type: 'done' })
+    return assistantMessage
+  }
+
+  if (text && !images.length && isActiveSurfaceQuestion(text)) {
+    const content = activeSurfaceReply('mac')
     const assistantMessage = addMessage({ role: 'assistant', content })
     emit(win, { type: 'token', content })
     emit(win, { type: 'message', message: assistantMessage })
@@ -315,14 +357,15 @@ ${images.length ? 'Kai attached image(s) in this message — look at them and re
   const personality = normalizePersonality(settings.personality)
   const personalityBlock = buildPersonalityPromptBlock(personality)
   // Repeat dials at the end — models weight late system instructions more
-  const personalityTail = `\n\nREMINDER before you answer:
-- sarcasm=${personality.sarcasm}, warmth=${personality.warmth}, verbosity=${personality.verbosity}. Warm crewmate + dry TARS/JARVIS — no cringe similes.
-- SIR: address Kai as “sir” a lot — “Yes sir,” “On it, sir,” “Task finished, sir,” “No offense taken, sir.” Most replies should include it.
+  const personalityTail =
+    buildPersonalityReminder(personality) +
+    `\n- SURFACE: Mac desktop app this turn — not the phone companion. Never contradict that.
 - BRAIN: ${localLabel || 'Anthropic'} / ${route.model} this turn. Never contradict that.
-- TRUTH: never claim Spotify/tools succeeded unless the tool result confirms it. No illusions.
 - ACT: never ask permission for screenshots/clicks when confirms are OFF. Never paste [OK]/[FAIL]/file paths as your reply.
 - EXPERIMENT: keep trying with Kai; don't pawn the task off on him as plan A.
 - VOICE: you can speak — just reply; TTS handles it. Never say you're text-only.`
+
+  const surfaceBlock = `\n\n${activeSurfacePromptBlock('mac')}`
 
   const system =
     ALBERT_SYSTEM_PROMPT +
@@ -330,14 +373,35 @@ ${images.length ? 'Kai attached image(s) in this message — look at them and re
     memoryBlock +
     projectBlock +
     modeBlock +
+    surfaceBlock +
     routingNote +
     personalityTail
 
+  // Soft prompts get ignored by QUICK models — max_tokens must track the dial.
+  const replyBudget = completionTokenBudget(personality.verbosity)
+  const toolBudget = completionTokenBudget(personality.verbosity, { forTools: true })
+
   if (route.provider === 'ollama' || route.provider === 'groq' || route.provider === 'gemini') {
-    return runOpenAiLocalTurn(displayContent, system, route.model, win, route.provider)
+    return runOpenAiLocalTurn(
+      displayContent,
+      system,
+      route.model,
+      win,
+      route.provider,
+      replyBudget,
+      toolBudget
+    )
   }
 
-  return runAnthropicTurn(displayContent, system, route.model, route.tier, win)
+  return runAnthropicTurn(
+    displayContent,
+    system,
+    route.model,
+    route.tier,
+    win,
+    replyBudget,
+    toolBudget
+  )
 }
 
 async function runOpenAiLocalTurn(
@@ -345,7 +409,9 @@ async function runOpenAiLocalTurn(
   system: string,
   model: string,
   win: BrowserWindow | null,
-  provider: 'ollama' | 'groq' | 'gemini'
+  provider: 'ollama' | 'groq' | 'gemini',
+  replyTokens = 320,
+  toolTokens = 768
 ): Promise<ChatMessage> {
   const label = provider === 'groq' ? 'Groq' : provider === 'gemini' ? 'Gemini' : 'Ollama'
   const chat =
@@ -370,12 +436,19 @@ async function runOpenAiLocalTurn(
   // Local tier: allow light tools; escalate to Haiku if tool-heavy / needs vision click
   while (loops < 8) {
     loops += 1
+    // Loop 1 may emit tools OR the final reply — keep tool headroom but still
+    // scale with verbosity so ultra-terse dials aren't stuck at 768.
+    const maxTokens =
+      loops === 1
+        ? Math.min(toolTokens, Math.max(replyTokens * 2, replyTokens + 120))
+        : replyTokens
     let result
     try {
       result = await chat({
         model: activeModel,
         messages,
         tools: true,
+        maxTokens,
         onToken: (delta) => emit(win, { type: 'token', content: delta })
       })
     } catch (err) {
@@ -397,7 +470,9 @@ Do not keep claiming fallback on later turns unless this note appears again.
 === END BRAIN ===`,
         getSettings().fastModel || 'claude-haiku-4-5',
         'fast',
-        win
+        win,
+        replyTokens,
+        toolTokens
       )
     }
 
@@ -542,7 +617,9 @@ async function runAnthropicTurn(
   system: string,
   startModel: string,
   startTier: 'fast' | 'power' | 'local',
-  win: BrowserWindow | null
+  win: BrowserWindow | null,
+  replyBudget = 320,
+  toolBudget = 768
 ): Promise<ChatMessage> {
   const history = getRecentMessages(60)
   const messages: MessageParam[] = []
@@ -559,13 +636,18 @@ async function runAnthropicTurn(
   let loops = 0
   let model = startModel
   const tier = startTier === 'local' ? 'fast' : startTier
+  const ceiling = model.includes('haiku') ? 4096 : 8192
+  // Respect verbosity: do NOT floor every turn to 768 (that erased terse dials).
+  const toolTokens = Math.min(Math.max(toolBudget, 256), ceiling)
+  const textTokens = Math.min(Math.max(replyBudget, 64), ceiling)
 
   while (loops < 16) {
     loops += 1
+    const maxTokens = loops === 1 ? toolTokens : textTokens
 
     const stream = anthropic.messages.stream({
       model,
-      max_tokens: model.includes('haiku') ? 4096 : 8192,
+      max_tokens: maxTokens,
       system,
       messages,
       tools
@@ -673,7 +755,7 @@ async function runAnthropicTurn(
   if (!finalText) {
     const completion = await anthropic.messages.create({
       model,
-      max_tokens: 4096,
+      max_tokens: textTokens,
       system,
       messages
     })

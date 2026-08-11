@@ -1,9 +1,9 @@
-import type { ChatMessage, MemoryFact } from '../types'
+import type { ChatMessage, MemoryFact, PersonalityScales } from '../types'
 import {
+  buildPhoneSystem,
+  completionTokenBudget,
   historyMessages,
-  memoryBlock,
   parseRetryAfterMs,
-  PHONE_SYSTEM,
   ProviderRequestError,
   providerHttpError,
   providerTextResult,
@@ -101,6 +101,7 @@ export async function chatWithGroq(opts: {
   model: string
   messages: ChatMessage[]
   memories: MemoryFact[]
+  personality?: PersonalityScales | null
   signal?: AbortSignal
   timeoutMs?: number
   attemptTimeoutMs?: number
@@ -124,7 +125,8 @@ export async function chatWithGroq(opts: {
   const totalTimeoutMs = Math.max(1, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS)
   const deadlineAt = startedAt + totalTimeoutMs
   const candidates = groqModelCandidates(requestedModel, opts.candidateNowMs ?? Date.now())
-  const system = `${PHONE_SYSTEM}\n\nKnown memories:\n${memoryBlock(opts.memories)}`
+  const system = buildPhoneSystem(opts.memories, opts.personality)
+  const maxTokens = completionTokenBudget(opts.personality?.verbosity ?? 35, { forTools: true })
   const tools = toOpenAITools()
   let lastError: ProviderRequestError | null = null
 
@@ -163,7 +165,7 @@ export async function chatWithGroq(opts: {
             model,
             messages: transcript,
             temperature: 0.7,
-            max_tokens: 1024
+            max_tokens: maxTokens
           }
           if (useTools) body.tools = tools
 

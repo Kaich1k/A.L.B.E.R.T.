@@ -75,17 +75,19 @@ export function HudButton({
           {glyph}
         </Text>
       ) : null}
-      <Text
-        style={[
-          styles.label,
-          resolvedVariant === 'primary' && styles.labelPrimary,
-          resolvedVariant === 'quiet' && styles.labelQuiet,
-          resolvedVariant === 'danger' && styles.labelDanger
-        ]}
-        numberOfLines={2}
-      >
-        {label}
-      </Text>
+      {label.trim() ? (
+        <Text
+          style={[
+            styles.label,
+            resolvedVariant === 'primary' && styles.labelPrimary,
+            resolvedVariant === 'quiet' && styles.labelQuiet,
+            resolvedVariant === 'danger' && styles.labelDanger
+          ]}
+          numberOfLines={2}
+        >
+          {label}
+        </Text>
+      ) : null}
     </Pressable>
   )
 }

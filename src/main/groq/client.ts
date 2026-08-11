@@ -80,6 +80,7 @@ async function postChat(opts: {
   tools: boolean
   onToken?: (delta: string) => void
   timeoutMs: number
+  maxTokens?: number
 }): Promise<OllamaChatResult> {
   const key = requireGroqKey()
   const useTools = opts.tools
@@ -91,7 +92,8 @@ async function postChat(opts: {
     messages: serializeMessages(opts.messages),
     // Real SSE streaming — fake “onToken(full text)” at the end made voice wait ~10s
     stream: wantStream,
-    temperature: 0.7
+    temperature: 0.7,
+    max_tokens: Math.max(64, opts.maxTokens ?? 1024)
   }
   if (tools?.length) {
     body.tools = tools
@@ -156,6 +158,7 @@ export async function groqChatCompletion(opts: {
   messages: OllamaChatMessage[]
   tools?: boolean
   onToken?: (delta: string) => void
+  maxTokens?: number
 }): Promise<OllamaChatResult> {
   // QUICK must fail over instead of appearing frozen. Groq normally responds
   // in milliseconds; 35 seconds is an end-to-end budget across all models and
@@ -189,7 +192,8 @@ export async function groqChatCompletion(opts: {
           messages: attempt.messages,
           tools: attempt.tools,
           onToken: opts.onToken,
-          timeoutMs: Math.min(15_000, remaining)
+          timeoutMs: Math.min(15_000, remaining),
+          maxTokens: opts.maxTokens
         })
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err))

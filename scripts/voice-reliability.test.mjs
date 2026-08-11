@@ -85,6 +85,22 @@ test('formats brain identity from the resolved route, never chat history', () =>
   )
 })
 
+test('detects active surface questions without hijacking unrelated ask', () => {
+  assert.equal(brainIdentity.isActiveSurfaceQuestion('Are you on the phone?'), true)
+  assert.equal(brainIdentity.isActiveSurfaceQuestion('Which app are you on?'), true)
+  assert.equal(brainIdentity.isActiveSurfaceQuestion('Where are you answering from?'), true)
+  assert.equal(brainIdentity.isActiveSurfaceQuestion('Are we talking on the Mac?'), true)
+  assert.equal(brainIdentity.isActiveSurfaceQuestion('Open Spotify on my phone'), false)
+  assert.equal(
+    brainIdentity.activeSurfaceReply('phone'),
+    "You're on the phone app with me right now, sir — not the Mac desktop."
+  )
+  assert.equal(
+    brainIdentity.activeSurfaceReply('mac'),
+    "You're on the Mac desktop app with me right now, sir — not the phone companion."
+  )
+})
+
 test('retires temporary Groq models deterministically at the published cutoff', () => {
   const before = Date.parse('2026-08-15T23:59:59Z')
   const after = Date.parse('2026-08-16T00:00:00Z')

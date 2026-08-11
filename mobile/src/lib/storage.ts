@@ -10,7 +10,9 @@ import type {
   SyncState,
 } from '../types'
 import { EMPTY_OPERATIONS, EMPTY_SYNC_STATE } from '../types'
+import { compactChatImagesForStorage } from './chatImages'
 import { newId } from './id'
+import { DEFAULT_PERSONALITY, normalizePersonality } from './personality'
 import { mergeTombstones, recordLocalMutation, retainLocalTombstones } from './syncLogic'
 
 export { mergeTombstones, recordLocalMutation } from './syncLogic'
@@ -60,7 +62,8 @@ export const DEFAULT_CONFIG: CompanionConfig = {
   voiceRate: 1.03,
   ttsVoiceId: '',
   wakeOnLaunch: false,
-  reducedMotion: false
+  reducedMotion: false,
+  personality: { ...DEFAULT_PERSONALITY }
 }
 
 async function readJson<T>(key: string, fallback: T): Promise<T> {
@@ -136,7 +139,8 @@ function normalizeConfig(value: Partial<CompanionConfig>): CompanionConfig {
     wakeOnLaunch: value.wakeOnLaunch === true,
     reducedMotion: value.reducedMotion === true,
     voiceRate,
-    ttsVoiceId: typeof value.ttsVoiceId === 'string' ? value.ttsVoiceId.trim() : DEFAULT_CONFIG.ttsVoiceId
+    ttsVoiceId: typeof value.ttsVoiceId === 'string' ? value.ttsVoiceId.trim() : DEFAULT_CONFIG.ttsVoiceId,
+    personality: normalizePersonality(value.personality)
   }
 }
 
@@ -208,7 +212,10 @@ export async function loadChat(): Promise<ChatMessage[]> {
 }
 
 export async function saveChat(messages: ChatMessage[]): Promise<void> {
-  await AsyncStorage.setItem(KEYS.chat, JSON.stringify(messages.slice(-300)))
+  await AsyncStorage.setItem(
+    KEYS.chat,
+    JSON.stringify(compactChatImagesForStorage(messages.slice(-300)))
+  )
 }
 
 export async function loadOperations(): Promise<OperationsSnapshot> {
@@ -283,7 +290,7 @@ export async function saveLocalData(data: LocalData): Promise<void> {
     data.sync.outbox
   )
   await AsyncStorage.multiSet([
-    [KEYS.chat, JSON.stringify(data.messages.slice(-300))],
+    [KEYS.chat, JSON.stringify(compactChatImagesForStorage(data.messages.slice(-300)))],
     [KEYS.memories, JSON.stringify(data.memories.slice(0, 5_000))],
     [KEYS.operations, JSON.stringify(data.operations)],
     [KEYS.activity, JSON.stringify(data.activity.slice(0, 100))],

@@ -2,8 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Alert,
   FlatList,
+  Image,
   Keyboard,
   Platform,
+  Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -15,12 +18,13 @@ import { APP_NAME } from '../brand'
 import { HudButton } from '../components/HudButton'
 import { HudCard } from '../components/HudCard'
 import { StatusChip } from '../components/StatusChip'
-import type { ChatMessage, MacLinkState, VoicePhase } from '../types'
+import type { ChatImagePayload, ChatMessage, MacLinkState, VoicePhase } from '../types'
 import { colors, fonts, sizes, spacing, typeScale } from '../theme'
 
 export interface ChatScreenProps {
   messages: ChatMessage[]
   draft: string
+  draftImages?: ChatImagePayload[]
   busy: boolean
   statusLabel: string
   statusTone: 'ok' | 'bad' | 'neutral'
@@ -41,6 +45,7 @@ export interface ChatScreenProps {
   onToggleVoice: () => void
   onCancel?: () => void
   onAttach?: () => void
+  onRemoveDraftImage?: (index: number) => void
   onRetryMessage?: (message: ChatMessage) => void
   onCopyMessage?: (message: ChatMessage) => void
   onRegenerate?: (message: ChatMessage) => void
@@ -63,6 +68,7 @@ function formatTime(value: number): string {
 export function ChatScreen({
   messages,
   draft,
+  draftImages = [],
   busy,
   statusLabel,
   statusTone,
@@ -82,6 +88,7 @@ export function ChatScreen({
   onToggleVoice,
   onCancel,
   onAttach,
+  onRemoveDraftImage,
   onRetryMessage,
   onCopyMessage,
   onRegenerate,
@@ -173,7 +180,6 @@ export function ChatScreen({
             <HudButton
               label="Clear"
               variant="quiet"
-              glyph="×"
               onPress={confirmPurge}
               disabled={busy}
               accessibilityLabel="Clear communication history"
@@ -261,7 +267,7 @@ export function ChatScreen({
               <Text allowFontScaling={false} style={styles.emptyGlyph}>◇</Text>
               <Text style={styles.emptyTitle}>CHANNEL STANDING BY</Text>
               <Text style={styles.emptyText}>
-                Send a message, engage voice, or say “Albert, wake up”. Paired messages reconcile with the Mac when the secure uplink is available.
+                Send a message, attach a photo, engage voice, or say “Albert, wake up”. Paired messages reconcile with the Mac when the secure uplink is available.
               </Text>
             </View>
           }
@@ -276,43 +282,74 @@ export function ChatScreen({
           )}
         />
 
-        <View style={styles.composer}>
-          {onAttach ? (
-            <HudButton
-              label="Attach"
-              glyph="＋"
-              variant="quiet"
-              accessibilityLabel="Attach image or file"
-              onPress={onAttach}
-              disabled={busy}
-              style={styles.attachButton}
-            />
+        <View style={styles.composerBlock}>
+          {draftImages.length > 0 ? (
+            <ScrollView
+              horizontal
+              style={styles.draftStrip}
+              contentContainerStyle={styles.draftStripInner}
+              showsHorizontalScrollIndicator={false}
+            >
+              {draftImages.map((img, index) => (
+                <View key={`${img.mediaType}_${index}`} style={styles.draftThumbWrap}>
+                  <Image
+                    source={{ uri: `data:${img.mediaType};base64,${img.data}` }}
+                    style={styles.draftThumb}
+                    accessibilityLabel={`Attached image ${index + 1}`}
+                  />
+                  {onRemoveDraftImage ? (
+                    <Pressable
+                      onPress={() => onRemoveDraftImage(index)}
+                      style={styles.draftRemove}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Remove image ${index + 1}`}
+                      hitSlop={8}
+                    >
+                      <Text style={styles.draftRemoveText}>×</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ))}
+            </ScrollView>
           ) : null}
-          <TextInput
-            style={styles.input}
-            value={draft}
-            onChangeText={onChangeDraft}
-            placeholder={`Message ${APP_NAME}…`}
-            placeholderTextColor={colors.inkFaint}
-            multiline
-            editable={!busy}
-            accessibilityLabel={`Message ${APP_NAME}`}
-            accessibilityHint="Enter a message for Albert"
-            maxLength={12_000}
-          />
-          {busy && onCancel ? (
-            <HudButton label="Stop" glyph="■" variant="danger" onPress={onCancel} style={styles.sendButton} />
-          ) : (
-            <HudButton
-              label={busy ? 'Sending' : 'Send'}
-              glyph="›"
-              primary
-              loading={busy}
-              disabled={busy || !draft.trim()}
-              onPress={onSend}
-              style={styles.sendButton}
+          <View style={styles.composer}>
+            {onAttach ? (
+              <HudButton
+                label=""
+                glyph="＋"
+                variant="quiet"
+                accessibilityLabel="Attach image"
+                onPress={onAttach}
+                disabled={busy || draftImages.length >= 4}
+                style={styles.attachButton}
+              />
+            ) : null}
+            <TextInput
+              style={styles.input}
+              value={draft}
+              onChangeText={onChangeDraft}
+              placeholder={`Message ${APP_NAME}…`}
+              placeholderTextColor={colors.inkFaint}
+              multiline
+              editable={!busy}
+              accessibilityLabel={`Message ${APP_NAME}`}
+              accessibilityHint="Enter a message for Albert, or attach a photo"
+              maxLength={12_000}
             />
-          )}
+            {busy && onCancel ? (
+              <HudButton label="Stop" glyph="■" variant="danger" onPress={onCancel} style={styles.sendButton} />
+            ) : (
+              <HudButton
+                label={busy ? 'Sending' : 'Send'}
+                glyph="›"
+                primary
+                loading={busy}
+                disabled={busy || (!draft.trim() && draftImages.length === 0)}
+                onPress={onSend}
+                style={styles.sendButton}
+              />
+            )}
+          </View>
         </View>
       </View>
     </View>
@@ -335,13 +372,17 @@ function MessageBubble({
   const user = message.role === 'user'
   const delivery = deliveryLabel(message)
   const route = [message.provider?.toUpperCase(), message.model].filter(Boolean).join(' · ')
+  const images = message.images?.filter((img) => Boolean(img.dataUrl)) || []
+  const showPlaceholderContent =
+    Boolean(message.content) &&
+    !(images.length > 0 && (message.content === '(image)' || /^\(\d+ images\)$/.test(message.content)))
   return (
     <View
       style={[styles.bubble, user ? styles.bubbleUser : styles.bubbleAssistant, message.delivery === 'failed' && styles.bubbleFailed]}
     >
       <View
         accessible
-        accessibilityLabel={`${user ? 'You' : 'Albert'}, ${formatTime(message.createdAt)}. ${message.content}${delivery ? `. ${delivery}` : ''}`}
+        accessibilityLabel={`${user ? 'You' : 'Albert'}, ${formatTime(message.createdAt)}. ${message.content}${images.length ? `, ${images.length} image${images.length === 1 ? '' : 's'}` : ''}${delivery ? `. ${delivery}` : ''}`}
       >
         <View style={styles.bubbleHeader}>
           <Text style={styles.role}>{user ? 'YOU' : APP_NAME}</Text>
@@ -349,7 +390,23 @@ function MessageBubble({
             {formatTime(message.createdAt)}{delivery ? ` · ${delivery}` : ''}
           </Text>
         </View>
-        <Text style={styles.bubbleText}>{message.content || (streaming ? 'Establishing response…' : '')}</Text>
+        {images.length > 0 ? (
+          <View style={styles.messageImages}>
+            {images.map((img) => (
+              <Image
+                key={img.id}
+                source={{ uri: img.dataUrl }}
+                style={styles.messageImage}
+                accessibilityLabel="Attached photo"
+              />
+            ))}
+          </View>
+        ) : message.images?.length ? (
+          <Text style={styles.imageStub}>📷 {message.images.length === 1 ? 'Photo attached' : `${message.images.length} photos attached`}</Text>
+        ) : null}
+        {showPlaceholderContent || streaming ? (
+          <Text style={styles.bubbleText}>{message.content || (streaming ? 'Establishing response…' : '')}</Text>
+        ) : null}
         {route ? <Text style={styles.route}>{route}</Text> : null}
         {message.error ? <Text style={styles.messageError}>{message.error}</Text> : null}
       </View>
@@ -414,7 +471,17 @@ const styles = StyleSheet.create({
   route: { marginTop: spacing.sm, color: colors.inkFaint, fontFamily: fonts.mono, fontSize: 10, letterSpacing: 0.35 },
   messageError: { marginTop: spacing.sm, color: colors.danger, fontFamily: fonts.body, fontSize: 14, lineHeight: 18 },
   messageActions: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: spacing.xs },
-  composer: { flexShrink: 0, flexDirection: 'row', gap: spacing.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderTopWidth: 1, borderTopColor: colors.line, alignItems: 'flex-end', backgroundColor: 'rgba(0,5,9,0.96)' },
+  messageImages: { marginTop: spacing.sm, gap: spacing.xs },
+  messageImage: { width: '100%', maxWidth: 280, height: 180, borderRadius: 3, backgroundColor: 'rgba(0,0,0,0.45)' },
+  imageStub: { marginTop: spacing.xs, color: colors.inkMuted, fontFamily: fonts.mono, fontSize: typeScale.micro },
+  composerBlock: { flexShrink: 0, borderTopWidth: 1, borderTopColor: colors.line, backgroundColor: 'rgba(0,5,9,0.96)' },
+  draftStrip: { maxHeight: 88, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
+  draftStripInner: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, gap: spacing.sm, alignItems: 'center' },
+  draftThumbWrap: { position: 'relative' },
+  draftThumb: { width: 64, height: 64, borderRadius: 3, borderWidth: 1, borderColor: colors.line, backgroundColor: 'rgba(0,0,0,0.5)' },
+  draftRemove: { position: 'absolute', top: -6, right: -6, width: 22, height: 22, borderRadius: 11, backgroundColor: colors.danger, alignItems: 'center', justifyContent: 'center' },
+  draftRemoveText: { color: colors.ink, fontFamily: fonts.mono, fontSize: 14, lineHeight: 16 },
+  composer: { flexDirection: 'row', gap: spacing.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, alignItems: 'flex-end' },
   input: { flex: 1, minHeight: 48, maxHeight: 132, borderWidth: 1, borderColor: colors.line, borderRadius: 4, backgroundColor: 'rgba(0,0,0,0.55)', color: colors.ink, paddingHorizontal: spacing.md, paddingVertical: 11, fontFamily: fonts.body, fontSize: typeScale.body },
   attachButton: { width: sizes.minTarget, paddingHorizontal: 0 },
   sendButton: { minWidth: 84 }

@@ -1,7 +1,11 @@
 import { getSettings } from '../config'
 import { streamOpenAiChatCompletions } from '../llm/openaiStream'
 import { getOpenAIToolSchemasForOllama } from '../tools/registry'
-import { looksLikeTextToolCall, normalizeToolCalls } from '../agent/textToolCalls'
+import {
+  ensureGeminiThoughtSignatures,
+  looksLikeTextToolCall,
+  normalizeToolCalls
+} from '../agent/textToolCalls'
 import type {
   OllamaChatMessage,
   OllamaChatResult,
@@ -44,8 +48,26 @@ function serializeMessages(messages: OllamaChatMessage[]): Array<Record<string, 
       content: m.content
     }
     if (m.tool_call_id) row.tool_call_id = m.tool_call_id
-    if (m.tool_calls?.length) row.tool_calls = m.tool_calls
+    if (m.tool_calls?.length) {
+      // Gemini 2.5/3 rejects follow-up tool turns without thought_signature.
+      row.tool_calls = ensureGeminiThoughtSignatures(m.tool_calls)
+    }
     return row
+  })
+}
+
+function withGeminiThoughtBypass(messages: OllamaChatMessage[]): OllamaChatMessage[] {
+  return messages.map((m) => {
+    if (!m.tool_calls?.length) return m
+    return {
+      ...m,
+      tool_calls: ensureGeminiThoughtSignatures(
+        m.tool_calls.map((call) => ({
+          ...call,
+          extra_content: undefined
+        }))
+      )
+    }
   })
 }
 
@@ -74,17 +96,20 @@ async function postChat(opts: {
   tools: boolean
   onToken?: (delta: string) => void
   timeoutMs: number
+  maxTokens?: number
 }): Promise<OllamaChatResult> {
   const key = requireGeminiKey()
   const useTools = opts.tools
   const tools = useTools ? getOpenAIToolSchemasForOllama() : undefined
-  const wantStream = Boolean(opts.onToken)
+  // Tool rounds: prefer non-stream so thought_signature lands intact on tool_calls.
+  const wantStream = Boolean(opts.onToken) && !useTools
 
   const body: Record<string, unknown> = {
     model: opts.model,
     messages: serializeMessages(opts.messages),
     stream: wantStream,
-    temperature: 0.7
+    temperature: 0.7,
+    max_tokens: Math.max(64, opts.maxTokens ?? 1024)
   }
   if (tools?.length) {
     body.tools = tools
@@ -143,6 +168,7 @@ export async function geminiChatCompletion(opts: {
   messages: OllamaChatMessage[]
   tools?: boolean
   onToken?: (delta: string) => void
+  maxTokens?: number
 }): Promise<OllamaChatResult> {
   const deadline = Date.now() + 40_000
   const wantTools = opts.tools !== false
@@ -173,7 +199,8 @@ export async function geminiChatCompletion(opts: {
           messages: attempt.messages,
           tools: attempt.tools,
           onToken: opts.onToken,
-          timeoutMs: Math.min(18_000, remaining)
+          timeoutMs: Math.min(18_000, remaining),
+          maxTokens: opts.maxTokens
         })
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err))
@@ -181,9 +208,24 @@ export async function geminiChatCompletion(opts: {
         if (/\b401\b|invalid.*api.?key|authentication|API[_ ]?key/i.test(msg)) throw lastError
         if (/abort|timed?\s*out|timeout/i.test(msg)) break
         if (/\b(403|404|429)\b|quota|rate.?limit|not found|not supported/i.test(msg)) break
+        // Missing thought_signature: rewrite history with Google's bypass token and retry once.
+        if (/thought_signatur/i.test(msg) && attempt.messages.some((m) => m.tool_calls?.length)) {
+          try {
+            return await postChat({
+              model,
+              messages: withGeminiThoughtBypass(attempt.messages),
+              tools: attempt.tools,
+              onToken: opts.onToken,
+              timeoutMs: Math.min(18_000, Math.max(1, deadline - Date.now())),
+              maxTokens: opts.maxTokens
+            })
+          } catch (retryErr) {
+            lastError = retryErr instanceof Error ? retryErr : new Error(String(retryErr))
+          }
+        }
         const canSoften =
           attempt.label !== 'text-only' &&
-          (/\b(400|413|422|500|502|503|529)\b|tool|schema|function/i.test(msg))
+          (/\b(400|413|422|500|502|503|529)\b|tool|schema|function|thought_signatur/i.test(msg))
         if (canSoften) continue
         throw lastError
       }

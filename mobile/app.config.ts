@@ -22,9 +22,10 @@ const config: ExpoConfig = {
         'A.L.B.E.R.T. converts your speech to text for wake phrases, voice commands, and conversations.',
       NSLocalNetworkUsageDescription:
         'A.L.B.E.R.T. connects to your Mac on the local network to sync Comm, memory, Operations, approvals, captures, and activity.',
-      // Required by ITMS-90683: linked SDKs reference Photo Library APIs even when Albert does not open the picker itself.
       NSPhotoLibraryUsageDescription:
-        'A.L.B.E.R.T. only accesses your photo library if you choose to share an image for a capture or conversation.',
+        'A.L.B.E.R.T. accesses your photo library when you attach an image to Comm for him to look at.',
+      NSCameraUsageDescription:
+        'A.L.B.E.R.T. uses the camera when you take a photo to send him in Comm.',
       NSAppTransportSecurity: {
         NSAllowsLocalNetworking: true,
         NSAllowsArbitraryLoads: false
@@ -58,7 +59,8 @@ const config: ExpoConfig = {
     adaptiveIcon: {
       foregroundImage: './assets/adaptive-icon.png',
       backgroundColor: '#000000'
-    }
+    },
+    permissions: ['CAMERA', 'READ_MEDIA_IMAGES', 'READ_EXTERNAL_STORAGE']
   },
   extra: {
     eas: {
@@ -70,6 +72,15 @@ const config: ExpoConfig = {
     'expo-secure-store',
     'expo-font',
     'expo-asset',
+    [
+      'expo-image-picker',
+      {
+        photosPermission:
+          'A.L.B.E.R.T. accesses your photo library when you attach an image to Comm for him to look at.',
+        cameraPermission:
+          'A.L.B.E.R.T. uses the camera when you take a photo to send him in Comm.'
+      }
+    ],
     [
       'expo-speech-recognition',
       {

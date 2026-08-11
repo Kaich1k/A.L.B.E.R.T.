@@ -211,7 +211,9 @@ export default function App(): React.JSX.Element {
     })()
 
     const off = window.albert.onChatEvent((event) => {
-      if (event.type === 'route') {
+      if (event.type === 'settings' && event.settings) {
+        setSettings(event.settings)
+      } else if (event.type === 'route') {
         const tier =
           event.tier === 'power' ? 'POWER' : event.tier === 'local' ? 'QUICK' : 'FAST'
         setRouteInfo(`${tier} · ${event.model}${event.reason ? ` — ${event.reason}` : ''}`)

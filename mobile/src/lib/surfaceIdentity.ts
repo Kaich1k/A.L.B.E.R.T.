@@ -1,43 +1,6 @@
-export type ActiveBrainRoute = {
-  provider: 'ollama' | 'groq' | 'gemini' | 'anthropic'
-  tier: 'local' | 'fast' | 'power'
-  model: string
-}
+/** Keep in sync with src/shared/brainIdentity.ts surface helpers. */
 
 export type ActiveSurface = 'mac' | 'phone'
-
-/** Narrow matcher: answer current runtime identity, not general AI recommendations. */
-export function isActiveBrainQuestion(text: string): boolean {
-  const normalized = text.replace(/\s+/g, ' ').trim().toLowerCase()
-  if (!normalized || normalized.length > 180) return false
-  return (
-    /\b(?:which|what)\s+(?:ai|a\.i\.|model|brain|provider)\s+(?:are|is)\s+(?:you\s+)?(?:using|running|on|active)\b/.test(
-      normalized
-    ) ||
-    /\bwhat\s+are\s+you\s+(?:using|running)\b/.test(normalized) ||
-    /\b(?:which|what)(?:'s|\s+is)\s+(?:your|the)\s+(?:current|active)\s+(?:ai|model|brain|provider)\b/.test(
-      normalized
-    ) ||
-    /\b(?:current|active)\s+(?:ai|model|brain|provider)\s*\??$/.test(normalized) ||
-    /\bare\s+you\s+(?:using|running|on)\s+(?:haiku|opus|anthropic|ollama|groq|gemini|google|gpt[- ]?oss|llama|qwen)\b/.test(
-      normalized
-    )
-  )
-}
-
-export function activeBrainReply(route: ActiveBrainRoute): string {
-  if (route.provider === 'groq') {
-    return `Active brain this turn: Groq Cloud — ${route.model}, sir.`
-  }
-  if (route.provider === 'gemini') {
-    return `Active brain this turn: Gemini / Google AI Studio — ${route.model}, sir.`
-  }
-  if (route.provider === 'ollama') {
-    return `Active brain this turn: Ollama — ${route.model}, sir.`
-  }
-  const family = route.tier === 'power' ? 'Opus' : 'Haiku'
-  return `Active brain this turn: Anthropic ${family} — ${route.model}, sir.`
-}
 
 /** Narrow matcher: which client surface Albert is answering from. */
 export function isActiveSurfaceQuestion(text: string): boolean {
@@ -67,7 +30,6 @@ export function activeSurfaceReply(surface: ActiveSurface): string {
   return `You're on the Mac desktop app with me right now, sir — not the phone companion.`
 }
 
-/** Shared prompt block so models don't confuse phone history with the active client. */
 export function activeSurfacePromptBlock(surface: ActiveSurface): string {
   if (surface === 'phone') {
     return `=== ACTIVE SURFACE (THIS TURN) ===

@@ -26,20 +26,21 @@ export function AlbertCore({
       role="img"
       aria-label={liveLabel}
     >
+      {/* Slow forward sweep — matches mobile slowSpin */}
       <div className="reactor-ring sweep" aria-hidden="true" />
+      {/* Two orbit nodes — spins opposite the mid/cardinal ring (mobile forward) */}
       <div className="reactor-ring outer" aria-hidden="true">
         <span className="reactor-sat n" />
         <span className="reactor-sat s" />
       </div>
-      <div className="reactor-ring mid" aria-hidden="true" />
-      <div className="reactor-ring cardinals" aria-hidden="true">
+      {/* Four cardinals — reverse of the two-dot outer ring (mobile reverseSpin) */}
+      <div className="reactor-ring mid" aria-hidden="true">
         <span className="reactor-dot n" />
         <span className="reactor-dot e" />
         <span className="reactor-dot s" />
         <span className="reactor-dot w" />
       </div>
       <div className="reactor-ring inner" aria-hidden="true" />
-      <div className="reactor-ring ticks" aria-hidden="true" />
       <div className="reactor-crosshair" aria-hidden="true" />
       <div className={`orb reactor-core ${state}`} aria-hidden="true" />
     </div>

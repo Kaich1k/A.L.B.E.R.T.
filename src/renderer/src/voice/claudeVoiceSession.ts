@@ -3,7 +3,7 @@ import {
   applyPersonalityAdjust,
   normalizePersonality,
   parsePersonalityVoiceCommand,
-  PERSONALITY_META
+  personalityAdjustReply
 } from '../../../shared/personality'
 import { useAlbertStore } from '../store'
 import { decodeBlobToMono16k, trimSilence } from './audio'
@@ -196,16 +196,21 @@ export class ClaudeVoiceSession {
   private readonly ttsQueue = new StreamingTtsQueue()
   private readonly pollQuietMs = 80
   private readonly pollActiveMs = 40
-  private readonly speechRms = 0.05
+  private readonly speechRms = 0.048
   /** Drop below this to count as silence (hysteresis — stops noise flicker resetting the 3s timer) */
   private readonly silenceRms = 0.032
   /** Lower bar while Albert talks — AEC often attenuates the user. */
   private readonly bargeRms = 0.022
   /** Need sustained voice so TTS bleed doesn’t false-trigger barge-in */
-  private readonly bargeHoldNeedMs = 180
-  private readonly minSpeechMs = 300
+  private readonly bargeHoldNeedMs = 140
+  private readonly minSpeechMs = 380
   /** Pause after user stops talking before we cut the utterance and reply */
-  private readonly silenceToEndMs = 3000
+  private readonly silenceToEndMs = 2600
+  /**
+   * Mic stays hot during TTS / barge so the next request isn’t clipped.
+   * While true, we won't endpoint an utterance until Albert finishes speaking.
+   */
+  private hotMic = false
 
   constructor(
     onState: VoiceListener,
@@ -312,10 +317,21 @@ export class ClaudeVoiceSession {
     this.speaking = false
     this.stopLiveKeywords()
     this.stopMuteWatch()
-    this.onStatus('Muted')
-    if (this.running && !this.busy) {
-      this.onState('listening')
-    }
+    // Arm mic immediately — barge speech is the next command, not “muted forever.”
+    this.armHotMic('barge')
+    this.onStatus('Listening — go ahead')
+    if (this.running) this.onState('listening')
+  }
+
+  /**
+   * Start (or keep) capture while a turn is still busy/speaking so Kai’s next
+   * sentence isn’t clipped at “project thing, alright…”.
+   */
+  private armHotMic(_reason: 'tts' | 'barge' | 'think'): void {
+    if (!this.running || !this.stream) return
+    this.hotMic = true
+    if (this.recording) return
+    this.beginUtteranceCapture({ force: true })
   }
 
   /**
@@ -496,6 +512,8 @@ export class ClaudeVoiceSession {
     this.speaking = true
     this.onState('speaking')
     this.onStatus('Speaking… (say “mute” / “standby” anytime)')
+    // Capture over the end of TTS — next command often starts before he finishes.
+    this.armHotMic('tts')
     // Now that audio is live, standby keywords are safe again
     this.startLiveKeywords(true)
     this.startMuteWatch()
@@ -609,6 +627,8 @@ export class ClaudeVoiceSession {
 
     try {
       this.onStatus('Thinking…')
+      // Open the mic during Thinking — Kai often starts the next ask before TTS.
+      this.armHotMic('think')
       // Mute/hide only while waiting on the model — standby waits until audio plays
       this.startLiveKeywords(false)
 
@@ -656,11 +676,14 @@ export class ClaudeVoiceSession {
     }
   }
 
-  private beginUtteranceCapture(): void {
-    if (!this.running || !this.stream || this.busy) return
+  private beginUtteranceCapture(opts?: { force?: boolean }): void {
+    if (!this.running || !this.stream) return
+    // Hot-mic path may start while the previous turn is still busy/speaking.
+    if (this.busy && !opts?.force && !this.hotMic) return
+    if (this.recording) return
     const recordingGeneration = this.lifecycleGen
 
-    // One level-monitor loop only — overlapping timers never hit a clean 3s silence
+    // One level-monitor loop only — overlapping timers never hit a clean silence window
     if (this.timerId) window.clearTimeout(this.timerId)
     this.timerId = 0
 
@@ -669,11 +692,17 @@ export class ClaudeVoiceSession {
     this.spokeMs = 0
     this.lastSpeechAt = 0
     this.recording = true
-    this.bargeIn = false
-    this.muted = false
-    this.ttsQueue.reset({
-      shouldCancel: () => !this.running || this.bargeIn || this.muted
-    })
+    // Hot-mic during TTS must not cancel playback or clear barge state mid-turn.
+    if (!opts?.force) {
+      this.bargeIn = false
+      this.muted = false
+      this.ttsQueue.reset({
+        shouldCancel: () => !this.running || this.bargeIn || this.muted
+      })
+    } else {
+      // Barge path: keep listening after interrupt; clear sticky mute so replies work.
+      this.muted = false
+    }
 
     const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
@@ -711,8 +740,8 @@ export class ClaudeVoiceSession {
       void this.audioContext.resume().catch(() => undefined)
     }
 
-    this.mediaRecorder.start(100)
-    this.onState('listening')
+    this.mediaRecorder.start(50)
+    if (!this.speaking) this.onState('listening')
     this.monitorLevels()
   }
 
@@ -733,7 +762,8 @@ export class ClaudeVoiceSession {
       sum += v * v
     }
     const rms = Math.sqrt(sum / this.levelBuffer.length)
-    const speakingNow = rms > this.speechRms
+    // While Albert talks, count quieter user speech (AEC attenuates barge audio).
+    const speakingNow = this.speaking ? rms > this.bargeRms : rms > this.speechRms
     const silentNow = rms < this.silenceRms
     const bargeNow = rms > this.bargeRms
     const tickMs =
@@ -756,7 +786,7 @@ export class ClaudeVoiceSession {
       this.bargeHoldMs = 0
     }
 
-    if (this.recording && !this.busy) {
+    if (this.recording) {
       if (speakingNow) {
         this.spokeMs += tickMs
         this.silenceMs = 0
@@ -764,17 +794,22 @@ export class ClaudeVoiceSession {
       } else if (silentNow && this.spokeMs > this.minSpeechMs * 0.55) {
         this.silenceMs += tickMs
       }
-      // Mid-band noise (between silenceRms and speechRms): don't reset the 3s clock
 
       const quietLongEnough =
         this.lastSpeechAt > 0 && Date.now() - this.lastSpeechAt >= this.silenceToEndMs
 
-      if (this.spokeMs > this.minSpeechMs && quietLongEnough) {
+      // Never cut while the previous turn is still busy/speaking — processRecording
+      // early-returns when busy and would drop the blob on the floor.
+      const canEndpoint = !this.speaking && !this.busy
+
+      if (canEndpoint && this.spokeMs > this.minSpeechMs && quietLongEnough) {
+        this.hotMic = false
         this.finishUtterance()
         return
       }
 
-      if (this.spokeMs > 12000) {
+      if (canEndpoint && this.spokeMs > 14000) {
+        this.hotMic = false
         this.finishUtterance()
         return
       }
@@ -808,7 +843,7 @@ export class ClaudeVoiceSession {
     })
     this.chunks = []
 
-    if (blob.size < 2200 || this.spokeMs < this.minSpeechMs) {
+    if (blob.size < 2800 || this.spokeMs < this.minSpeechMs) {
       if (this.running) this.beginUtteranceCapture()
       return
     }
@@ -819,14 +854,25 @@ export class ClaudeVoiceSession {
     this.onStatus('Transcribing…')
 
     try {
-      const audio = trimSilence(await decodeBlobToMono16k(blob))
+      // Softer trim + longer pad — aggressive silence trim was eating leading words.
+      const audio = trimSilence(await decodeBlobToMono16k(blob), 16_000, 0.006, 320)
       if (!current()) return
+      // Room tone / HVAC often yields tiny peaks that Whisper turns into "you"/"the"
+      let peak = 0
+      for (let i = 0; i < audio.length; i++) {
+        const a = Math.abs(audio[i]!)
+        if (a > peak) peak = a
+      }
+      if (audio.length < 3200 || peak < 0.02) {
+        this.onStatus('Listening — mute / hide / show / standby work anytime')
+        return
+      }
       const raw = (await window.albert.transcribeAudio(audio)).trim()
       if (!current()) return
       const text = correctTranscript(raw)
 
-      if (!text || isLikelyHallucination(text)) {
-        this.onStatus('Didn’t catch that — try again')
+      if (!text || isLikelyHallucination(text) || isLikelyHallucination(raw)) {
+        this.onStatus('Listening — mute / hide / show / standby work anytime')
         return
       }
 
@@ -859,19 +905,24 @@ export class ClaudeVoiceSession {
 
       const personalityAdj = parsePersonalityVoiceCommand(text)
       if (personalityAdj) {
-        const currentPersonality = normalizePersonality(
-          useAlbertStore.getState().settings.personality
-        )
-        const next = applyPersonalityAdjust(currentPersonality, personalityAdj)
-        const updated = await window.albert.setSettings({ personality: next })
-        if (!current()) return
-        useAlbertStore.getState().setSettings(updated)
-        const label = PERSONALITY_META[personalityAdj.key].label
-        const value = next[personalityAdj.key]
-        const reply = `${label} set to ${value}%, sir.`
-        this.onTranscript('assistant', reply)
-        await this.speakDirect(reply)
-        return
+        // Prefer sendChat so main-process orchestrator owns persistence + UI sync.
+        // Keep a local fallback path if chat is unavailable.
+        try {
+          await this.sendChatAndSpeak(text, lifecycleGeneration)
+          return
+        } catch {
+          const currentPersonality = normalizePersonality(
+            useAlbertStore.getState().settings.personality
+          )
+          const next = applyPersonalityAdjust(currentPersonality, personalityAdj)
+          const updated = await window.albert.setSettings({ personality: next })
+          if (!current()) return
+          useAlbertStore.getState().setSettings(updated)
+          const reply = personalityAdjustReply(personalityAdj, next)
+          this.onTranscript('assistant', reply)
+          await this.speakDirect(reply)
+          return
+        }
       }
 
       this.onStatus(`Heard: “${text}”`)
@@ -894,18 +945,59 @@ export class ClaudeVoiceSession {
     } finally {
       if (lifecycleGeneration !== this.lifecycleGen) return
       this.busy = false
+      this.speaking = false
+      this.hotMic = false
       this.stopMuteWatch()
       if (current()) {
         this.onStatus(
-          this.muted
-            ? 'Muted — listening again'
-            : this.voiceTurnNote
-              ? `Listening · ${this.voiceTurnNote}`
-              : 'Listening — mute / hide / show / standby work anytime'
+          this.voiceTurnNote
+            ? `Listening · ${this.voiceTurnNote}`
+            : 'Listening — mute / hide / show / standby work anytime'
         )
-        this.beginUtteranceCapture()
+        // Hot-mic may already be rolling with the start of Kai's next sentence.
+        if (this.recording) {
+          // If we only captured Albert/TTS bleed, scrap it and listen clean.
+          if (this.spokeMs < this.minSpeechMs * 0.5) {
+            this.discardHotCapture()
+            this.beginUtteranceCapture()
+          } else {
+            this.onState('listening')
+            // User may have finished during TTS — endpoint now that busy cleared.
+            const quietLongEnough =
+              this.lastSpeechAt > 0 && Date.now() - this.lastSpeechAt >= this.silenceToEndMs
+            if (this.spokeMs > this.minSpeechMs && quietLongEnough) {
+              this.finishUtterance()
+            } else if (!this.timerId) {
+              this.monitorLevels()
+            }
+          }
+        } else {
+          this.beginUtteranceCapture()
+        }
       } else {
         this.onState('idle')
+      }
+    }
+  }
+
+  /** Drop an in-flight hot-mic recorder without processing (TTS-only bleed). */
+  private discardHotCapture(): void {
+    this.recording = false
+    this.chunks = []
+    this.spokeMs = 0
+    this.silenceMs = 0
+    this.lastSpeechAt = 0
+    if (this.timerId) window.clearTimeout(this.timerId)
+    this.timerId = 0
+    const rec = this.mediaRecorder
+    this.mediaRecorder = null
+    if (rec) {
+      rec.ondataavailable = null
+      rec.onstop = null
+      try {
+        if (rec.state !== 'inactive') rec.stop()
+      } catch {
+        /* ignore */
       }
     }
   }

@@ -259,11 +259,17 @@ export function isEndVoiceCommand(text: string): boolean {
   return clauseIsEndVoice(corrected)
 }
 
+const STOPWORD_ONLY =
+  /^(?:the|a|an|to|and|or|of|in|on|at|for|is|are|was|were|be|you|i|it|that|this|so|ok|okay|yes|no|uh|um|hmm|ah|oh|hey|hi|hello|bye|thanks?|thank\s+you|please|well|yeah|yep|nope)(?:\s+(?:the|a|an|to|and|or|of|in|on|at|for|is|are|was|were|be|you|i|it|that|this|so|ok|okay|yes|no|uh|um|hmm|ah|oh|hey|hi|hello|bye|thanks?|please|well|yeah|yep|nope)){0,3}\.?$/i
+
 export function isLikelyHallucination(text: string): boolean {
   const t = text.trim()
   if (!t) return true
   if (t.length < 2) return true
-  if (t.split(/\s+/).length === 1 && t.length < 4) return true
+  const words = t.split(/\s+/).filter(Boolean)
+  if (words.length === 1 && t.length < 4) return true
+  // Whisper noise crumbs: "you", "the", "you the", "thank you", etc.
+  if (words.length <= 4 && STOPWORD_ONLY.test(t.replace(/[^\w\s']/g, '').trim())) return true
   return HALLUCINATION_PATTERNS.some((re) => re.test(t))
 }
 

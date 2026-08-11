@@ -1,4 +1,5 @@
 import { repairAlbertMentions } from '../../../shared/albertName'
+import { isLikelyHallucination } from '../../../shared/voiceCommands'
 import { decodeBlobToMono16k, trimSilence } from './audio'
 
 type WakeCallback = () => void
@@ -47,27 +48,37 @@ export function isWakePhrase(text: string): boolean {
 
   for (let i = 0; i <= words.length - 3; i++) {
     const triple = `${words[i]} ${words[i + 1]} ${words[i + 2]}`
-    if (triple === 'albert wake up' || triple === 'wake up albert') return true
+    if (
+      triple === 'albert wake up' ||
+      triple === 'wake up albert' ||
+      triple === 'hey albert wake' ||
+      triple === 'ok albert wake'
+    ) {
+      return true
+    }
   }
   for (let i = 0; i <= words.length - 2; i++) {
     const pair = `${words[i]} ${words[i + 1]}`
     if (
       pair === 'albert wake' ||
       pair === 'wake albert' ||
-      pair === 'albert up'
+      pair === 'albert up' ||
+      pair === 'albert wakeup'
     ) {
       return true
     }
   }
 
-  if (/\balbert\b.{0,32}\bwake(\s+up)?\b/.test(joined)) return true
-  if (/\bwake(\s+up)?\b.{0,32}\balbert\b/.test(joined)) return true
-  if (/\balbert\b.{0,16}\bup\b/.test(joined)) return true
-  if (/\bup\b.{0,16}\balbert\b/.test(joined)) return true
+  if (/\balbert\b.{0,40}\bwake(\s+up)?\b/.test(joined)) return true
+  if (/\bwake(\s+up)?\b.{0,40}\balbert\b/.test(joined)) return true
+  if (/\balbert\b.{0,20}\bup\b/.test(joined)) return true
+  if (/\bup\b.{0,20}\balbert\b/.test(joined)) return true
 
   if (/\b(hey|yo|okay|ok|hi|hello)\s+albert\b/.test(joined)) return true
+  // Short clipped wake: just the name when the utterance is tiny
+  if (words.length <= 2 && words[0] === 'albert') return true
 
-  if (words.length <= 14 && hasAlbert(words) && hasWake(words)) return true
+  if (words.length <= 16 && hasAlbert(words) && hasWake(words)) return true
 
   return false
 }
@@ -126,13 +137,14 @@ export class WakeWordListener {
   private readonly onWake: WakeCallback
   private readonly onStatus: (armed: boolean, detail?: string) => void
 
-  private readonly cooldownMs = 1500
-  private readonly speechRms = 0.018
-  private readonly minSpeechMs = 250
-  private readonly silenceToEndMs = 900
+  private readonly cooldownMs = 1200
+  /** Slightly lower so quiet “Albert, wake up” still counts as speech */
+  private readonly speechRms = 0.014
+  private readonly minSpeechMs = 220
+  private readonly silenceToEndMs = 700
   /** Hard cut even if VAD never marks speech */
-  private readonly maxSegmentMs = 2800
-  private readonly minSegmentMs = 900
+  private readonly maxSegmentMs = 3200
+  private readonly minSegmentMs = 700
   /** Long-running apps: mic tracks die after sleep; timers stall in background */
   private readonly healthEveryMs = 20_000
   private readonly pollStaleMs = 4_000
@@ -189,15 +201,21 @@ export class WakeWordListener {
 
   private tryFire(text: string): boolean {
     if (this.paused || !this.wanted) return false
-    // Surface what Whisper heard so Home/Comm can show diagnostics
-    this.onStatus(true, `heard:${text.slice(0, 80)}`)
+    // Ignore Whisper silence crumbs ("you", "the") — don't spam the HUD with them.
+    if (isLikelyHallucination(text)) return false
     if (!isWakePhrase(text)) {
+      // Only surface near-misses that look like a wake attempt (contain albert/wake-ish tokens)
+      const normalized = normalizeWakeText(text)
+      if (/\balbert\b|\bwake\b|\bhey\b/.test(normalized)) {
+        this.onStatus(true, `heard:${text.slice(0, 80)}`)
+      }
       console.warn('[wake] no match:', text)
       return false
     }
     const now = Date.now()
     if (now - this.lastFireAt < this.cooldownMs) return false
     this.lastFireAt = now
+    this.onStatus(true, `wake:${text.slice(0, 80)}`)
     console.info('[wake] matched:', text)
     this.onWake()
     return true
@@ -344,7 +362,7 @@ export class WakeWordListener {
   private async ensureRunning(): Promise<void> {
     if (!this.wanted || this.paused || this.starting) return
     if (this.micLive() && this.analyser && this.audioContext?.state !== 'closed') {
-      if (this.audioContext.state === 'suspended') {
+      if (this.audioContext?.state === 'suspended') {
         await this.audioContext.resume().catch(() => undefined)
       }
       if (!this.pollTimer) this.pollLevels()
@@ -555,11 +573,13 @@ export class WakeWordListener {
     this.busySince = Date.now()
     try {
       const audio = await decodeBlobToMono16k(blob)
-      const trimmed = trimSilence(audio)
-      if (peakAbs(trimmed) < 0.012) return
+      const trimmed = trimSilence(audio, 16_000, 0.006)
+      // Reject near-silent room noise before Whisper invents "you"/"the"
+      if (peakAbs(trimmed) < 0.009) return
+      if (trimmed.length < 2000) return
 
       let capped =
-        trimmed.length > 16_000 * 4 ? trimmed.subarray(trimmed.length - 16_000 * 4) : trimmed
+        trimmed.length > 16_000 * 5 ? trimmed.subarray(trimmed.length - 16_000 * 5) : trimmed
       if (capped.length < 2400) {
         const pad = new Float32Array(2800)
         pad.set(capped, pad.length - capped.length)
