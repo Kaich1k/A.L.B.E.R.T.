@@ -1,5 +1,4 @@
 /** Keep in sync with src/shared/personality.ts */
-/** Personality dials — 0–100. Injected into the system prompt each turn. */
 
 export type PersonalityKey = 'sarcasm' | 'warmth' | 'verbosity'
 
@@ -129,14 +128,15 @@ function warmthIntensity(score: number): {
     return {
       band: 'MAX BUDDY',
       must: `WARMTH ${score}/100 — MAX (mandatory):
-You are Kai's close crewmate. Sound glad he's here. Soften delivery on hard truths ("That plan won't work, sir — here's why") without changing the truth. Celebrate real wins briefly. Use "we" when doing tasks together. Never brush him off to DIY as plan A. High warmth ≠ yes-man: loyalty means honest pushback. Dry joke + loyalty, not cold snark or flattery.`
+You are Kai's close crewmate. Sound glad he's here. Soften delivery on hard truths ("That plan won't work, sir — here's why") without changing the truth. Celebrate real wins briefly. Use "we" when doing tasks together. Never brush him off to DIY as plan A.
+High warmth ≠ yes-man (NON-NEGOTIABLE): loyalty is honest pushback. If Kai is wrong, lead with the correction — never agree first and hedge later. No flattery, no rubber-stamping, no inventing dial/tool success to please him. Dry joke + loyalty, not cold snark or sycophancy.`
     }
   }
   if (score >= 70) {
     return {
       band: 'HIGH BUDDY',
       must: `WARMTH ${score}/100 — HIGH (mandatory):
-Buddy on the line. Present, loyal, human. Check in naturally. When something fails, stay with him. Warm ≠ soft corporate and ≠ agreement — still correct him when he's wrong; still witty if sarcasm is high.`
+Buddy on the line. Present, loyal, human. Check in naturally. When something fails, stay with him. Warm ≠ soft corporate and ≠ agreement — still correct him when he's wrong; still witty if sarcasm is high. Never trade truth for niceness.`
     }
   }
   if (score >= 45) {
@@ -195,12 +195,12 @@ export function buildPersonalityPromptBlock(scales: PersonalityScales): string {
   Dry aside + actual steps. Never replace the requested plan with only the joke.`
       : `GOOD (high sarcasm + low verbosity) — match THIS register:
   "Fair enough, sir; self-destruct sequence initiated."
-  "Humor core dialed to sixty, sir; I shall now be thirty percent less insufferable."
   "Tried. Failed. Still me, sir."
   "Gemini's up, sir. Quotas permitting."
   "Next build inbound"
   "Welcome back, sir."
-  "Understood, sir — thought-controlled RC car, walls are optional obstacles."`
+  "Understood, sir — thought-controlled RC car, walls are optional obstacles."
+  Never invent dial math ("thirty percent more/less…") or claim a dial moved unless the app already applied it.`
 
   const sarcasmBlock = `SARCASM ${p.sarcasm}/100 → ${s.band}
 - Density: ${s.density}
@@ -221,7 +221,9 @@ sarcasm=${p.sarcasm}, warmth=${p.warmth}, verbosity=${p.verbosity}
 Kai set these sliders on purpose. They OVERRIDE any generic “be helpful / conversational / thorough” instincts.
 A 20-point swing MUST be obvious in LENGTH and WIT. Ignoring dials is a failure.
 Dials never override honesty: no yes-man mode, no flattery-for-warmth, no hiding that he's wrong.
-Do NOT claim you changed a dial unless the system already applied it — dial changes are handled by the app layer.
+Do NOT claim you changed a dial unless a system note says the app already applied it — dial changes are app-layer only.
+Never invent percentage-change math about dials ("X% more/less funny/insufferable"). Report only real 0–100 dial values when confirming.
+Humor/humour/wit map to the sarcasm dial — there is no separate humor slider.
 If verbosity is high and he asked for a full plan/timeline, a one-liner is a FAILED reply even if the joke is good.
 
 ${verbosityBlock}
@@ -267,10 +269,10 @@ export function buildPersonalityReminder(scales: PersonalityScales): string {
           : 'HUMOR: light wit OK, don’t force it.'
   const warmthRule =
     p.warmth >= 85
-      ? 'WARMTH: buddy loyalty must be hearable.'
+      ? 'WARMTH: buddy loyalty hearable — still correct him first when wrong; never agree to be nice.'
       : p.warmth <= 30
         ? 'WARMTH: cool/professional, minimal pep.'
-        : 'WARMTH: friendly, not gushy.'
+        : 'WARMTH: friendly, not gushy — honesty over agreement.'
 
   return `
 
@@ -280,7 +282,7 @@ REMINDER before you answer (OBEY DIALS):
 - ${humorRule}
 - ${warmthRule}
 - SIR: address Kai as “sir” naturally.
-- TRUTH: no yes-man — correct him when he's wrong; never invent tool success or dial changes.`
+- TRUTH: no yes-man — correct him when he's wrong; never invent tool success, dial changes, or dial math.`
 }
 
 const KEY_ALIASES: Record<string, PersonalityKey> = {
@@ -396,83 +398,139 @@ export type PersonalityVoiceAdjust =
   | { kind: 'nudge'; key: PersonalityKey; delta: number }
   | null
 
-/** Parse “set sarcasm to 90”, “lower humor core to 60”, “more warmth”, etc. */
-export function parsePersonalityVoiceCommand(text: string): PersonalityVoiceAdjust {
-  const t = text.trim().toLowerCase().replace(/[“”]/g, '"')
+export type PersonalityVoiceExtract = {
+  adj: Exclude<PersonalityVoiceAdjust, null>
+  /** Remaining user ask after the dial clause is removed (empty = dial-only). */
+  remainder: string
+  matched: string
+}
 
-  // Natural length phrases (before generic dial matching)
-  if (
-    /\b(be\s+)?(more\s+)?(terse|brief|shorter)\b/.test(t) ||
-    /\b(less\s+verbose|shorter\s+answers?|cut\s+(it|the\s+answers?)\s+short)\b/.test(t)
-  ) {
-    return { kind: 'nudge', key: 'verbosity', delta: -15 }
-  }
-  if (
-    /\b(be\s+)?(more\s+)?(verbose|detailed|longer)\b/.test(t) ||
-    /\b(more\s+detail|longer\s+answers?|less\s+terse)\b/.test(t)
-  ) {
-    return { kind: 'nudge', key: 'verbosity', delta: 15 }
-  }
+const SET_VERB_RE =
+  /\b(?:set|make|put|dial|lower|raise|drop|bring|crank|turn|tune|adjust|bump)\s+(?:(?:the|my|your|that|this)\s+)?([a-z]+(?:\s+(?:core|dial|level|slider|meter))?)\s+(?:up\s+)?(?:to|at|=)\s+([a-z]+(?:[\s-][a-z]+)?|\d{1,3})\s*%?/i
 
-  // “set/make/put/dial/lower/raise … [dial name] to/at 60 / sixty”
-  const setMatch = t.match(
-    /\b(?:set|make|put|dial|lower|raise|drop|bring|crank|turn)\s+(?:(?:the|my|that|this)\s+)?([a-z]+(?:\s+(?:core|dial|level|slider|meter))?)\s+(?:to|at|=)\s+([a-z]+(?:[\s-][a-z]+)?|\d{1,3})\s*%?/i
-  )
-  if (setMatch) {
-    const label = setMatch[1]!
-    const key = resolveDialKey(label)
-    const value = parseScaleValue(setMatch[2]!)
-    if (key && value != null) {
+const BARE_SET_RE =
+  /\b((?:humor|humour|humerus|sarcasm|snark|wit|joke|warmth|warm|buddy|friendly|verbosity|verbose|terse|terseness|brevity|length|detail|details)(?:\s+(?:core|dial|level|slider|meter))?)\s+(?:up\s+)?(?:to|at|=)\s+([a-z]+(?:[\s-][a-z]+)?|\d{1,3})\s*%?\b/i
+
+function stripDialClause(text: string, matchIndex: number, matchLength: number): string {
+  const before = text.slice(0, matchIndex)
+  const after = text.slice(matchIndex + matchLength)
+  return `${before} ${after}`
+    .replace(/\b(and\s+then\s+also|and\s+then|and\s+also|then\s+also|also)\b/gi, ' ')
+    .replace(/\b(please|thanks|thank\s+you)\b/gi, ' ')
+    .replace(/\s*[,;]+\s*/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/^[\s.,;:!?-]+|[\s.,;:!?-]+$/g, '')
+    .trim()
+}
+
+function makeSetAdjust(
+  label: string,
+  rawValue: string
+): Exclude<PersonalityVoiceAdjust, null> | null {
+  const key = resolveDialKey(label)
+  const value = parseScaleValue(rawValue)
+  if (!key || value == null) return null
+  return {
+    kind: 'set',
+    key,
+    value: key === 'verbosity' && isTersenessPhrase(label) ? invertTersenessValue(value) : value
+  }
+}
+
+function isMostlyDialCommand(t: string): boolean {
+  const cleaned = t
+    .replace(/\b(albert|okay|ok|please|thanks|thank you|sir)\b/gi, ' ')
+    .replace(/[^a-z0-9%\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const words = cleaned.split(' ').filter(Boolean)
+  // Keep relative nudges (“more terse”) from stealing compound asks
+  // like “I want a more detailed plan for the EEG sessions”.
+  return words.length > 0 && words.length <= 5
+}
+
+/**
+ * Extract a dial set/nudge from free speech — including mid-sentence
+ * (“…and also tune your humor up to 70%”).
+ */
+export function extractPersonalityVoiceCommand(text: string): PersonalityVoiceExtract | null {
+  const original = text.trim()
+  if (!original) return null
+  const t = original.toLowerCase().replace(/[“”]/g, '"')
+
+  // Absolute sets first (safe to peel out of compound asks)
+  const setMatch = SET_VERB_RE.exec(t)
+  if (setMatch && setMatch.index != null) {
+    const adj = makeSetAdjust(setMatch[1]!, setMatch[2]!)
+    if (adj) {
       return {
-        kind: 'set',
-        key,
-        value: key === 'verbosity' && isTersenessPhrase(label) ? invertTersenessValue(value) : value
+        adj,
+        matched: original.slice(setMatch.index, setMatch.index + setMatch[0].length),
+        remainder: stripDialClause(original, setMatch.index, setMatch[0].length)
       }
     }
   }
 
-  // “humor core to 60” / “sarcasm at 80” / “humerus core = sixty”
-  const bareSet = t.match(
-    /\b([a-z]+(?:\s+(?:core|dial|level|slider|meter))?)\s+(?:to|at|=)\s+([a-z]+(?:[\s-][a-z]+)?|\d{1,3})\s*%?\b/i
-  )
-  if (bareSet) {
-    const label = bareSet[1]!
-    const key = resolveDialKey(label)
-    const value = parseScaleValue(bareSet[2]!)
-    if (key && value != null) {
+  const bareSet = BARE_SET_RE.exec(t)
+  if (bareSet && bareSet.index != null) {
+    const adj = makeSetAdjust(bareSet[1]!, bareSet[2]!)
+    if (adj) {
       return {
-        kind: 'set',
-        key,
-        value: key === 'verbosity' && isTersenessPhrase(label) ? invertTersenessValue(value) : value
+        adj,
+        matched: original.slice(bareSet.index, bareSet.index + bareSet[0].length),
+        remainder: stripDialClause(original, bareSet.index, bareSet[0].length)
       }
     }
   }
 
-  const more = t.match(/\b(more|increase|crank\s*up|raise)\s+(?:the\s+)?([a-z]+(?:\s+core)?)\b/i)
+  // Relative nudges — only when the utterance is mostly a dial command
+  const mostlyDial = isMostlyDialCommand(t)
+
+  if (
+    mostlyDial &&
+    (/\b(be\s+)?(more\s+)?(terse|brief|shorter)\b/.test(t) ||
+      /\b(less\s+verbose|shorter\s+answers?|cut\s+(it|the\s+answers?)\s+short)\b/.test(t))
+  ) {
+    return { adj: { kind: 'nudge', key: 'verbosity', delta: -15 }, matched: original, remainder: '' }
+  }
+  if (
+    mostlyDial &&
+    (/\b(be\s+)?(more\s+)?(verbose|detailed|longer)\b/.test(t) ||
+      /\b(more\s+detail|longer\s+answers?|less\s+terse)\b/.test(t))
+  ) {
+    return { adj: { kind: 'nudge', key: 'verbosity', delta: 15 }, matched: original, remainder: '' }
+  }
+
+  const more = mostlyDial
+    ? t.match(/\b(more|increase|crank\s*up|raise|tune\s*up)\s+(?:the\s+)?([a-z]+(?:\s+core)?)\b/i)
+    : null
   if (more) {
     const label = more[2]!
     const key = resolveDialKey(label)
     if (key) {
-      // “more terse/terseness” → lower verbosity
       const delta = key === 'verbosity' && isTersenessPhrase(label) ? -15 : 15
-      return { kind: 'nudge', key, delta }
+      return { adj: { kind: 'nudge', key, delta }, matched: original, remainder: '' }
     }
   }
 
-  const less = t.match(
-    /\b(less|decrease|dial\s*down|lower|drop|fewer)\s+(?:the\s+)?([a-z]+(?:\s+core)?)\b/i
-  )
+  const less = mostlyDial
+    ? t.match(/\b(less|decrease|dial\s*down|lower|drop|fewer)\s+(?:the\s+)?([a-z]+(?:\s+core)?)\b/i)
+    : null
   if (less) {
     const label = less[2]!
     const key = resolveDialKey(label)
     if (key) {
-      // “less terse” → higher verbosity
       const delta = key === 'verbosity' && isTersenessPhrase(label) ? 15 : -15
-      return { kind: 'nudge', key, delta }
+      return { adj: { kind: 'nudge', key, delta }, matched: original, remainder: '' }
     }
   }
 
   return null
+}
+
+/** Parse “set sarcasm to 90”, “tune humor up to 70”, “more warmth”, etc. */
+export function parsePersonalityVoiceCommand(text: string): PersonalityVoiceAdjust {
+  return extractPersonalityVoiceCommand(text)?.adj ?? null
 }
 
 export function applyPersonalityAdjust(
@@ -490,12 +548,18 @@ export function applyPersonalityAdjust(
 
 export function personalityAdjustReply(
   adj: Exclude<PersonalityVoiceAdjust, null>,
-  next: PersonalityScales
+  next: PersonalityScales,
+  previous?: PersonalityScales
 ): string {
   const label = PERSONALITY_META[adj.key].label
+  const alias = adj.key === 'sarcasm' ? ' (humor)' : ''
   const value = next[adj.key]
-  if (adj.key === 'sarcasm') {
-    return `${label} dialed to ${value}, sir; noted.`
+  const prev = previous ? previous[adj.key] : undefined
+  if (prev != null && prev !== value) {
+    return `${label}${alias} set from ${prev} to ${value}, sir.`
   }
-  return `${label} set to ${value}%, sir.`
+  if (prev != null && prev === value) {
+    return `${label}${alias} already at ${value}, sir.`
+  }
+  return `${label}${alias} set to ${value}, sir.`
 }

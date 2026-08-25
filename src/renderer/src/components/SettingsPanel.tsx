@@ -333,8 +333,9 @@ export function SettingsPanel(): React.JSX.Element {
           <div className="settings-section" id="systems-personality">
             <h3 className="settings-section-title">1 · Personality dials</h3>
             <p className="section-sub">
-              High sarcasm = dry TARS/JARVIS. High warmth = buddy on the line. Low verbosity =
-              short; high = full plans when you ask. Voice: “set sarcasm to 60”, “more terse”,
+              High sarcasm = dry TARS/JARVIS (also called humor/wit). High warmth = buddy on
+              the line — still honest, never a yes-man. Low verbosity = short; high = full plans
+              when you ask. Voice: “set sarcasm to 60”, “tune humor up to 70”, “more terse”,
               “set verbosity to 80”, “more warmth”. Reset restores defaults.
             </p>
             <div className="personality-grid">

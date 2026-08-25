@@ -45,7 +45,7 @@ const config = (overrides = {}) => ({
   speakReplies: true,
   voiceRate: 1,
   ttsVoiceId: '',
-  wakeOnLaunch: false,
+  wakeOnLaunch: true,
   reducedMotion: false,
   personality: { sarcasm: 82, warmth: 82, verbosity: 35 },
   ...overrides

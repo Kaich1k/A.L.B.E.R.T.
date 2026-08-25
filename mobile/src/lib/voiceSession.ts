@@ -68,13 +68,7 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
 } {
   const nativeAvailable = isSpeechRecognitionAvailable()
   const [phase, setPhase] = useState<VoicePhase>('standby')
-  const [status, setStatus] = useState(
-    nativeAvailable
-      ? handlers.wakeOnLaunch
-        ? 'Standby — say “Albert, wake up”'
-        : 'Standby — tap Engage Voice when ready'
-      : UNAVAILABLE_STATUS
-  )
+  const [status, setStatus] = useState(nativeAvailable ? '' : UNAVAILABLE_STATUS)
   const [supported, setSupported] = useState(nativeAvailable)
   const [wakeArmed, setWakeArmed] = useState(false)
 
@@ -86,7 +80,8 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
     AppState.currentState !== 'background' && AppState.currentState !== 'inactive'
   )
   const permissionGrantedRef = useRef(false)
-  const armedPreferenceRef = useRef(handlers.wakeOnLaunch === true)
+  // Wake listening is the normal standby path once mic permission exists.
+  const armedPreferenceRef = useRef(true)
   const processingRef = useRef(false)
   const generationRef = useRef(0)
 
@@ -115,7 +110,7 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
         setPhase(next)
         handlersRef.current.onPhase?.(next)
       }
-      if (note) publishStatus(note)
+      if (note !== undefined) publishStatus(note)
     },
     [publishStatus]
   )
@@ -249,7 +244,7 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
       cancelRecognition()
       await cancelSpeech()
       if (!isCurrentGeneration(generation)) return false
-      setPhaseBoth('speaking', 'Preparing voice… (tap Take 5 to cut)')
+      setPhaseBoth('speaking', '')
 
       return new Promise<boolean>((resolve) => {
         let settled = false
@@ -300,7 +295,7 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
             useApplicationAudioSession: false,
             onStart: () => {
               if (isCurrentGeneration(generation)) {
-                setPhaseBoth('speaking', 'Speaking… (tap Take 5 to cut)')
+                setPhaseBoth('speaking', '')
               }
             },
             onDone: () => settle(true),
@@ -326,7 +321,7 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
     void cancelSpeech()
     cancelRecognition()
     armedPreferenceRef.current = true
-    setPhaseBoth('standby', 'Standing by, sir. Say “Albert, wake up”.')
+    setPhaseBoth('standby', '')
     if (permissionGrantedRef.current && appActiveRef.current) {
       scheduleListening('standby', generation, 350)
     }
@@ -339,13 +334,13 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
       publishStatus(UNAVAILABLE_STATUS)
       return
     }
-    setPhaseBoth('permission', 'Requesting microphone and speech recognition access…')
+    setPhaseBoth('permission', '')
     try {
       const current = await mod.getPermissionsAsync?.()
       if (current && !current.granted && current.canAskAgain === false) {
         permissionGrantedRef.current = false
         setSupported(false)
-        setPhaseBoth('standby', 'Open Settings to enable Microphone and Speech Recognition')
+        setPhaseBoth('standby', '')
         await Linking.openSettings()
         return
       }
@@ -353,20 +348,17 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
       if (!mountedRef.current) return
       permissionGrantedRef.current = result.granted
       setSupported(result.granted || result.canAskAgain !== false)
-      setPhaseBoth('standby')
-      publishStatus(
-        result.granted
-          ? 'Voice access ready — tap Engage Voice'
-          : result.canAskAgain === false
-            ? 'Mic permission denied — enable Microphone and Speech Recognition in Settings'
-            : 'Mic permission is required for voice'
-      )
+      setPhaseBoth('standby', '')
+      if (result.granted && appActiveRef.current) {
+        armedPreferenceRef.current = true
+        scheduleListening('standby', generationRef.current, 120)
+      }
     } catch {
       permissionGrantedRef.current = false
       setSupported(false)
       setPhaseBoth('fault', UNAVAILABLE_STATUS)
     }
-  }, [publishStatus, setPhaseBoth])
+  }, [publishStatus, scheduleListening, setPhaseBoth])
 
   const engage = useCallback(async () => {
     if (!getSpeechRecognitionPackage()) {
@@ -379,7 +371,7 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
       if (!permissionGrantedRef.current) return
     }
     if (!appActiveRef.current) {
-      publishStatus('Return to A.L.B.E.R.T. to engage voice')
+      publishStatus('')
       return
     }
 
@@ -391,7 +383,7 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
     cancelRecognition()
     await cancelSpeech()
     if (!isCurrentGeneration(generation)) return
-    setPhaseBoth('listening', 'Listening — pause ~3 seconds when you finish')
+    setPhaseBoth('listening', '')
     scheduleListening('utterance', generation)
   }, [
     cancelRecognition,
@@ -418,11 +410,11 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
         const generation = generationRef.current + 1
         generationRef.current = generation
         recognitionAttemptRef.current = 0
-        setPhaseBoth('listening', 'Wake phrase confirmed')
+        setPhaseBoth('listening', '')
         await speak('Online, sir.', generation, true)
         if (!isCurrentGeneration(generation)) return
         processingRef.current = false
-        setPhaseBoth('listening', 'Listening — pause ~3 seconds when you finish')
+        setPhaseBoth('listening', '')
         scheduleListening('utterance', generation, 220)
         return
       }
@@ -551,7 +543,7 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
         permissionGrantedRef.current = false
         desiredModeRef.current = null
         setSupported(false)
-        publishStatus('Microphone / speech permission denied — enable it in Settings')
+        publishStatus('')
         return
       }
 
@@ -580,7 +572,7 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
 
       if (code === 'network' && preferOnDeviceRef.current) {
         // Stay on-device; a transient network blip should not force cloud ASR.
-        publishStatus('Waiting for on-device speech — Wi‑Fi not required')
+        publishStatus('')
         restartDesired(700)
         return
       }
@@ -626,16 +618,13 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
       cancelRecognition()
 
       if (!active) {
-        setPhaseBoth('standby', 'Voice paused while A.L.B.E.R.T. is in the background')
+        setPhaseBoth('standby', '')
         return
       }
 
-      const shouldArm = armedPreferenceRef.current || handlersRef.current.wakeOnLaunch === true
-      setPhaseBoth(
-        'standby',
-        shouldArm ? 'Standing by, sir. Say “Albert, wake up”.' : 'Standby — tap Engage Voice when ready'
-      )
-      if (permissionGrantedRef.current && shouldArm) {
+      setPhaseBoth('standby', '')
+      if (permissionGrantedRef.current) {
+        armedPreferenceRef.current = true
         scheduleListeningRef.current('standby', generation, 350)
       }
     }
@@ -655,27 +644,23 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
         if (cancelled || !mountedRef.current) return
         if (!result) {
           setSupported(true)
-          publishStatus('Standby — tap Engage Voice to grant microphone access')
+          publishStatus('')
           return
         }
         if (!result.granted) {
           permissionGrantedRef.current = false
           setSupported(result.canAskAgain !== false)
-          publishStatus(
-            result.canAskAgain === false
-              ? 'Mic permission denied — enable Microphone and Speech Recognition in Settings'
-              : 'Standby — tap Engage Voice to grant microphone access'
-          )
+          publishStatus('')
           return
         }
         permissionGrantedRef.current = true
         setSupported(true)
-        if (appActiveRef.current && handlersRef.current.wakeOnLaunch === true) {
+        publishStatus('')
+        // Normal path: arm wake listening as soon as mic permission is available.
+        if (appActiveRef.current) {
           armedPreferenceRef.current = true
           const generation = generationRef.current
           scheduleListeningRef.current('standby', generation, 120)
-        } else {
-          publishStatus('Standby — tap Engage Voice when ready')
         }
       } catch {
         if (!cancelled && mountedRef.current) {
@@ -714,15 +699,18 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
 
   useEffect(() => {
     if (
-      handlers.wakeOnLaunch !== true ||
       !permissionGrantedRef.current ||
       !appActiveRef.current ||
       phaseRef.current !== 'standby' ||
       desiredModeRef.current
-    ) return
+    ) {
+      return
+    }
+    // wakeOnLaunch=false means leave mic idle until the user engages once.
+    if (handlers.wakeOnLaunch === false && !armedPreferenceRef.current) return
     armedPreferenceRef.current = true
     const generation = generationRef.current
-    setPhaseBoth('standby', 'Standing by, sir. Say “Albert, wake up”.')
+    setPhaseBoth('standby', '')
     scheduleListening('standby', generation, 120)
   }, [handlers.wakeOnLaunch, scheduleListening, setPhaseBoth])
 
@@ -801,12 +789,10 @@ export function useAlbertVoice(handlers: VoiceHandlers): {
         }
       } finally {
         if (!mountedRef.current || !resumeMode) return
-        if (resumeMode === 'standby' && !armedPreferenceRef.current && handlersRef.current.wakeOnLaunch !== true) {
-          return
-        }
         const generation = generationRef.current
         if (resumeMode === 'standby') {
-          setPhaseBoth('standby', 'Standing by, sir. Say “Albert, wake up”.')
+          armedPreferenceRef.current = true
+          setPhaseBoth('standby', '')
           scheduleListening('standby', generation, 280)
         } else if (phaseRef.current !== 'standby') {
           scheduleListening('utterance', generation, 280)

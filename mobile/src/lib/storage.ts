@@ -61,7 +61,7 @@ export const DEFAULT_CONFIG: CompanionConfig = {
   speakReplies: true,
   voiceRate: 1.03,
   ttsVoiceId: '',
-  wakeOnLaunch: false,
+  wakeOnLaunch: true,
   reducedMotion: false,
   personality: { ...DEFAULT_PERSONALITY }
 }

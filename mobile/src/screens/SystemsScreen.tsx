@@ -548,8 +548,9 @@ export function SystemsScreen({
 
             <HudCard eyebrow="PERSONALITY DIALS" title="How Albert talks">
               <Text style={styles.help}>
-                High sarcasm = dry TARS/JARVIS. High warmth = buddy on the line. Low verbosity =
-                one short sentence. These override the phone brain every reply — Save after changes.
+                High sarcasm = dry TARS/JARVIS (also humor/wit). High warmth = buddy on the line —
+                still honest, never a yes-man. Low verbosity = short; high = full plans when you ask.
+                Voice: “set sarcasm to 60”, “tune humor up to 70”, “more terse”. Save after changes.
               </Text>
               {PERSONALITY_KEYS.map((key) => (
                 <PersonalityDial

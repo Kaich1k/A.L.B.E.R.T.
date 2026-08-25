@@ -97,6 +97,10 @@ export function ChatScreen({
 }: ChatScreenProps): React.JSX.Element {
   const listRef = useRef<FlatList<ChatMessage>>(null)
   const autoFollowRef = useRef(true)
+  const draggingRef = useRef(false)
+  const scrollRafRef = useRef<number | null>(null)
+  const lastContentHeightRef = useRef(0)
+  const prevMessageCountRef = useRef(0)
   const insets = useSafeAreaInsets()
   const { width } = useWindowDimensions()
   const [keyboardLift, setKeyboardLift] = useState(0)
@@ -117,10 +121,29 @@ export function ChatScreen({
                 ? 'warn'
                 : 'neutral'
 
-  const scrollToLatest = (animated = true): void => {
-    requestAnimationFrame(() => {
+  const scrollToLatest = (animated = false): void => {
+    if (!autoFollowRef.current || draggingRef.current) return
+    if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current)
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null
+      // Instant stick-to-bottom avoids bounce/jitter when already pinned
+      // (especially while streaming tokens grow the list height).
       listRef.current?.scrollToEnd({ animated })
     })
+  }
+
+  const updateFollowFromOffset = (
+    contentOffsetY: number,
+    viewportHeight: number,
+    contentHeight: number
+  ): void => {
+    const distance = contentHeight - (contentOffsetY + viewportHeight)
+    // Hysteresis: easy to unpin while reading up, sticky to re-pin near bottom.
+    if (autoFollowRef.current) {
+      if (distance > 96) autoFollowRef.current = false
+    } else if (distance < 48) {
+      autoFollowRef.current = true
+    }
   }
 
   const data = streamingText
@@ -130,16 +153,31 @@ export function ChatScreen({
           id: '__streaming__',
           role: 'assistant' as const,
           content: streamingText,
-          createdAt: Date.now(),
+          createdAt: messages[messages.length - 1]?.createdAt ?? 0,
           delivery: 'pending' as const
         }
       ]
     : messages
 
   useEffect(() => {
+    const count = data.length
+    const grew = count > prevMessageCountRef.current
+    prevMessageCountRef.current = count
+    if (!grew) return
+    const last = data[count - 1]
+    // New outbound message or a live stream starting should re-pin to bottom.
+    if (last?.role === 'user' || last?.id === '__streaming__') {
+      autoFollowRef.current = true
+    }
     if (!autoFollowRef.current) return
-    scrollToLatest(data.length > 1)
-  }, [data.length, streamingText, keyboardLift])
+    // Animate only when a whole new bubble arrives — not on every stream chunk.
+    scrollToLatest(count > 1)
+  }, [data.length])
+
+  useEffect(() => {
+    if (!autoFollowRef.current || keyboardLift <= 0) return
+    scrollToLatest(false)
+  }, [keyboardLift])
 
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow'
@@ -148,12 +186,12 @@ export function ChatScreen({
       // Chrome below Comm is covered by the keyboard; lift only the overlapping portion.
       const covered = bottomChromeHeight + insets.bottom
       setKeyboardLift(Math.max(0, event.endCoordinates.height - covered))
-      if (autoFollowRef.current) scrollToLatest(true)
     })
     const hideSub = Keyboard.addListener(hideEvent, () => setKeyboardLift(0))
     return () => {
       showSub.remove()
       hideSub.remove()
+      if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current)
     }
   }, [bottomChromeHeight, insets.bottom])
 
@@ -209,7 +247,7 @@ export function ChatScreen({
               <View style={styles.voiceMeta}>
                 <Text style={styles.voicePhase}>{voicePhase.toUpperCase()}</Text>
                 <Text style={styles.voiceStatus} accessibilityLiveRegion="polite" numberOfLines={2}>
-                  {!voiceSupported ? 'Voice setup required — open Systems for microphone access.' : voiceStatus}
+                  {voiceSupported ? voiceStatus : ''}
                 </Text>
               </View>
             </View>
@@ -249,19 +287,34 @@ export function ChatScreen({
           contentContainerStyle={[styles.list, data.length === 0 && styles.listEmpty]}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
-          onContentSizeChange={() => {
-            if (autoFollowRef.current) scrollToLatest(true)
-          }}
-          onLayout={() => {
-            if (autoFollowRef.current) scrollToLatest(false)
+          onContentSizeChange={(_w, h) => {
+            if (!autoFollowRef.current) {
+              lastContentHeightRef.current = h
+              return
+            }
+            // Ignore tiny layout thrash once we're already pinned.
+            if (Math.abs(h - lastContentHeightRef.current) < 2) return
+            lastContentHeightRef.current = h
+            scrollToLatest(false)
           }}
           onScroll={({ nativeEvent }) => {
-            const distance =
-              nativeEvent.contentSize.height -
-              (nativeEvent.contentOffset.y + nativeEvent.layoutMeasurement.height)
-            autoFollowRef.current = distance < 140
+            const { contentOffset, layoutMeasurement, contentSize } = nativeEvent
+            updateFollowFromOffset(contentOffset.y, layoutMeasurement.height, contentSize.height)
           }}
-          scrollEventThrottle={32}
+          onScrollBeginDrag={() => {
+            draggingRef.current = true
+          }}
+          onScrollEndDrag={({ nativeEvent }) => {
+            draggingRef.current = false
+            const { contentOffset, layoutMeasurement, contentSize } = nativeEvent
+            updateFollowFromOffset(contentOffset.y, layoutMeasurement.height, contentSize.height)
+          }}
+          onMomentumScrollEnd={({ nativeEvent }) => {
+            draggingRef.current = false
+            const { contentOffset, layoutMeasurement, contentSize } = nativeEvent
+            updateFollowFromOffset(contentOffset.y, layoutMeasurement.height, contentSize.height)
+          }}
+          scrollEventThrottle={16}
           ListEmptyComponent={
             <View style={styles.empty}>
               <Text allowFontScaling={false} style={styles.emptyGlyph}>◇</Text>

@@ -25,8 +25,9 @@ import {
   buildPersonalityPromptBlock,
   buildPersonalityReminder,
   completionTokenBudget,
+  extractPersonalityVoiceCommand,
   normalizePersonality,
-  parsePersonalityVoiceCommand,
+  PERSONALITY_META,
   personalityAdjustReply
 } from '../../shared/personality'
 import { isEndVoiceCommand } from '../../shared/voiceCommands'
@@ -227,7 +228,7 @@ export async function runChatTurn(
   payload: string | ChatSendPayload,
   win: BrowserWindow | null
 ): Promise<ChatMessage> {
-  const text =
+  let text =
     typeof payload === 'string' ? payload.trim() : String(payload?.text ?? '').trim()
   const imagePayloads = typeof payload === 'string' ? undefined : payload?.images
   const images = await persistChatImages(imagePayloads)
@@ -255,22 +256,42 @@ export async function runChatTurn(
     return assistantMessage
   }
 
-  // Personality dials — apply in the app layer so the model can't fake a change
+  // Personality dials — apply in the app layer so the model can't fake a change.
+  // Compound asks (“…and also tune humor to 70%”) apply the dial, then continue
+  // with the remaining request under a system note that the dial already moved.
+  let dialAppliedNote = ''
   if (text && !images.length) {
-    const personalityAdj = parsePersonalityVoiceCommand(text)
-    if (personalityAdj) {
-      const nextPersonality = applyPersonalityAdjust(
-        getSettings().personality,
-        personalityAdj
-      )
+    const extracted = extractPersonalityVoiceCommand(text)
+    if (extracted) {
+      const previousPersonality = normalizePersonality(getSettings().personality)
+      const nextPersonality = applyPersonalityAdjust(previousPersonality, extracted.adj)
       const nextSettings = setSettings({ personality: nextPersonality })
-      const content = personalityAdjustReply(personalityAdj, nextPersonality)
-      const assistantMessage = addMessage({ role: 'assistant', content })
       emit(win, { type: 'settings', settings: nextSettings })
-      emit(win, { type: 'token', content })
-      emit(win, { type: 'message', message: assistantMessage })
-      emit(win, { type: 'done' })
-      return assistantMessage
+      const confirm = personalityAdjustReply(
+        extracted.adj,
+        nextPersonality,
+        previousPersonality
+      )
+
+      if (!extracted.remainder) {
+        const assistantMessage = addMessage({ role: 'assistant', content: confirm })
+        emit(win, { type: 'token', content: confirm })
+        emit(win, { type: 'message', message: assistantMessage })
+        emit(win, { type: 'done' })
+        return assistantMessage
+      }
+
+      const label = PERSONALITY_META[extracted.adj.key].label
+      const alias = extracted.adj.key === 'sarcasm' ? ' (humor)' : ''
+      dialAppliedNote = `\n\n=== DIAL ALREADY APPLIED (THIS TURN) ===
+App layer set ${label}${alias} from ${previousPersonality[extracted.adj.key]} to ${nextPersonality[extracted.adj.key]}.
+Confirm briefly if useful (${JSON.stringify(confirm)}). Answer the remaining ask below.
+Do NOT invent dial math ("X% more/less…"). Do NOT claim other dials changed.
+Remaining ask: ${extracted.remainder}
+=== END DIAL ===`
+      // Route / recall / reply against the non-dial portion
+      // (full utterance stays in chat history as Kai said it).
+      text = extracted.remainder
     }
   }
 
@@ -375,6 +396,7 @@ ${images.length ? 'Kai attached image(s) in this message — look at them and re
     modeBlock +
     surfaceBlock +
     routingNote +
+    dialAppliedNote +
     personalityTail
 
   // Soft prompts get ignored by QUICK models — max_tokens must track the dial.

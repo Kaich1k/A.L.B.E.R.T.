@@ -918,7 +918,7 @@ export class ClaudeVoiceSession {
           const updated = await window.albert.setSettings({ personality: next })
           if (!current()) return
           useAlbertStore.getState().setSettings(updated)
-          const reply = personalityAdjustReply(personalityAdj, next)
+          const reply = personalityAdjustReply(personalityAdj, next, currentPersonality)
           this.onTranscript('assistant', reply)
           await this.speakDirect(reply)
           return
