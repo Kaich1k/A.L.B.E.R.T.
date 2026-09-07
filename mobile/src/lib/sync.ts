@@ -74,6 +74,55 @@ export function syncPayloadBytes(payload: SyncPayloadBatch): number {
   return utf8ByteLength(JSON.stringify(payload))
 }
 
+/** Desktop sanitizeMessages caps content at 80k and drops image blobs. */
+const SYNC_MESSAGE_CONTENT_MAX_CHARS = 80_000
+const SYNC_MEMORY_CONTENT_MAX_CHARS = 20_000
+const SYNC_TEXT_FIELD_MAX_CHARS = 8_000
+
+function truncateForSync(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text
+  const marker = '\n…[truncated for sync]'
+  return `${text.slice(0, Math.max(0, maxChars - marker.length))}${marker}`
+}
+
+/**
+ * Prepare a chat message for the Mac uplink. The companion never persists phone
+ * image bytes, so shipping multi‑MB dataUrls only blows the 2 MiB body ceiling
+ * and wedges the whole queue.
+ */
+export function slimMessageForSync(message: ChatMessage): ChatMessage {
+  const images = message.images?.length
+    ? message.images.map(({ dataUrl: _drop, ...rest }) => rest)
+    : undefined
+  return {
+    ...message,
+    content: truncateForSync(String(message.content || ''), SYNC_MESSAGE_CONTENT_MAX_CHARS),
+    error: message.error ? truncateForSync(message.error, 2_000) : message.error,
+    images: images?.length ? images : undefined
+  }
+}
+
+function slimMemoryForSync(memory: MemoryFact): MemoryFact {
+  return {
+    ...memory,
+    content: truncateForSync(String(memory.content || ''), SYNC_MEMORY_CONTENT_MAX_CHARS)
+  }
+}
+
+function slimMissionFragmentForSync(
+  mission: OperationsSnapshot['missions'][number]
+): OperationsSnapshot['missions'][number] {
+  return {
+    ...mission,
+    title: truncateForSync(String(mission.title || ''), SYNC_TEXT_FIELD_MAX_CHARS),
+    outcome: truncateForSync(String(mission.outcome || ''), SYNC_TEXT_FIELD_MAX_CHARS),
+    steps: (mission.steps || []).map((step) => ({
+      ...step,
+      title: truncateForSync(String(step.title || ''), SYNC_TEXT_FIELD_MAX_CHARS)
+    }))
+  }
+}
+
 function hasBatchContent(payload: SyncPayloadBatch): boolean {
   return Boolean(
     payload.mutationIds?.length ||
@@ -87,16 +136,25 @@ function hasBatchContent(payload: SyncPayloadBatch): boolean {
   )
 }
 
+export type SyncBatchBuildResult = {
+  batches: SyncPayloadBatch[]
+  /** Entities that still could not fit alone after slimming — skipped so the queue can move. */
+  skipped: string[]
+}
+
 /**
  * Build deletion-first, bounded sync requests. A mission is repeated in small
  * fragments when necessary so even unusually detailed step histories stay
  * below the desktop's request limit without dropping a step.
+ *
+ * Oversized chat photos are stubbed (no dataUrl). Anything still too large after
+ * truncation is skipped instead of failing the entire uplink.
  */
 export function buildSyncPayloadBatches(
   data: LocalData,
   deviceId: string,
   maxBytes = SYNC_REQUEST_MAX_BYTES
-): SyncPayloadBatch[] {
+): SyncBatchBuildResult {
   if (!deviceId.trim()) throw new MacSyncError('A stable device identity is required for sync', 0, 'protocol')
   if (!Number.isFinite(maxBytes) || maxBytes < 1_024) {
     throw new MacSyncError('Sync request limit is invalid', 0, 'protocol')
@@ -107,6 +165,7 @@ export function buildSyncPayloadBatches(
     deviceId
   })
   const batches: SyncPayloadBatch[] = []
+  const skipped: string[] = []
   let current = base()
 
   const commit = (): void => {
@@ -123,11 +182,9 @@ export function buildSyncPayloadBatches(
       candidate = createCandidate(current)
     }
     if (syncPayloadBytes(candidate) > maxBytes) {
-      throw new MacSyncError(
-        `${description} is too large to synchronize safely; shorten its content and retry`,
-        0,
-        'protocol'
-      )
+      // Never wedge the whole queue on one pathological row.
+      skipped.push(description)
+      return
     }
     current = candidate
   }
@@ -173,15 +230,19 @@ export function buildSyncPayloadBatches(
     appendTopLevel('tombstones', tombstone, `Deletion record ${tombstone.entityId}`)
   }
   for (const message of data.messages) {
-    appendTopLevel('messages', message, `Message ${message.id}`)
+    appendTopLevel('messages', slimMessageForSync(message), `Message ${message.id}`)
   }
   for (const memory of data.memories) {
-    appendTopLevel('memories', memory, `Memory ${memory.id}`)
+    appendTopLevel('memories', slimMemoryForSync(memory), `Memory ${memory.id}`)
   }
   for (const mission of data.operations.missions) {
     const steps = Array.isArray(mission.steps) ? mission.steps : []
     if (!steps.length) {
-      appendOperation('missions', { ...mission, steps: [] }, `Mission ${mission.id}`)
+      appendOperation(
+        'missions',
+        slimMissionFragmentForSync({ ...mission, steps: [] }),
+        `Mission ${mission.id}`
+      )
       continue
     }
     // A server-accepted step can contain ~42 KB of text; 20-step fragments
@@ -189,22 +250,39 @@ export function buildSyncPayloadBatches(
     for (let offset = 0; offset < steps.length; offset += 20) {
       appendOperation(
         'missions',
-        { ...mission, steps: steps.slice(offset, offset + 20) },
+        slimMissionFragmentForSync({ ...mission, steps: steps.slice(offset, offset + 20) }),
         `Mission ${mission.id}`
       )
     }
   }
   for (const routine of data.operations.routines) {
-    appendOperation('routines', routine, `Routine ${routine.id}`)
+    appendOperation('routines', {
+      ...routine,
+      name: truncateForSync(String(routine.name || ''), SYNC_TEXT_FIELD_MAX_CHARS),
+      prompt: truncateForSync(String(routine.prompt || ''), SYNC_TEXT_FIELD_MAX_CHARS)
+    }, `Routine ${routine.id}`)
   }
   for (const approval of data.operations.approvals) {
-    appendOperation('approvals', approval, `Approval ${approval.id}`)
+    appendOperation('approvals', {
+      ...approval,
+      title: truncateForSync(String(approval.title || ''), SYNC_TEXT_FIELD_MAX_CHARS),
+      description: truncateForSync(String(approval.description || ''), SYNC_TEXT_FIELD_MAX_CHARS),
+      preview: approval.preview
+        ? truncateForSync(approval.preview, SYNC_TEXT_FIELD_MAX_CHARS)
+        : approval.preview
+    }, `Approval ${approval.id}`)
   }
   for (const capture of data.operations.captures) {
-    appendOperation('captures', capture, `Capture ${capture.id}`)
+    appendOperation('captures', {
+      ...capture,
+      content: truncateForSync(String(capture.content || ''), SYNC_MEMORY_CONTENT_MAX_CHARS)
+    }, `Capture ${capture.id}`)
   }
   commit()
-  return batches.length ? batches : [base()]
+  return {
+    batches: batches.length ? batches : [base()],
+    skipped
+  }
 }
 
 export type MacHealth = {
@@ -377,7 +455,7 @@ export async function syncAllWithMac(opts: {
     throw new MacSyncError('Enroll this phone under Systems → Mac Link first', 0, 'auth')
   }
   const sentOutbox = [...data.sync.outbox]
-  const batches = buildSyncPayloadBatches(data, config.deviceId)
+  const { batches, skipped } = buildSyncPayloadBatches(data, config.deviceId)
   const acknowledgedMutationIds = new Set<string>()
   const tombstones = new Map<string, SyncTombstone>()
   let finalResponse: SyncResponse | null = null
@@ -408,11 +486,21 @@ export async function syncAllWithMac(opts: {
   }
 
   if (!finalResponse) throw new MacSyncError('Mac sync produced no response', 0, 'protocol')
-  return mergeSyncedData(opts.getLatestData?.() || data, {
+  const merged = mergeSyncedData(opts.getLatestData?.() || data, {
     ...finalResponse,
     acknowledgedMutationIds: [...acknowledgedMutationIds],
     tombstones: [...tombstones.values()]
   }, sentOutbox)
+  if (!skipped.length) return merged
+  return {
+    ...merged,
+    sync: {
+      ...merged.sync,
+      lastError: skipped.length === 1
+        ? `${skipped[0]} was too large even after trimming; left on phone only`
+        : `${skipped.length} items were too large even after trimming; left on phone only`
+    }
+  }
 }
 
 export async function revokeThisDevice(config: CompanionConfig): Promise<void> {

@@ -334,16 +334,22 @@ export default function App(): React.JSX.Element {
               ...merged.sync,
               remoteName: remoteName || merged.sync.remoteName || 'A.L.B.E.R.T. Mac',
               protocolVersion: merged.sync.protocolVersion || 2,
-              lastError: undefined,
+              // Preserve soft skip notes (oversized items left on phone only).
+              lastError: merged.sync.lastError,
               consecutiveFailures: 0
             }
           }
           commitData(next)
           setLinkState('authenticated')
+          setLinkError(null)
           setSyncNote(
             `Synchronized · ${next.messages.length} messages · ${next.memories.length} memories · ${next.sync.outbox.length} queued`
           )
-          if (!quiet) showToast('Mac and phone are synchronized.', 'ok')
+          if (merged.sync.lastError) {
+            showToast(merged.sync.lastError, 'warn')
+          } else if (!quiet) {
+            showToast('Mac and phone are synchronized.', 'ok')
+          }
           return next
         } catch (error) {
           let text = messageFor(error)

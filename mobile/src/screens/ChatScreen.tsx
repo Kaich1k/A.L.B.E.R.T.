@@ -96,11 +96,12 @@ export function ChatScreen({
   onOpenSystems
 }: ChatScreenProps): React.JSX.Element {
   const listRef = useRef<FlatList<ChatMessage>>(null)
-  const autoFollowRef = useRef(true)
-  const draggingRef = useRef(false)
-  const scrollRafRef = useRef<number | null>(null)
-  const lastContentHeightRef = useRef(0)
-  const prevMessageCountRef = useRef(0)
+  const pendingInitialScrollRef = useRef(true)
+  const pendingReplyScrollRef = useRef(false)
+  const lastHandledAssistantIdRef = useRef<string | null>(null)
+  const initialStableTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const replyStableTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const initialScrollIndexRef = useRef<number | undefined>(undefined)
   const insets = useSafeAreaInsets()
   const { width } = useWindowDimensions()
   const [keyboardLift, setKeyboardLift] = useState(0)
@@ -121,31 +122,6 @@ export function ChatScreen({
                 ? 'warn'
                 : 'neutral'
 
-  const scrollToLatest = (animated = false): void => {
-    if (!autoFollowRef.current || draggingRef.current) return
-    if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current)
-    scrollRafRef.current = requestAnimationFrame(() => {
-      scrollRafRef.current = null
-      // Instant stick-to-bottom avoids bounce/jitter when already pinned
-      // (especially while streaming tokens grow the list height).
-      listRef.current?.scrollToEnd({ animated })
-    })
-  }
-
-  const updateFollowFromOffset = (
-    contentOffsetY: number,
-    viewportHeight: number,
-    contentHeight: number
-  ): void => {
-    const distance = contentHeight - (contentOffsetY + viewportHeight)
-    // Hysteresis: easy to unpin while reading up, sticky to re-pin near bottom.
-    if (autoFollowRef.current) {
-      if (distance > 96) autoFollowRef.current = false
-    } else if (distance < 48) {
-      autoFollowRef.current = true
-    }
-  }
-
   const data = streamingText
     ? [
         ...messages,
@@ -159,25 +135,43 @@ export function ChatScreen({
       ]
     : messages
 
-  useEffect(() => {
-    const count = data.length
-    const grew = count > prevMessageCountRef.current
-    prevMessageCountRef.current = count
-    if (!grew) return
-    const last = data[count - 1]
-    // New outbound message or a live stream starting should re-pin to bottom.
-    if (last?.role === 'user' || last?.id === '__streaming__') {
-      autoFollowRef.current = true
+  if (initialScrollIndexRef.current === undefined && data.length > 0) {
+    initialScrollIndexRef.current = data.length - 1
+  }
+
+  const seedHandledAssistant = (): void => {
+    const lastAssistant = [...messages].reverse().find((message) => message.role === 'assistant')
+    lastHandledAssistantIdRef.current = lastAssistant?.id ?? null
+  }
+
+  const scrollToAbsoluteBottom = (animated: boolean): void => {
+    const lastIndex = data.length - 1
+    if (lastIndex < 0) return
+    listRef.current?.scrollToEnd({ animated })
+    // FlatList often hasn't measured the tail yet — also pin the last row.
+    try {
+      listRef.current?.scrollToIndex({ index: lastIndex, animated, viewPosition: 1 })
+    } catch {
+      // onScrollToIndexFailed retries below
     }
-    if (!autoFollowRef.current) return
-    // Animate only when a whole new bubble arrives — not on every stream chunk.
-    scrollToLatest(count > 1)
-  }, [data.length])
+  }
+
+  // Case 2: mark a one-shot scroll when Albert's finished reply lands.
+  useEffect(() => {
+    if (pendingInitialScrollRef.current) return
+    const last = messages[messages.length - 1]
+    if (!last || last.role !== 'assistant') return
+    if (lastHandledAssistantIdRef.current === last.id) return
+    lastHandledAssistantIdRef.current = last.id
+    pendingReplyScrollRef.current = true
+  }, [messages])
 
   useEffect(() => {
-    if (!autoFollowRef.current || keyboardLift <= 0) return
-    scrollToLatest(false)
-  }, [keyboardLift])
+    return () => {
+      if (initialStableTimerRef.current) clearTimeout(initialStableTimerRef.current)
+      if (replyStableTimerRef.current) clearTimeout(replyStableTimerRef.current)
+    }
+  }, [])
 
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow'
@@ -191,7 +185,6 @@ export function ChatScreen({
     return () => {
       showSub.remove()
       hideSub.remove()
-      if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current)
     }
   }, [bottomChromeHeight, insets.bottom])
 
@@ -287,34 +280,51 @@ export function ChatScreen({
           contentContainerStyle={[styles.list, data.length === 0 && styles.listEmpty]}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
-          onContentSizeChange={(_w, h) => {
-            if (!autoFollowRef.current) {
-              lastContentHeightRef.current = h
+          // Start near the latest bubble so open-Comm can actually reach the bottom
+          // (virtualization otherwise only measures the top of a long thread).
+          initialScrollIndex={initialScrollIndexRef.current}
+          initialNumToRender={16}
+          maxToRenderPerBatch={16}
+          windowSize={11}
+          onContentSizeChange={() => {
+            // Case 1: opening Comm — keep pinning to bottom until layout settles.
+            if (pendingInitialScrollRef.current) {
+              if (data.length === 0) {
+                pendingInitialScrollRef.current = false
+                lastHandledAssistantIdRef.current = null
+                return
+              }
+              scrollToAbsoluteBottom(false)
+              if (initialStableTimerRef.current) clearTimeout(initialStableTimerRef.current)
+              initialStableTimerRef.current = setTimeout(() => {
+                pendingInitialScrollRef.current = false
+                seedHandledAssistant()
+                scrollToAbsoluteBottom(false)
+              }, 160)
               return
             }
-            // Ignore tiny layout thrash once we're already pinned.
-            if (Math.abs(h - lastContentHeightRef.current) < 2) return
-            lastContentHeightRef.current = h
-            scrollToLatest(false)
+            // Case 2: Albert's reply — pin to bottom of his bubble until layout settles.
+            if (!pendingReplyScrollRef.current) return
+            scrollToAbsoluteBottom(true)
+            if (replyStableTimerRef.current) clearTimeout(replyStableTimerRef.current)
+            replyStableTimerRef.current = setTimeout(() => {
+              pendingReplyScrollRef.current = false
+              scrollToAbsoluteBottom(true)
+            }, 160)
           }}
-          onScroll={({ nativeEvent }) => {
-            const { contentOffset, layoutMeasurement, contentSize } = nativeEvent
-            updateFollowFromOffset(contentOffset.y, layoutMeasurement.height, contentSize.height)
+          onScrollToIndexFailed={({ index, averageItemLength }) => {
+            listRef.current?.scrollToOffset({
+              offset: Math.max(0, averageItemLength * index),
+              animated: false
+            })
+            requestAnimationFrame(() => {
+              try {
+                listRef.current?.scrollToIndex({ index, animated: false, viewPosition: 1 })
+              } catch {
+                listRef.current?.scrollToEnd({ animated: false })
+              }
+            })
           }}
-          onScrollBeginDrag={() => {
-            draggingRef.current = true
-          }}
-          onScrollEndDrag={({ nativeEvent }) => {
-            draggingRef.current = false
-            const { contentOffset, layoutMeasurement, contentSize } = nativeEvent
-            updateFollowFromOffset(contentOffset.y, layoutMeasurement.height, contentSize.height)
-          }}
-          onMomentumScrollEnd={({ nativeEvent }) => {
-            draggingRef.current = false
-            const { contentOffset, layoutMeasurement, contentSize } = nativeEvent
-            updateFollowFromOffset(contentOffset.y, layoutMeasurement.height, contentSize.height)
-          }}
-          scrollEventThrottle={16}
           ListEmptyComponent={
             <View style={styles.empty}>
               <Text allowFontScaling={false} style={styles.emptyGlyph}>◇</Text>

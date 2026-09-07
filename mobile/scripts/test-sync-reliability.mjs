@@ -10,6 +10,7 @@ import {
 } from '../src/lib/syncLogic.ts'
 import {
   buildSyncPayloadBatches,
+  slimMessageForSync,
   SYNC_SERVER_ARRAY_LIMITS,
   syncAllWithMac,
   syncPayloadBytes
@@ -163,7 +164,7 @@ test('large state is deletion-first, losslessly batched, and always below the by
   }]
 
   const limit = 10_000
-  const batches = buildSyncPayloadBatches(data, 'mobile_test_device', limit)
+  const { batches } = buildSyncPayloadBatches(data, 'mobile_test_device', limit)
   assert.ok(batches.length > 1)
   for (const batch of batches) {
     assert.ok(syncPayloadBytes(batch) <= limit)
@@ -231,7 +232,7 @@ test('batching also respects every desktop per-array sanitization ceiling', () =
     })
   )
 
-  const batches = buildSyncPayloadBatches(data, 'mobile_cap_device', 50_000_000)
+  const { batches } = buildSyncPayloadBatches(data, 'mobile_cap_device', 50_000_000)
   assert.ok(batches.length > 1)
   assert.ok(batches.every((batch) =>
     (batch.mutationIds?.length || 0) <= SYNC_SERVER_ARRAY_LIMITS.mutationIds &&
@@ -365,4 +366,77 @@ test('sync coordinator coalesces overlapping calls', async () => {
   release()
   assert.equal(await first, await second)
   assert.equal(coordinator.inFlight, false)
+})
+
+test('oversized chat photos are stubbed so sync can proceed under the byte ceiling', () => {
+  const hugeBase64 = 'A'.repeat(2_500_000)
+  const data = emptyData()
+  data.messages = [
+    {
+      id: 'phone_mt4gk0a6-1mx4oiih3',
+      role: 'user',
+      content: 'photo from the lab',
+      createdAt: 1,
+      images: [{
+        id: 'img_huge',
+        mediaType: 'image/jpeg',
+        fileName: 'lab.jpg',
+        dataUrl: `data:image/jpeg;base64,${hugeBase64}`
+      }]
+    },
+    {
+      id: 'phone_small_followup',
+      role: 'assistant',
+      content: 'Got it, sir.',
+      createdAt: 2
+    }
+  ]
+  data.sync.outbox = [
+    { id: 'mut_1', entityType: 'chat', entityId: 'phone_mt4gk0a6-1mx4oiih3', action: 'upsert', createdAt: 1 },
+    { id: 'mut_2', entityType: 'chat', entityId: 'phone_small_followup', action: 'upsert', createdAt: 2 }
+  ]
+
+  const slimmed = slimMessageForSync(data.messages[0])
+  assert.equal(slimmed.images?.[0]?.dataUrl, undefined)
+  assert.equal(slimmed.images?.[0]?.fileName, 'lab.jpg')
+
+  const { batches, skipped } = buildSyncPayloadBatches(data, 'mobile_photo_device')
+  assert.equal(skipped.length, 0)
+  assert.ok(batches.length >= 1)
+  for (const batch of batches) {
+    assert.ok(syncPayloadBytes(batch) <= 1_900_000)
+    for (const message of batch.messages || []) {
+      for (const image of message.images || []) {
+        assert.equal(image.dataUrl, undefined)
+      }
+    }
+  }
+  assert.deepEqual(
+    batches.flatMap((batch) => batch.messages || []).map((row) => row.id),
+    data.messages.map((row) => row.id)
+  )
+})
+
+test('pathological solo rows are skipped instead of wedging the queue', () => {
+  const data = emptyData()
+  // Force a row that remains over budget even after message slimming by using a tiny ceiling.
+  data.messages = [{
+    id: 'phone_still_too_big',
+    role: 'user',
+    content: 'x'.repeat(5_000),
+    createdAt: 1
+  }]
+  data.memories = [{
+    id: 'memory_ok',
+    content: 'small',
+    category: 'general',
+    createdAt: 1,
+    updatedAt: 1
+  }]
+  const { batches, skipped } = buildSyncPayloadBatches(data, 'mobile_skip_device', 2_048)
+  assert.ok(skipped.some((row) => row.includes('phone_still_too_big')))
+  assert.deepEqual(
+    batches.flatMap((batch) => batch.memories || []).map((row) => row.id),
+    ['memory_ok']
+  )
 })
