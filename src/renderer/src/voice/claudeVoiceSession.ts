@@ -8,6 +8,15 @@ import {
 import { useAlbertStore } from '../store'
 import { decodeBlobToMono16k, trimSilence } from './audio'
 import { LiveKeywordMonitor } from './liveKeywords'
+import {
+  commandConfident,
+  contentWordCount,
+  createNoiseFloor,
+  endOfUtteranceSilenceMs,
+  shouldTranscribe,
+  speechThresholds,
+  updateNoiseFloor
+} from '../../../shared/voiceGate'
 import { speakText, stopSpeaking, StreamingTtsQueue } from './tts'
 import {
   correctTranscript,
@@ -196,16 +205,19 @@ export class ClaudeVoiceSession {
   private readonly ttsQueue = new StreamingTtsQueue()
   private readonly pollQuietMs = 80
   private readonly pollActiveMs = 40
-  private readonly speechRms = 0.048
-  /** Drop below this to count as silence (hysteresis — stops noise flicker resetting the 3s timer) */
-  private readonly silenceRms = 0.032
-  /** Lower bar while Albert talks — AEC often attenuates the user. */
-  private readonly bargeRms = 0.022
-  /** Need sustained voice so TTS bleed doesn’t false-trigger barge-in */
-  private readonly bargeHoldNeedMs = 140
-  private readonly minSpeechMs = 380
-  /** Pause after user stops talking before we cut the utterance and reply */
-  private readonly silenceToEndMs = 2600
+  /**
+   * Rolling estimate of the room's idle level. Thresholds are derived from this
+   * rather than fixed, because a fan or a warm laptop used to sit permanently
+   * above the old hardcoded speech bar — which is how Albert "heard" things
+   * nobody said and cut himself off mid-sentence.
+   */
+  private noiseFloor = createNoiseFloor()
+  /**
+   * Sustained voice needed before an interruption counts. 140ms was short
+   * enough that a keyboard clack or a door read as speech.
+   */
+  private readonly bargeHoldNeedMs = 400
+  private readonly minSpeechMs = 320
   /**
    * Mic stays hot during TTS / barge so the next request isn’t clipped.
    * While true, we won't endpoint an utterance until Albert finishes speaking.
@@ -230,34 +242,35 @@ export class ClaudeVoiceSession {
     this.onState('connecting')
     this.onStatus('Preparing local speech engine…')
 
-    try {
-      // Warm Whisper + Kokoro in parallel so the first spoken reply isn’t waiting on cold TTS
-      await Promise.all([
-        window.albert.warmVoice(),
-        window.albert.warmKokoro().catch(() => false)
-      ])
-    } catch (err) {
-      if (generation !== this.lifecycleGen) return
-      const message = err instanceof Error ? err.message : String(err)
-      throw new Error(`Could not start speech engine: ${message}`)
-    }
-
-    if (generation !== this.lifecycleGen) return
-
-    let stream: MediaStream
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
+    // Ask for the mic while Whisper starts. These were sequential before, so
+    // voice could not enter Listening until both startup delays had elapsed.
+    const voiceWarm = window.albert.warmVoice()
+    void window.albert.warmKokoro().catch(() => false)
+    const microphone = navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           channelCount: 1
         }
       })
-    } catch {
-      if (generation !== this.lifecycleGen) return
+
+    const [warmResult, microphoneResult] = await Promise.allSettled([voiceWarm, microphone])
+    if (generation !== this.lifecycleGen) {
+      if (microphoneResult.status === 'fulfilled') {
+        microphoneResult.value.getTracks().forEach((track) => track.stop())
+      }
+      return
+    }
+    if (microphoneResult.status === 'rejected') {
       throw new Error(
         'Microphone access denied. Allow mic for A.L.B.E.R.T. in System Settings → Privacy & Security → Microphone.'
       )
+    }
+    const stream = microphoneResult.value
+    if (warmResult.status === 'rejected') {
+      stream.getTracks().forEach((track) => track.stop())
+      const message = warmResult.reason instanceof Error ? warmResult.reason.message : String(warmResult.reason)
+      throw new Error(`Could not start speech engine: ${message}`)
     }
 
     if (generation !== this.lifecycleGen) {
@@ -554,6 +567,9 @@ export class ClaudeVoiceSession {
       this.onStatus('Standing by…')
       this.muted = true
       stopSpeaking()
+      // A Codex turn keeps running in main after voice stops — stand down means
+      // stop working, not just stop talking.
+      void window.albert.interruptCodex().catch(() => undefined)
       this.ttsQueue.reset({ shouldCancel: () => true })
       try {
         await this.speakDirect('Standing by, sir.', { allowMuted: true })
@@ -762,14 +778,29 @@ export class ClaudeVoiceSession {
       sum += v * v
     }
     const rms = Math.sqrt(sum / this.levelBuffer.length)
-    // While Albert talks, count quieter user speech (AEC attenuates barge audio).
-    const speakingNow = this.speaking ? rms > this.bargeRms : rms > this.speechRms
-    const silentNow = rms < this.silenceRms
-    const bargeNow = rms > this.bargeRms
+
+    const settings = useAlbertStore.getState().settings
+    const preliminaryThresholds = speechThresholds(this.noiseFloor, settings.micSensitivity)
+    // Capture begins immediately, so `!recording` is never true in this loop.
+    // Learn likely-idle frames before speech starts without learning Kai's voice.
+    if (
+      !this.speaking &&
+      this.spokeMs === 0 &&
+      rms < preliminaryThresholds.speech * 0.82
+    ) {
+      this.noiseFloor = updateNoiseFloor(this.noiseFloor, rms)
+    } else if (!this.speaking && rms < this.noiseFloor.value) {
+      this.noiseFloor = updateNoiseFloor(this.noiseFloor, rms)
+    }
+
+    const thresholds = speechThresholds(this.noiseFloor, settings.micSensitivity)
+    const speakingNow = this.speaking ? rms > thresholds.barge : rms > thresholds.speech
+    const silentNow = rms < thresholds.silence
+    const bargeNow = rms > thresholds.barge
     const tickMs =
       speakingNow || this.speaking ? this.pollActiveMs : this.pollQuietMs
 
-    const allowBargeIn = useAlbertStore.getState().settings.allowBargeIn !== false
+    const allowBargeIn = settings.allowBargeIn !== false
     // Barge-in only while Albert is actually playing audio — NOT during Thinking.
     if (this.speaking && allowBargeIn && !this.muted) {
       if (bargeNow) {
@@ -796,7 +827,8 @@ export class ClaudeVoiceSession {
       }
 
       const quietLongEnough =
-        this.lastSpeechAt > 0 && Date.now() - this.lastSpeechAt >= this.silenceToEndMs
+        this.lastSpeechAt > 0 &&
+        Date.now() - this.lastSpeechAt >= endOfUtteranceSilenceMs(this.spokeMs)
 
       // Never cut while the previous turn is still busy/speaking — processRecording
       // early-returns when busy and would drop the blob on the floor.
@@ -808,11 +840,6 @@ export class ClaudeVoiceSession {
         return
       }
 
-      if (canEndpoint && this.spokeMs > 14000) {
-        this.hotMic = false
-        this.finishUtterance()
-        return
-      }
     }
 
     this.timerId = window.setTimeout(() => this.monitorLevels(), tickMs)
@@ -857,13 +884,15 @@ export class ClaudeVoiceSession {
       // Softer trim + longer pad — aggressive silence trim was eating leading words.
       const audio = trimSilence(await decodeBlobToMono16k(blob), 16_000, 0.006, 320)
       if (!current()) return
-      // Room tone / HVAC often yields tiny peaks that Whisper turns into "you"/"the"
-      let peak = 0
-      for (let i = 0; i < audio.length; i++) {
-        const a = Math.abs(audio[i]!)
-        if (a > peak) peak = a
-      }
-      if (audio.length < 3200 || peak < 0.02) {
+      // Room tone, HVAC and keyboard clicks used to reach Whisper, which turns
+      // them into "you" / "the" / "thank you". Require the buffer to be loud
+      // relative to this room AND mostly voiced before spending a pass on it.
+      const gate = shouldTranscribe({
+        samples: audio,
+        floor: this.noiseFloor,
+        sensitivity: useAlbertStore.getState().settings.micSensitivity
+      })
+      if (!gate.ok) {
         this.onStatus('Listening — mute / hide / show / standby work anytime')
         return
       }
@@ -876,14 +905,26 @@ export class ClaudeVoiceSession {
         return
       }
 
+      const words = contentWordCount(text)
+      // Marginal audio that produced nothing but filler is noise, not an ask.
+      if (gate.voicedRatio < 0.32 && words < 1) {
+        this.onStatus('Listening — mute / hide / show / standby work anytime')
+        return
+      }
+
       this.onTranscript('user', text)
 
-      if (isMuteCommand(text) || isMuteCommand(raw)) {
+      // Session-changing commands need a confidently voiced utterance behind
+      // them — a noise crumb that Whisper renders as "standby" must not end
+      // the session.
+      const confident = commandConfident(gate.voicedRatio, words)
+
+      if (confident && (isMuteCommand(text) || isMuteCommand(raw))) {
         this.muteNow()
         return
       }
 
-      if (isHideCommand(text) || isHideCommand(raw)) {
+      if (confident && (isHideCommand(text) || isHideCommand(raw))) {
         await window.albert.hideWindow()
         if (!current()) return
         this.onStatus('Window minimized')
@@ -891,14 +932,14 @@ export class ClaudeVoiceSession {
         return
       }
 
-      if (isShowCommand(text) || isShowCommand(raw)) {
+      if (confident && (isShowCommand(text) || isShowCommand(raw))) {
         await window.albert.showWindow()
         if (!current()) return
         this.onStatus('Window shown')
         return
       }
 
-      if (isEndVoiceCommand(text) || isEndVoiceCommand(raw)) {
+      if (confident && (isEndVoiceCommand(text) || isEndVoiceCommand(raw))) {
         await this.engageStandbyFromLive()
         return
       }
@@ -964,7 +1005,8 @@ export class ClaudeVoiceSession {
             this.onState('listening')
             // User may have finished during TTS — endpoint now that busy cleared.
             const quietLongEnough =
-              this.lastSpeechAt > 0 && Date.now() - this.lastSpeechAt >= this.silenceToEndMs
+              this.lastSpeechAt > 0 &&
+              Date.now() - this.lastSpeechAt >= endOfUtteranceSilenceMs(this.spokeMs)
             if (this.spokeMs > this.minSpeechMs && quietLongEnough) {
               this.finishUtterance()
             } else if (!this.timerId) {

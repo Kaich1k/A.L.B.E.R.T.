@@ -42,7 +42,7 @@ export interface ChatMessage {
   images?: ChatImageRef[]
 }
 
-export type LlmProvider = 'auto' | 'anthropic' | 'groq' | 'gemini'
+export type LlmProvider = 'auto' | 'anthropic' | 'groq' | 'gemini' | 'mac'
 
 export interface PersonalityScales {
   sarcasm: number

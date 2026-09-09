@@ -7,6 +7,9 @@ import { computerTools } from './computer'
 import { desktopTools } from './desktop'
 import { fileTools } from './files'
 import { memoryTools } from './memory'
+import { contextTools } from './context'
+import { cursorTools } from './cursor'
+import { lifecycleTools } from './lifecycle'
 import { operationsTools } from './operations'
 import { projectTools } from './project'
 import { shellTools } from './shell'
@@ -20,6 +23,11 @@ import {
   type ToolDefinition,
   type ToolResult
 } from './types'
+import { takeoverSelfLifecycleCommand } from '../appLifecycle'
+import { blockedLiveWrite } from '../cursor/selfEdit'
+import { guideHudForTool, reportHudRuntime } from '../hud/miniHud'
+import { pushTheaterEvent } from '../theater/bus'
+import { QUICK_TOOL_DENY } from './quickPolicy'
 
 const allTools: ToolDefinition[] = [
   ...appTools,
@@ -33,7 +41,10 @@ const allTools: ToolDefinition[] = [
   ...desktopTools,
   ...systemTools,
   ...memoryTools,
-  ...operationsTools
+  ...operationsTools,
+  ...contextTools,
+  ...cursorTools,
+  ...lifecycleTools
 ]
 
 const byName = new Map(allTools.map((t) => [t.name, t]))
@@ -46,36 +57,21 @@ export function getOpenAIToolSchemas() {
   return toOpenAITools(allTools)
 }
 
-/** Smaller tool surface for Ollama — full schemas often 500 on cloud. */
-const OLLAMA_TOOL_NAMES = new Set([
-  'open_app',
-  'list_running_apps',
-  'spotify_control',
-  'get_datetime',
-  'remember',
-  'recall',
-  'forget',
-  'desktop_screenshot',
-  'desktop_click',
-  'desktop_type_text',
-  'desktop_hotkey',
-  'desktop_frontmost_app',
-  'browser_open_url',
-  'browser_list_tabs',
-  'computer_open_tab',
-  'computer_youtube',
-  'computer_navigate',
-  'computer_list_tabs',
-  'computer_focus_tab',
-  'computer_get_page',
-  'web_search',
-  'web_fetch',
-  'read_clipboard',
-  'write_clipboard'
-])
-
+/**
+ * Tools the QUICK tier must never reach: arbitrary shell and AppleScript.
+ *
+ * Everything else is now exposed to the QUICK providers, including project and
+ * file editing — the old allowlist left Gemini unable to read a file, which
+ * meant even trivial project questions escalated. Shell-class tools stay behind
+ * Codex and Anthropic, which have the reasoning to use them safely.
+ */
 export function getOpenAIToolSchemasForOllama() {
-  return toOpenAITools(allTools.filter((t) => OLLAMA_TOOL_NAMES.has(t.name)))
+  return toOpenAITools(allTools.filter((t) => !QUICK_TOOL_DENY.has(t.name)))
+}
+
+/** Names the QUICK tier may call — exported so tests can assert the gap closed. */
+export function getQuickToolNames(): string[] {
+  return allTools.filter((t) => !QUICK_TOOL_DENY.has(t.name)).map((t) => t.name)
 }
 
 export function getRealtimeToolSchemas() {
@@ -125,6 +121,13 @@ export async function executeTool(
   }
 
   const settings = getSettings()
+  if (name === 'run_shell' || name === 'run_project_command') {
+    const taken = takeoverSelfLifecycleCommand(String(args?.command ?? ''))
+    if (taken) {
+      logActivity({ toolName: name, args: args ?? {}, result: taken.result, ok: taken.ok })
+      return { ...taken, logged: true }
+    }
+  }
   if (tool.dangerous && settings.confirmDangerousTools && !options?.confirmed) {
     const allowed = await confirmDangerous(name, args ?? {})
     if (!allowed) {
@@ -137,20 +140,50 @@ export async function executeTool(
     }
   }
 
+  const liveBlock = blockedLiveWrite(name, args ?? {})
+  if (liveBlock) {
+    const result = { ok: false, result: liveBlock }
+    logActivity({ toolName: name, args: args ?? {}, result: liveBlock, ok: false })
+    return { ...result, logged: true }
+  }
+
+  reportHudRuntime({ busy: true, tool: name })
+  await guideHudForTool(name, args ?? {})
+
+  const start = pushTheaterEvent({
+    toolName: name,
+    argsPreview: JSON.stringify(args ?? {}).slice(0, 180),
+    phase: 'start'
+  })
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('albert:chat:event', { type: 'theater', theater: start })
+  }
+
   try {
     const result = await tool.execute(args ?? {})
-    // Always log writes/execs with full result prefix for Activity panel audit
     logActivity({
       toolName: name,
       args: args ?? {},
       result: result.result,
       ok: result.ok
     })
+    const end = pushTheaterEvent({
+      toolName: name,
+      argsPreview: start.argsPreview,
+      resultPreview: result.result,
+      ok: result.ok,
+      phase: 'end'
+    })
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('albert:chat:event', { type: 'theater', theater: end })
+    }
+    reportHudRuntime({ tool: '' })
     return { ...result, logged: true }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     const result = { ok: false, result: message }
     logActivity({ toolName: name, args: args ?? {}, result: message, ok: false })
+    reportHudRuntime({ tool: '' })
     return { ...result, logged: true }
   }
 }

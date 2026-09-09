@@ -10,6 +10,9 @@ import { closeDb, getDb } from './memory/db'
 import { getSettings } from './config'
 import { applyCompanionSettings, stopCompanionServer } from './companion/server'
 import { startOperationsScheduler, stopOperationsScheduler } from './operations/scheduler'
+import { connectCodex, shutdownCodex } from './codex/service'
+import { syncAmbientHudFromSettings } from './hud/miniHud'
+import { resumeLiveHmr } from './cursor/hmrPause'
 
 // Load OPENAI_API_KEY from env if present
 if (process.env.OPENAI_API_KEY) {
@@ -70,6 +73,17 @@ function createWindow(): void {
   mainWindow.on('closed', () => {
     mainWindow = null
   })
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[albert] renderer gone', details.reason, details.exitCode)
+    if (details.reason === 'clean-exit') return
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    if (process.env.ELECTRON_RENDERER_URL) {
+      void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+    } else {
+      void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    }
+  })
 }
 
 function toggleWindow(): void {
@@ -85,9 +99,22 @@ function toggleWindow(): void {
   }
 }
 
+process.on('uncaughtException', (err) => {
+  console.error('[albert] uncaughtException', err)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('[albert] unhandledRejection', reason)
+})
+
 app.whenReady().then(() => {
   getDb()
-  registerIpcHandlers(() => mainWindow)
+  registerIpcHandlers(
+    () => mainWindow,
+    () => {
+      if (!mainWindow || mainWindow.isDestroyed()) createWindow()
+      return mainWindow
+    }
+  )
   // Do NOT load Kokoro/Whisper/onnxruntime in this process — it SIGTRAP/SIGSEGVs Electron.
   // Both run in child Node processes (ELECTRON_RUN_AS_NODE) on first use.
 
@@ -98,6 +125,7 @@ app.whenReady().then(() => {
 
   createWindow()
   startOperationsScheduler(() => mainWindow)
+  resumeLiveHmr(true)
 
   globalShortcut.register('CommandOrControl+Shift+A', () => {
     toggleWindow()
@@ -109,14 +137,21 @@ app.whenReady().then(() => {
     console.error('Companion server failed to start', err)
   })
 
+  // Warm the Codex bridge so Systems already shows sign-in / allowance.
+  void connectCodex().catch((err) => {
+    console.error('Codex bridge failed to start', err)
+  })
+  syncAmbientHudFromSettings()
+
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
-    else mainWindow?.show()
+    if (!mainWindow || mainWindow.isDestroyed()) createWindow()
+    else mainWindow.show()
   })
 })
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
+  shutdownCodex()
   void stopCompanionServer()
   stopOperationsScheduler()
   closeDb()

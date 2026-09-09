@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { APP_EXPANSION, APP_NAME } from '../../../shared/brand'
+import { brainChoice, brainDisplayName, hasTalkableBrain } from '../../../shared/brainRouting'
 import type { OperationsSnapshot } from '../../../shared/types'
 import { useAlbertStore } from '../store'
 import { AlbertCore } from './AlbertCore'
@@ -17,15 +18,7 @@ function brainLabel(settings: {
   routingMode?: string
   localProvider?: string
 }): string {
-  const mode = settings.routingMode || 'auto'
-  if (mode === 'local') {
-    if (settings.localProvider === 'groq') return 'QUICK·GROQ CLOUD'
-    if (settings.localProvider === 'gemini') return 'QUICK·GEMINI'
-    return 'QUICK·OLLAMA'
-  }
-  if (mode === 'fast') return 'HAIKU'
-  if (mode === 'power') return 'OPUS'
-  return 'AUTO'
+  return brainDisplayName(brainChoice(settings)).toUpperCase()
 }
 
 function ttsLabel(provider?: string): string {
@@ -45,13 +38,8 @@ export function HomePanel({ onTalk }: Props): React.JSX.Element {
   const setMemories = useAlbertStore((s) => s.setMemories)
   const routeInfo = useAlbertStore((s) => s.routeInfo)
   const activity = useAlbertStore((s) => s.activity)
-  const hasBrain = Boolean(
-    settings.anthropicApiKey?.trim() ||
-      settings.ollamaApiKey?.trim() ||
-      settings.groqApiKey?.trim() ||
-      settings.geminiApiKey?.trim() ||
-      settings.localProvider === 'ollama'
-  )
+  const hasBrain = hasTalkableBrain(settings)
+  const codexStatus = useAlbertStore((s) => s.codexStatus)
   const wakeOn = settings.wakeWordEnabled !== false
   const [clock, setClock] = useState(() => formatHudClock(new Date()))
   const [operations, setOperations] = useState<OperationsSnapshot | null>(null)
@@ -93,8 +81,8 @@ export function HomePanel({ onTalk }: Props): React.JSX.Element {
           <span className="jarvis-version">v0.1.0</span>
         </div>
         <div className="jarvis-top-status">
-          <span className={`jarvis-uplink ${hasBrain ? 'ok' : 'off'}`}>
-            {hasBrain ? 'ROUTER_CONFIGURED' : 'ROUTER_OFFLINE'}
+          <span className={`jarvis-uplink ${codexStatus?.signedIn || hasBrain ? 'ok' : 'off'}`}>
+            {codexStatus?.signedIn ? 'CHATGPT_ONLINE' : hasBrain ? 'FALLBACK_READY' : 'CHATGPT_OFFLINE'}
           </span>
           <span className="jarvis-clock">{clock}</span>
         </div>
@@ -128,7 +116,14 @@ export function HomePanel({ onTalk }: Props): React.JSX.Element {
       <div className="jarvis-brand-block">
         <h1 className="hero-brand">{APP_NAME}</h1>
         <p className="hero-expansion">{APP_EXPANSION}</p>
-        <p className="jarvis-greeting">{greeting} {hasBrain ? 'Cognitive routing is configured and standing by.' : 'The core is awaiting a brain connection.'}</p>
+        <p className="jarvis-greeting">
+          {greeting}{' '}
+          {codexStatus?.signedIn
+            ? 'ChatGPT is the brain and standing by.'
+            : hasBrain
+              ? 'ChatGPT is not signed in — Gemini or Opus can cover until you sign in.'
+              : 'Sign in to ChatGPT under Systems to come online.'}
+        </p>
         {routeInfo ? <p className="jarvis-route-chip">{routeInfo}</p> : null}
       </div>
 
@@ -200,7 +195,7 @@ export function HomePanel({ onTalk }: Props): React.JSX.Element {
           }`}
         />
         {!hasBrain
-          ? 'Add Anthropic, Groq, or Ollama key in Systems'
+          ? 'Sign in to ChatGPT in Systems'
           : voiceState !== 'idle'
             ? `Voice · ${voiceState}`
             : wakeOn && wakeArmed

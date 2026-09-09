@@ -101,6 +101,32 @@ function migrate(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_companion_mutations_applied ON companion_mutations(applied_at);
     CREATE INDEX IF NOT EXISTS idx_sync_tombstones_deleted ON sync_tombstones(deleted_at);
+
+    CREATE TABLE IF NOT EXISTS context_capsules (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      panel TEXT NOT NULL DEFAULT 'conversation',
+      mission_id TEXT,
+      mission_title TEXT,
+      project_folder TEXT,
+      tabs_json TEXT NOT NULL DEFAULT '[]',
+      apps_json TEXT NOT NULL DEFAULT '[]',
+      created_at INTEGER NOT NULL,
+      last_restored_at INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS mission_artifacts (
+      id TEXT PRIMARY KEY,
+      mission_id TEXT,
+      kind TEXT NOT NULL DEFAULT 'note',
+      title TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT 'session',
+      version INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_artifacts_title ON mission_artifacts(title, version);
   `)
 
   const cols = database.prepare(`PRAGMA table_info(messages)`).all() as Array<{ name: string }>
@@ -118,6 +144,9 @@ function migrate(database: Database.Database): void {
   if (!approvalCols.some((c) => c.name === 'updated_at')) {
     database.exec(`ALTER TABLE approvals ADD COLUMN updated_at INTEGER`)
     database.exec(`UPDATE approvals SET updated_at = COALESCE(resolved_at, created_at) WHERE updated_at IS NULL`)
+  }
+  if (!approvalCols.some((c) => c.name === 'kind')) {
+    database.exec(`ALTER TABLE approvals ADD COLUMN kind TEXT NOT NULL DEFAULT 'other'`)
   }
 
   const captureCols = database.prepare(`PRAGMA table_info(captures)`).all() as Array<{ name: string }>

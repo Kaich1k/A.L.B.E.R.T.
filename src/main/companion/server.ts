@@ -13,8 +13,9 @@ import {
   syncMessagesFromCompanion,
   type CompanionChatMessage
 } from '../memory/service'
-import type { MemoryFact } from '../../shared/types'
+import type { ChatImageMediaType, MemoryFact } from '../../shared/types'
 import { APP_NAME } from '../../shared/brand'
+import { runChatTurn } from '../agent/orchestrator'
 import {
   authenticateCompanionDevice,
   COMPANION_PROTOCOL_VERSION,
@@ -299,6 +300,55 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       ...publicResult
     } = result
     sendJson(res, 200, { ok: true, ...publicResult }, req)
+    return
+  }
+
+  if (req.method === 'POST' && path === '/v2/chat/complete') {
+    if (!device || !device.scopes.includes('sync')) {
+      discardRequestBody(req)
+      sendJson(res, 401, { ok: false, error: 'Device credential rejected or missing sync scope' }, req)
+      return
+    }
+    const parsed = parseJson<{
+      text?: string
+      userMessageId?: string
+      images?: Array<{ mediaType?: string; data?: string }>
+    }>(await readBody(req))
+    const text = String(parsed.text || '').trim()
+    const imageTypes = new Set<ChatImageMediaType>(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
+    const images = Array.isArray(parsed.images)
+      ? parsed.images
+          .filter(
+            (image) =>
+              imageTypes.has(String(image?.mediaType) as ChatImageMediaType) &&
+              typeof image?.data === 'string'
+          )
+          .map((image) => ({
+            mediaType: String(image.mediaType) as ChatImageMediaType,
+            data: image.data!
+          }))
+          .slice(0, 4)
+      : []
+    if (!text && !images.length) {
+      sendJson(res, 400, { ok: false, error: 'Enter a message or attach an image' }, req)
+      return
+    }
+    const reply = await runChatTurn(
+      { text, images, userMessageId: String(parsed.userMessageId || '').trim() || undefined },
+      null
+    )
+    notifyDesktopChatSync()
+    sendJson(res, 200, {
+      ok: true,
+      provider: 'mac',
+      model: 'ChatGPT / Codex',
+      message: {
+        id: reply.id,
+        role: 'assistant',
+        content: reply.content,
+        createdAt: reply.createdAt
+      }
+    }, req)
     return
   }
 

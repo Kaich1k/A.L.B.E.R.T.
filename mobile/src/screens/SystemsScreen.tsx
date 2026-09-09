@@ -149,22 +149,28 @@ const FALLBACK_MODELS: Record<LlmProvider, ReadonlyArray<ModelOption>> = {
     { value: 'gemini-2.5-flash-lite', label: '2.5 Flash-Lite', note: 'Fastest / lightest' },
     { value: 'gemini-3.5-flash-lite', label: '3.5 Flash-Lite', note: 'Newer lite route' },
     { value: 'gemini-2.5-pro', label: '2.5 Pro', note: 'Stronger; tighter free quotas' }
+  ],
+  mac: [
+    { value: 'codex', label: 'ChatGPT / Codex (paired Mac)', note: 'Uses the active brain on the paired Mac' }
   ]
 }
 
 function providerDisplayName(provider: Exclude<LlmProvider, 'auto'>): string {
+  if (provider === 'mac') return 'ChatGPT / Codex'
   if (provider === 'groq') return 'Groq'
   if (provider === 'gemini') return 'Gemini'
   return 'Anthropic'
 }
 
 function providerKeyFor(config: CompanionConfig): string {
+  if (config.provider === 'mac') return ''
   if (config.provider === 'groq') return config.groqApiKey
   if (config.provider === 'gemini') return config.geminiApiKey
   return config.anthropicApiKey
 }
 
 function providerKeyPlaceholder(provider: Exclude<LlmProvider, 'auto'>): string {
+  if (provider === 'mac') return 'Paired Mac connection required'
   if (provider === 'groq') return 'gsk_…'
   if (provider === 'gemini') return 'AIza…'
   return 'sk-ant-…'
@@ -392,7 +398,7 @@ export function SystemsScreen({
               </Text>
               <FieldLabel text="Provider" />
               <View style={styles.segmentRow}>
-                {(['auto', 'anthropic', 'groq', 'gemini'] as const).map((provider) => (
+                {(['auto', ...(linkState === 'authenticated' ? ['mac' as const] : []), 'anthropic', 'groq', 'gemini'] as const).map((provider) => (
                   <HudButton
                     key={provider}
                     label={
@@ -481,6 +487,10 @@ export function SystemsScreen({
                     Ollama for private work.
                   </Text>
                 </>
+              ) : config.provider === 'mac' ? (
+                <Text style={styles.help}>
+                  Uses ChatGPT / Codex on the paired Mac. No phone API key is required.
+                </Text>
               ) : (
                 <>
                   <FieldLabel text={`${providerDisplayName(config.provider)} API key`} />

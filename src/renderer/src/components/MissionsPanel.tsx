@@ -1,15 +1,34 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CaptureItem, Mission, MissionState, OperationsSnapshot, Routine } from '../../../shared/types'
+import type {
+  ActivityEntry,
+  CaptureItem,
+  ContextCapsule,
+  Mission,
+  MissionState,
+  OperationsSnapshot,
+  ProjectPulse,
+  Routine
+} from '../../../shared/types'
+import { useAlbertStore } from '../store'
+import { ApprovalInbox } from './ApprovalInbox'
+import { CommandTheater } from './CommandTheater'
 
-type View = 'missions' | 'approvals' | 'routines' | 'capture' | 'focus' | 'pulse'
+type View = 'missions' | 'approvals' | 'routines' | 'capture' | 'focus' | 'pulse' | 'capsules' | 'artifacts' | 'theater'
 const empty: OperationsSnapshot = { missions: [], routines: [], approvals: [], captures: [], generatedAt: 0 }
+const capsuleKey = 'albert.contextCapsules'
 
 export function MissionsPanel(): React.JSX.Element {
+  const activity = useAlbertStore((s) => s.activity)
+  const codexDiff = useAlbertStore((s) => s.codexDiff)
+  const panel = useAlbertStore((s) => s.panel)
   const [data, setData] = useState(empty)
   const [view, setView] = useState<View>('missions')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [filter, setFilter] = useState<'all' | MissionState>('all')
   const [modal, setModal] = useState<'mission' | 'routine' | 'capture' | null>(null)
+  const [capsules, setCapsules] = useState<ContextCapsule[]>([])
+  const [pulse, setPulse] = useState<ProjectPulse | null>(null)
+  const [pulseBusy, setPulseBusy] = useState(false)
   const [focusMinutes, setFocusMinutes] = useState(25)
   const [focusEndAt, setFocusEndAt] = useState(() => Number(window.sessionStorage.getItem('albert.focus.endAt') || 0))
   const [focusRemaining, setFocusRemaining] = useState(() => Math.max(0, Math.ceil((Number(window.sessionStorage.getItem('albert.focus.endAt') || 0) - Date.now()) / 1000)))
@@ -20,10 +39,55 @@ export function MissionsPanel(): React.JSX.Element {
     setSelectedId((current) => current && next.missions.some((m) => m.id === current) ? current : next.missions[0]?.id ?? null)
   }, [])
 
+  const refreshCapsules = useCallback(async (): Promise<void> => {
+    const existing = await window.albert.listCapsules().catch(() => [])
+    if (!existing.length) {
+      const legacy = readLegacyCapsules()
+      if (legacy.length) {
+        const imported = await window.albert.importCapsules(legacy).catch(() => [])
+        window.localStorage.removeItem(capsuleKey)
+        setCapsules(imported)
+        return
+      }
+    }
+    setCapsules(existing)
+  }, [])
+
+  const refreshPulse = useCallback(async (force = false): Promise<void> => {
+    setPulseBusy(true)
+    try {
+      setPulse(await window.albert.getProjectPulse(force))
+    } catch (err) {
+      setPulse({
+        projectFolder: null,
+        isGit: false,
+        branch: null,
+        dirty: [],
+        recentCommits: [],
+        staleBranches: [],
+        todos: [],
+        testFailures: [],
+        nextTask: err instanceof Error ? err.message : String(err),
+        score: null,
+        generatedAt: Date.now(),
+        error: err instanceof Error ? err.message : String(err)
+      })
+    } finally {
+      setPulseBusy(false)
+    }
+  }, [])
+
   useEffect(() => {
     void refresh()
+    void refreshCapsules()
     return window.albert.onOperationsChanged(() => void refresh())
-  }, [refresh])
+  }, [refresh, refreshCapsules])
+
+  useEffect(() => window.albert.onCapsulesChanged(() => void refreshCapsules()), [refreshCapsules])
+
+  useEffect(() => {
+    if (view === 'pulse') void refreshPulse()
+  }, [view, refreshPulse])
 
   useEffect(() => {
     const openModal = (event: Event): void => setModal((event as CustomEvent<'mission' | 'capture'>).detail)
@@ -60,6 +124,23 @@ export function MissionsPanel(): React.JSX.Element {
     setFocusRemaining(0)
   }
 
+  async function createCapsule(notes: string, title?: string): Promise<void> {
+    const mission = selected ?? data.missions.find((m) => m.state === 'active') ?? null
+    await window.albert.saveCapsule({
+      title: title?.trim() || mission?.title,
+      notes,
+      panel,
+      missionId: mission?.id
+    })
+    await refreshCapsules()
+  }
+
+  async function restoreCapsule(capsule: ContextCapsule): Promise<void> {
+    const result = await window.albert.restoreCapsule(capsule.id)
+    if (result.capsule?.missionId) setSelectedId(result.capsule.missionId)
+    setView('missions')
+  }
+
   const selected = data.missions.find((mission) => mission.id === selectedId) ?? null
   const visible = useMemo(() => data.missions.filter((mission) => filter === 'all' || mission.state === filter), [data.missions, filter])
   const pendingApprovals = data.approvals.filter((approval) => approval.state === 'pending')
@@ -77,7 +158,7 @@ export function MissionsPanel(): React.JSX.Element {
       </header>
 
       <nav className="operations-nav" aria-label="Operations views">
-        {(['missions', 'approvals', 'routines', 'capture', 'focus', 'pulse'] as View[]).map((item) => (
+        {(['missions', 'approvals', 'routines', 'capture', 'focus', 'pulse', 'capsules', 'artifacts', 'theater'] as View[]).map((item) => (
           <button type="button" key={item} className={view === item ? 'active' : ''} aria-current={view === item ? 'page' : undefined} onClick={() => setView(item)}>
             {item}{item === 'approvals' && pendingApprovals.length ? <b>{pendingApprovals.length}</b> : null}
           </button>
@@ -94,11 +175,14 @@ export function MissionsPanel(): React.JSX.Element {
       {view === 'missions' ? <SituationBrief data={data} /> : null}
 
       {view === 'missions' ? <MissionView missions={visible} selected={selected} filter={filter} setFilter={setFilter} select={setSelectedId} refresh={refresh} /> : null}
-      {view === 'approvals' ? <ApprovalView approvals={data.approvals} refresh={refresh} /> : null}
+      {view === 'approvals' ? <ApprovalInbox approvals={data.approvals} refresh={refresh} /> : null}
       {view === 'routines' ? <RoutineView routines={data.routines} create={() => setModal('routine')} refresh={refresh} /> : null}
       {view === 'capture' ? <CaptureView captures={data.captures} create={() => setModal('capture')} refresh={refresh} /> : null}
       {view === 'focus' ? <FocusView mission={selected} missions={data.missions} select={setSelectedId} minutes={focusMinutes} setMinutes={setFocusMinutes} remaining={focusRemaining} start={startFocus} stop={stopFocus} /> : null}
-      {view === 'pulse' ? <PulseView data={data} /> : null}
+      {view === 'pulse' ? <PulseView pulse={pulse} busy={pulseBusy} refresh={() => void refreshPulse(true)} data={data} /> : null}
+      {view === 'capsules' ? <CapsuleView capsules={capsules} save={createCapsule} restore={restoreCapsule} remove={async (id) => { await window.albert.deleteCapsule(id); await refreshCapsules() }} /> : null}
+      {view === 'artifacts' ? <ArtifactView data={data} activity={activity} codexDiff={codexDiff} /> : null}
+      {view === 'theater' ? <CommandTheater /> : null}
 
       {modal === 'mission' ? <MissionDialog close={() => setModal(null)} done={refresh} /> : null}
       {modal === 'routine' ? <RoutineDialog close={() => setModal(null)} done={refresh} /> : null}
@@ -108,10 +192,20 @@ export function MissionsPanel(): React.JSX.Element {
 }
 
 function SituationBrief({ data }: { data: OperationsSnapshot }): React.JSX.Element {
+  const [brief, setBrief] = useState<{ weather: string; calendar: string[]; overnight: string[]; firstMove: string } | null>(null)
+  useEffect(() => {
+    void window.albert.getDailyBrief(false).then((next) => {
+      setBrief({
+        weather: next.weather,
+        calendar: next.calendar,
+        overnight: next.overnight,
+        firstMove: next.firstMove
+      })
+    }).catch(() => undefined)
+  }, [data.generatedAt])
   const urgent = data.missions.find((m) => m.priority === 'critical' || m.priority === 'high') ?? data.missions.find((m) => !['complete','cancelled'].includes(m.state))
   const blocked = data.missions.filter((m) => m.state === 'blocked').length
-  const inbox = data.captures.filter((c) => c.state === 'inbox').length
-  return <article className="daily-brief"><div className="brief-mark"><span>{String(new Date().getDate()).padStart(2,'0')}</span><small>{new Date().toLocaleString(undefined,{month:'short'}).toUpperCase()}</small></div><div className="brief-copy"><div className="eyebrow">SITUATION REPORT / {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div><h3>{urgent ? `Recommended first move: ${urgent.title}` : 'The operations deck is clear.'}</h3><p>{urgent?.outcome || 'Create a mission when an outcome needs to survive beyond a conversation.'} {blocked ? `${blocked} blocked objective${blocked === 1 ? '' : 's'} need recovery.` : 'No blocked objectives.'} {inbox ? `${inbox} capture${inbox === 1 ? '' : 's'} await filing.` : ''}</p></div><div className="brief-actions"><span className="text-action">{data.approvals.filter((a)=>a.state==='pending').length} APPROVALS</span><span className="text-action">{data.routines.filter((r)=>r.enabled).length} ROUTINES ARMED</span></div></article>
+  return <article className="daily-brief"><div className="brief-mark"><span>{String(new Date().getDate()).padStart(2,'0')}</span><small>{new Date().toLocaleString(undefined,{month:'short'}).toUpperCase()}</small></div><div className="brief-copy"><div className="eyebrow">DAILY BRIEF / {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div><h3>{brief?.firstMove || (urgent ? `Recommended first move: ${urgent.title}` : 'The operations deck is clear.')}</h3><p>{brief?.weather || urgent?.outcome || 'Create a mission when an outcome needs to survive beyond a conversation.'} {blocked ? `${blocked} blocked objective${blocked === 1 ? '' : 's'} need recovery.` : ''} {brief?.calendar.length ? ` Calendar: ${brief.calendar.slice(0,3).join(', ')}.` : ''} {brief?.overnight[0] ? ` Overnight: ${brief.overnight[0]}.` : ''}</p></div><div className="brief-actions"><span className="text-action">{data.approvals.filter((a)=>a.state==='pending').length} APPROVALS</span><span className="text-action">{data.routines.filter((r)=>r.enabled).length} ROUTINES ARMED</span></div></article>
 }
 
 function MissionView({ missions, selected, filter, setFilter, select, refresh }: { missions: Mission[]; selected: Mission | null; filter: 'all' | MissionState; setFilter: (v: 'all' | MissionState) => void; select: (id: string) => void; refresh: () => Promise<void> }): React.JSX.Element {
@@ -134,10 +228,6 @@ function MissionView({ missions, selected, filter, setFilter, select, refresh }:
   </div>
 }
 
-function ApprovalView({ approvals, refresh }: { approvals: OperationsSnapshot['approvals']; refresh: () => Promise<void> }): React.JSX.Element {
-  return <div className="approval-grid">{approvals.length ? approvals.map((approval) => <article key={approval.id} className={`approval-card ${approval.state}`}><div className="eyebrow">{approval.risk} / {approval.state}</div><h3>{approval.title}</h3><p>{approval.description}</p>{approval.preview ? <pre>{approval.preview}</pre> : null}<small>{new Date(approval.createdAt).toLocaleString()}</small>{approval.state === 'pending' ? <div><button className="btn ghost" type="button" onClick={async () => { await window.albert.resolveApproval(approval.id, 'declined'); await refresh() }}>Decline</button><button className="btn primary" type="button" onClick={async () => { await window.albert.resolveApproval(approval.id, 'approved'); await refresh() }}>{approval.actionLabel}</button></div> : null}</article>) : <Empty title="Approval queue clear" detail="Consequential actions will wait here with an impact preview." />}</div>
-}
-
 function RoutineView({ routines, create, refresh }: { routines: Routine[]; create: () => void; refresh: () => Promise<void> }): React.JSX.Element {
   return <div className="operations-section"><div className="section-row"><div><h3>Automation grid</h3><p>Due routines create reviewable missions. They never silently publish, spend, or delete.</p></div><button className="btn primary" type="button" onClick={create}>New routine</button></div><div className="routine-table">{routines.length ? routines.map((routine) => <article key={routine.id}><button className={`toggle ${routine.enabled ? 'on' : ''}`} type="button" aria-pressed={routine.enabled} aria-label={`${routine.enabled ? 'Disable' : 'Enable'} routine ${routine.name}`} onClick={async () => { await window.albert.updateRoutine(routine.id, { enabled: !routine.enabled }); await refresh() }}><i /></button><div><strong>{routine.name}</strong><p>{routine.prompt}</p></div><div><span>{routine.schedule}</span><small>{routine.nextRunAt ? `NEXT ${new Date(routine.nextRunAt).toLocaleString()}` : 'MANUAL / UNSCHEDULED'}</small></div><button className="icon-delete" type="button" aria-label={`Delete routine ${routine.name}`} onClick={async () => { if (!window.confirm(`Delete routine “${routine.name}”?`)) return; await window.albert.deleteRoutine(routine.id); await refresh() }}>×</button></article>) : <Empty title="No routines armed" detail="Schedule a briefing, project review, watch, or recurring preparation." />}</div></div>
 }
@@ -152,9 +242,197 @@ function FocusView({ mission, missions, select, minutes, setMinutes, remaining, 
   return <div className={`focus-cockpit ${remaining ? 'engaged' : ''}`}><div className="focus-ring" style={{ '--focus-progress': `${progress * 3.6}deg` } as React.CSSProperties}><span>{remaining ? `${mm}:${ss}` : `${minutes}:00`}</span><small>{remaining ? 'FOCUS ENGAGED' : 'READY'}</small></div><div className="focus-config"><div className="eyebrow">ATTENTION PROTOCOL</div><h3>{mission?.title || 'Choose a mission'}</h3><p>{mission?.outcome || 'Focus Mode keeps one outcome visible and everything else quiet.'}</p><label>Objective<select value={mission?.id || ''} onChange={(e) => select(e.target.value)}><option value="">Select…</option>{missions.filter((m) => m.state !== 'complete').map((m) => <option key={m.id} value={m.id}>{m.title}</option>)}</select></label><label>Duration<input type="range" min="10" max="90" step="5" value={minutes} disabled={remaining > 0} onChange={(e) => setMinutes(Number(e.target.value))}/><span>{minutes} minutes</span></label><button className={remaining ? 'btn ghost' : 'btn primary'} type="button" disabled={!mission} onClick={remaining ? stop : start}>{remaining ? 'End focus session' : 'Engage focus mode'}</button></div></div>
 }
 
-function PulseView({ data }: { data: OperationsSnapshot }): React.JSX.Element {
-  const totalSteps = data.missions.flatMap((m) => m.steps); const done = totalSteps.filter((s) => s.state === 'complete').length
-  return <div className="pulse-dashboard"><article><div className="eyebrow">PROJECT PULSE</div><h3>Operational health</h3><div className="health-score"><strong>{data.missions.some((m) => m.state === 'blocked') ? '72' : '94'}</strong><span>/100</span></div><p>{data.missions.filter((m) => m.state === 'blocked').length} blocked · {data.missions.filter((m) => m.state === 'waiting').length} waiting · {done}/{totalSteps.length} steps verified</p></article><article><div className="eyebrow">PRIVACY FLIGHT RECORDER</div><h3>Local operations</h3><ul><li><span>Mission data</span><b>LOCAL SQLITE</b></li><li><span>Scheduler</span><b>ON DEVICE</b></li><li><span>External actions</span><b>APPROVAL GATED</b></li><li><span>Cloud routing</span><b>SEE ACTIVITY</b></li></ul></article><article><div className="eyebrow">OPEN LOOPS</div><h3>{data.missions.filter((m) => !['complete','cancelled'].includes(m.state)).length} objectives remain</h3><p>{data.captures.filter((c) => c.state === 'inbox').length} unfiled captures and {data.approvals.filter((a) => a.state === 'pending').length} decisions need attention.</p></article></div>
+function PulseView({
+  pulse,
+  busy,
+  refresh,
+  data
+}: {
+  pulse: ProjectPulse | null
+  busy: boolean
+  refresh: () => void
+  data: OperationsSnapshot
+}): React.JSX.Element {
+  const blocked = data.missions.filter((m) => m.state === 'blocked').length
+  return (
+    <div className="pulse-dashboard">
+      <article>
+        <div className="eyebrow">PROJECT PULSE</div>
+        <h3>{pulse?.projectFolder ? pulse.projectFolder.split('/').slice(-2).join('/') : 'No project folder'}</h3>
+        <div className="health-score">
+          <strong>{pulse?.score ?? '—'}</strong>
+          <span>/100</span>
+        </div>
+        <p>
+          {pulse?.branch ? `On ${pulse.branch}` : 'Not a git repo'}
+          {pulse?.isGit ? ` · ${pulse.dirty.length} dirty` : ''}
+          {blocked ? ` · ${blocked} blocked missions` : ''}
+          {busy ? ' · scanning…' : ''}
+        </p>
+        <button className="btn ghost" type="button" onClick={refresh} disabled={busy}>
+          Rescan
+        </button>
+        {pulse?.error ? <small>{pulse.error}</small> : null}
+      </article>
+      <article>
+        <div className="eyebrow">NEXT LIKELY TASK</div>
+        <h3>{pulse?.nextTask || 'Nothing obvious yet'}</h3>
+        <p>{data.missions.find((m) => m.state === 'active')?.outcome || 'Pulse uses the active mission, first TODO, or first dirty file.'}</p>
+      </article>
+      <article>
+        <div className="eyebrow">DIRTY TREE</div>
+        <h3>{pulse?.dirty.length ?? 0} changed files</h3>
+        <ul>
+          {(pulse?.dirty.length ? pulse.dirty.slice(0, 8) : [{ path: 'Working tree clean', status: 'ok' }]).map((row) => (
+            <li key={`${row.status}-${row.path}`}><span>{row.path}</span><b>{row.status}</b></li>
+          ))}
+        </ul>
+      </article>
+      <article>
+        <div className="eyebrow">TODOS / FIXME</div>
+        <h3>{pulse?.todos.length ?? 0} open notes</h3>
+        <ul>
+          {(pulse?.todos.length ? pulse.todos.slice(0, 6) : [{ path: '—', line: 0, text: 'No TODO/FIXME hits in the scanned files.' }]).map((todo) => (
+            <li key={`${todo.path}:${todo.line}`}><span>{todo.text}</span><b>{todo.line ? `${todo.path}:${todo.line}` : ''}</b></li>
+          ))}
+        </ul>
+      </article>
+      <article>
+        <div className="eyebrow">STALE BRANCHES</div>
+        <h3>{pulse?.staleBranches.length ?? 0} older than 21 days</h3>
+        <ul>
+          {(pulse?.staleBranches.length
+            ? pulse.staleBranches
+            : [{ name: pulse?.isGit ? 'None stale' : 'No git history', lastCommitAt: 0 }]).map((branch) => (
+            <li key={branch.name}>
+              <span>{branch.name}</span>
+              <b>{branch.lastCommitAt ? new Date(branch.lastCommitAt).toLocaleDateString() : ''}</b>
+            </li>
+          ))}
+        </ul>
+      </article>
+      <article>
+        <div className="eyebrow">RECENT COMMITS</div>
+        <h3>{pulse?.recentCommits[0]?.subject || 'No recent commits'}</h3>
+        <ul>
+          {(pulse?.recentCommits || []).slice(0, 5).map((commit) => (
+            <li key={commit.hash}><span>{commit.subject}</span><b>{commit.hash}</b></li>
+          ))}
+        </ul>
+      </article>
+      <article>
+        <div className="eyebrow">TEST / BUILD FAULTS</div>
+        <h3>{pulse?.testFailures.length ?? 0} recent failures</h3>
+        <p>{pulse?.testFailures[0]?.result || 'No failed test/lint/build activity in the flight recorder.'}</p>
+      </article>
+    </div>
+  )
+}
+
+function readLegacyCapsules(): ContextCapsule[] {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(capsuleKey) || '[]') as ContextCapsule[]
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function CapsuleView({
+  capsules,
+  save,
+  restore,
+  remove
+}: {
+  capsules: ContextCapsule[]
+  save: (notes: string, title?: string) => Promise<void>
+  restore: (capsule: ContextCapsule) => Promise<void>
+  remove: (id: string) => void | Promise<void>
+}): React.JSX.Element {
+  const [notes, setNotes] = useState('')
+  const [title, setTitle] = useState('')
+  return (
+    <div className="capsule-workspace">
+      <article className="capsule-capture">
+        <div className="eyebrow">CONTEXT CAPSULE</div>
+        <h3>Save the current operating position</h3>
+        <p>Seals the selected mission, Computer tabs, front apps, project folder, and a resume note. Later: “resume {title || 'GPACE outreach'}”.</p>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Capsule name — e.g. GPACE outreach" />
+        <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="What should future-you know before resuming?" />
+        <button
+          className="btn primary"
+          type="button"
+          onClick={async () => {
+            await save(notes, title)
+            setNotes('')
+            setTitle('')
+          }}
+        >
+          Seal capsule
+        </button>
+      </article>
+      <div className="capsule-list">
+        {capsules.length ? capsules.map((capsule) => (
+          <article key={capsule.id}>
+            <div>
+              <span>{new Date(capsule.createdAt).toLocaleString()}</span>
+              <h3>{capsule.title}</h3>
+              <p>{capsule.notes || 'No operator note.'}</p>
+              <small>
+                {capsule.tabs.length} tabs
+                {capsule.apps.length ? ` · ${capsule.apps.slice(0, 3).join(', ')}` : ''}
+                {capsule.missionTitle ? ` · ${capsule.missionTitle}` : ''}
+              </small>
+            </div>
+            <div>{capsule.tabs.slice(0, 3).map((tab) => <code key={tab.url}>{tab.title}</code>)}</div>
+            <footer>
+              <button type="button" onClick={() => void restore(capsule)}>Restore</button>
+              <button type="button" onClick={() => void remove(capsule.id)}>Delete</button>
+            </footer>
+          </article>
+        )) : <Empty title="No capsules saved" detail="Seal a working state before context evaporates in the usual heroic fashion." />}
+      </div>
+    </div>
+  )
+}
+
+function ArtifactView({
+  data,
+  activity,
+  codexDiff
+}: {
+  data: OperationsSnapshot
+  activity: ActivityEntry[]
+  codexDiff: string
+}): React.JSX.Element {
+  const [stored, setStored] = useState<Array<{ kind: string; title: string; body: string; source: string; time: number; version?: number }>>([])
+  useEffect(() => {
+    void window.albert.listArtifacts().then((rows) => {
+      setStored(rows.map((row) => ({
+        kind: row.kind,
+        title: `${row.title} v${row.version}`,
+        body: row.body,
+        source: row.source,
+        time: row.createdAt,
+        version: row.version
+      })))
+    }).catch(() => undefined)
+  }, [data.generatedAt, activity.length, codexDiff])
+  const stepArtifacts = data.missions.flatMap((mission) =>
+    mission.steps
+      .filter((step) => step.result || step.verification)
+      .map((step) => ({ kind: 'step', title: step.title, body: step.verification || step.result || '', source: mission.title, time: step.updatedAt, version: undefined as number | undefined }))
+  )
+  const captureArtifacts = data.captures
+    .filter((capture) => capture.state !== 'archived')
+    .map((capture) => ({ kind: capture.kind, title: capture.kind, body: capture.content, source: capture.state, time: capture.updatedAt || capture.createdAt, version: undefined as number | undefined }))
+  const approvalArtifacts = data.approvals
+    .filter((approval) => approval.preview)
+    .map((approval) => ({ kind: 'approval', title: approval.title, body: approval.preview || approval.description, source: approval.state, time: approval.updatedAt || approval.createdAt, version: undefined as number | undefined }))
+  const activityArtifacts = activity.slice(0, 6).map((entry) => ({ kind: entry.ok ? 'operation' : 'fault', title: (entry.toolName || 'tool').replaceAll('_',' '), body: entry.result || '', source: entry.ok ? 'verified' : 'failed', time: entry.createdAt, version: undefined as number | undefined }))
+  const diffArtifact = codexDiff ? [{ kind: 'diff', title: 'Current Codex diff', body: codexDiff, source: 'live turn', time: Date.now(), version: undefined as number | undefined }] : []
+  const artifacts = [...stored, ...diffArtifact, ...stepArtifacts, ...approvalArtifacts, ...captureArtifacts, ...activityArtifacts].sort((a,b)=>b.time-a.time)
+  return <div className="artifact-workspace"><header><div><div className="eyebrow">ARTIFACT WORKSPACE</div><h3>{artifacts.length} versioned outputs and evidence items</h3></div><span>Drafts · diffs · captures · approvals · tool results</span></header><div className="artifact-grid">{artifacts.length ? artifacts.map((artifact,index)=><article key={`${artifact.kind}-${artifact.time}-${index}`}><div className="artifact-kind">{artifact.kind}{artifact.version ? ` v${artifact.version}` : ''}</div><h3>{artifact.title}</h3><p>{String(artifact.body || '').slice(0,520)}</p><footer><span>{artifact.source}</span><time>{new Date(artifact.time).toLocaleString()}</time></footer></article>) : <Empty title="No artifacts yet" detail="Mission outputs, previews, captures, and diffs will collect here." />}</div></div>
 }
 
 function MissionDialog({ close, done }: { close: () => void; done: () => Promise<void> }): React.JSX.Element {

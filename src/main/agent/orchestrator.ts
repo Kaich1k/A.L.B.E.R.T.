@@ -2,15 +2,33 @@ import type { MessageParam, ToolUseBlock } from '@anthropic-ai/sdk/resources/mes
 import { BrowserWindow } from 'electron'
 import { v4 as uuid } from 'uuid'
 import { ALBERT_SYSTEM_PROMPT } from './prompt'
-import { selectModelTier } from './router'
+import { selectModelTier, type ModelRoute } from './router'
 import { createAnthropic } from '../anthropic/client'
+import { type CodexBridgeEvent } from '../codex/events'
+import { CODEX_ESCALATION_PREFERENCE, CODEX_MODEL_PREFERENCE, pickModel } from '../codex/models'
+import { CodexFault } from '../codex/protocol'
+import {
+  connectCodex,
+  getCodexStatus,
+  interruptCodexTurn,
+  newCodexThread,
+  refreshCodexAllowance,
+  runCodexTurn as runCodexBridgeTurn,
+  steerCodexTurn,
+  codexTurnActive
+} from '../codex/service'
 import { persistChatImages, loadChatImageData } from '../chat/images'
 import { getSettings, setSettings } from '../config'
+import { startAppUpdate } from '../appLifecycle'
+import { utteranceLooksLikeRebuildNow } from '../../shared/selfUpdate'
 import {
   addMessage,
   getRecentMessages,
-  recallMemories
+  listMemories,
+  recallMemories,
+  rememberFact
 } from '../memory/service'
+import { AUTO_MEMORY_CATEGORY, selectNewAutoMemories } from '../memory/autoRemember'
 import { executeTool, getAnthropicToolSchemas } from '../tools/registry'
 import { ollamaChatCompletion, type OllamaChatMessage } from '../ollama/client'
 import { groqChatCompletion } from '../groq/client'
@@ -30,7 +48,17 @@ import {
   PERSONALITY_META,
   personalityAdjustReply
 } from '../../shared/personality'
-import { isEndVoiceCommand } from '../../shared/voiceCommands'
+import {
+  isEndVoiceCommand,
+  isNewCodexThreadCommand,
+  parseResumeCapsuleCommand,
+  parseSaveCapsuleCommand
+} from '../../shared/voiceCommands'
+import { parseVoiceStackCommand, shortenAnswer } from '../../shared/voiceStack'
+import { captureCapsule, consumePendingResumeNote, restoreCapsule } from '../context/capsules'
+import { createCapture } from '../operations/service'
+import { interruptCursorAgent } from '../cursor/agent'
+import { showComputerWindow } from '../computer/window'
 import {
   activeBrainReply,
   activeSurfacePromptBlock,
@@ -44,9 +72,31 @@ import type {
   ChatMessage,
   ChatSendPayload
 } from '../../shared/types'
+import { DEFAULT_GEMINI_MODEL } from '../../shared/types'
 
 function emit(win: BrowserWindow | null, event: AgentStreamEvent): void {
-  win?.webContents.send('albert:chat:event', event)
+  const windows = BrowserWindow.getAllWindows()
+  const targets = windows.length ? windows : win ? [win] : []
+  for (const target of targets) {
+    if (!target.isDestroyed()) target.webContents.send('albert:chat:event', event)
+  }
+}
+
+/** Background: store lasting facts from this utterance. Never blocks the reply. */
+async function persistAutoMemories(utterance: string, win: BrowserWindow | null): Promise<void> {
+  try {
+    const fresh = selectNewAutoMemories(
+      utterance,
+      listMemories().map((m) => m.content)
+    )
+    if (!fresh.length) return
+    for (const fact of fresh) {
+      await rememberFact(fact, AUTO_MEMORY_CATEGORY)
+    }
+    win?.webContents.send('albert:memory:changed')
+  } catch {
+    // Auto-memory must never take down a turn.
+  }
 }
 
 /** Never show raw [OK]/[FAIL] tool lines as the chat reply. */
@@ -230,7 +280,9 @@ export async function runChatTurn(
 ): Promise<ChatMessage> {
   let text =
     typeof payload === 'string' ? payload.trim() : String(payload?.text ?? '').trim()
+  const originalUtterance = text
   const imagePayloads = typeof payload === 'string' ? undefined : payload?.images
+  const userMessageId = typeof payload === 'string' ? undefined : payload?.userMessageId
   const images = await persistChatImages(imagePayloads)
   if (!text && !images.length) throw new Error('Empty message')
 
@@ -238,14 +290,112 @@ export async function runChatTurn(
     text || (images.length === 1 ? '(image)' : `(${images.length} images)`)
 
   const userMessage = addMessage({
+    id: userMessageId,
     role: 'user',
     content: displayContent,
     images
   })
   emit(win, { type: 'message', message: userMessage })
 
+  if (text && !images.length) {
+    const saveCapsule = parseSaveCapsuleCommand(text)
+    if (saveCapsule) {
+      const capsule = await captureCapsule({ title: saveCapsule.title || undefined })
+      const assistantMessage = addMessage({
+        role: 'assistant',
+        content: `Capsule sealed as “${capsule.title}”, sir. Say resume ${capsule.title} when you want that position back.`
+      })
+      emit(win, { type: 'message', message: assistantMessage })
+      emit(win, { type: 'done' })
+      win?.webContents.send('albert:capsules:changed')
+      return assistantMessage
+    }
+
+    const resumeCapsule = parseResumeCapsuleCommand(text)
+    if (resumeCapsule) {
+      const restored = await restoreCapsule(resumeCapsule.query)
+      win?.webContents.send('albert:capsules:changed')
+      if (restored.capsule) {
+        win?.webContents.send('albert:capsule:restored', restored.capsule)
+      }
+      if (!resumeCapsule.remainder || !restored.capsule) {
+        const assistantMessage = addMessage({
+          role: 'assistant',
+          content: restored.reply
+        })
+        emit(win, { type: 'message', message: assistantMessage })
+        emit(win, { type: 'done' })
+        return assistantMessage
+      }
+      text = resumeCapsule.remainder
+    }
+  }
+
+  if (text && !images.length) {
+    const stack = parseVoiceStackCommand(text)
+    if (stack) {
+      const history = getRecentMessages(50)
+      const original =
+        [...history]
+          .reverse()
+          .find(
+            (m) =>
+              m.role === 'assistant' &&
+              m.content &&
+              !/^Short version,/i.test(m.content) &&
+              !/^Paused,/i.test(m.content) &&
+              !/^Queued for your phone/i.test(m.content)
+          )?.content || ''
+      let reply = ''
+      if (stack === 'short') {
+        reply = original
+          ? `Short version, sir: ${shortenAnswer(original)} The original answer is still in the transcript.`
+          : 'No prior answer to shorten, sir.'
+      } else if (stack === 'original') {
+        reply = original
+          ? 'The original answer is still on-screen above, sir — I did not overwrite it.'
+          : 'No original answer stored, sir.'
+      } else if (stack === 'pause') {
+        void interruptCodexTurn()
+        interruptCursorAgent()
+        emit(win, { type: 'pause_speech' })
+        reply = 'Paused, sir. Original answer is intact.'
+      } else if (stack === 'show') {
+        showComputerWindow()
+        win?.webContents.send('albert:operations:changed')
+        emit(win, { type: 'theater' })
+        reply = 'On the board, sir — Computer, artifacts, and the last tool map.'
+      } else if (stack === 'phone') {
+        const packet = original.slice(0, 4_000) || text
+        createCapture(`Phone packet:\n${packet}`, 'note')
+        reply = 'Queued for your phone, sir. The original stays in this transcript; companion sync will pick it up.'
+      } else if (stack === 'hold') {
+        const capsule = await captureCapsule({ notes: original.slice(0, 1_000), panel: 'conversation' })
+        reply = `Held, sir. Capsule “${capsule.title}” sealed without dropping the last answer.`
+      }
+      const assistantMessage = addMessage({ role: 'assistant', content: reply })
+      emit(win, { type: 'message', message: assistantMessage })
+      emit(win, { type: 'done' })
+      return assistantMessage
+    }
+  }
+
+  if (text && !images.length && isNewCodexThreadCommand(text)) {
+    newCodexThread()
+    const assistantMessage = addMessage({
+      role: 'assistant',
+      content: 'Fresh Codex thread, sir — the next engineering turn starts clean.'
+    })
+    emit(win, { type: 'codex_status', codex: getCodexStatus() })
+    emit(win, { type: 'message', message: assistantMessage })
+    emit(win, { type: 'done' })
+    return assistantMessage
+  }
+
   // App-layer standby — never let the model roleplay “Standby engaged” while voice keeps listening
   if (text && !images.length && isEndVoiceCommand(text)) {
+    // A Codex turn can outlive the voice session; stand down means stop working.
+    void interruptCodexTurn()
     const assistantMessage = addMessage({
       role: 'assistant',
       content: 'Standing by, sir.'
@@ -295,6 +445,35 @@ Remaining ask: ${extracted.remainder}
     }
   }
 
+  if (text && !images.length && utteranceLooksLikeRebuildNow(text)) {
+    if (codexTurnActive()) void interruptCodexTurn()
+    const started = startAppUpdate(true)
+    const content = started.ok
+      ? [
+          'Started the detached rebuild, sir.',
+          'Leave this window alone until I quit and reopen myself — a follow-up chat will not stop npm.',
+          started.result
+        ].join(' ')
+      : started.result
+    const assistantMessage = addMessage({ role: 'assistant', content })
+    emit(win, { type: 'token', content })
+    emit(win, { type: 'message', message: assistantMessage })
+    emit(win, { type: 'done' })
+    return assistantMessage
+  }
+
+  if (text && !images.length && codexTurnActive()) {
+    const steered = await steerCodexTurn(text)
+    const content = steered
+      ? 'Folded that into the job already running, sir. I did not abort it.'
+      : 'Still on the last job, sir. Say standby only if you want me to stop.'
+    const assistantMessage = addMessage({ role: 'assistant', content })
+    emit(win, { type: 'token', content })
+    emit(win, { type: 'message', message: assistantMessage })
+    emit(win, { type: 'done' })
+    return assistantMessage
+  }
+
   const route = selectModelTier(text || 'look at this image', { hasImages: images.length > 0 })
   emit(win, {
     type: 'route',
@@ -324,7 +503,17 @@ Remaining ask: ${extracted.remainder}
     return assistantMessage
   }
 
-  const memories = await recallMemories(text || 'image', 6)
+  if (originalUtterance && getSettings().autoRememberEnabled !== false) {
+    void persistAutoMemories(originalUtterance, win)
+  }
+
+  const settings = getSettings()
+  // Performance mode avoids a blocking embeddings request before every reply.
+  // Local lexical recall is immediate; full semantic recall remains available
+  // when performance mode is disabled.
+  const memories = await recallMemories(text || 'image', 6, {
+    semantic: settings.performanceMode === false
+  })
   const memoryBlock =
     memories.length > 0
       ? `\n\nRelevant long-term memories:\n${memories
@@ -342,7 +531,19 @@ Remaining ask: ${extracted.remainder}
           : null
 
   const routingNote =
-    localLabel
+    route.provider === 'codex'
+      ? `\n\n=== ACTIVE BRAIN (THIS TURN) ===
+Provider: ChatGPT (OpenAI Codex on Kai's ChatGPT allowance). Tier: CHATGPT.
+You are ChatGPT / Codex this turn — not Gemini, not Opus, not Ollama/Groq.
+You have real shell, file editing, and test-running access inside the project sandbox.
+Running npm run update:app / install:app is allowed: the Mac host intercepts it and starts a detached installer, then relaunches. Treat a declined shell plus “started detached” as success — do not retry. Never killall/pkill/osascript-quit ALBERT; call restart via the host instead.
+After you edit ALBERT src/scripts/package.json, the host rebuilds when the turn finishes — including if the turn is interrupted. You do not have to reach the shell. Tell Kai that.
+If Kai asks whether the update ran, or tells you to run npm run update:app / reopen the app now, the host starts that installer immediately.
+Acknowledge once (“On it, sir.”), then work silently. Do not read files or say you are still working. One short final when done.
+Finish the work, then report the outcome in one short spoken paragraph. Do not paste diffs or command logs as your reply — the UI already shows them.
+If Kai asks which brain you're on, say ChatGPT (Codex) on your ChatGPT allowance.
+=== END BRAIN ===`
+      : localLabel
       ? `\n\n=== ACTIVE BRAIN (THIS TURN) ===
 Provider: ${localLabel}. Model: ${route.model}. Tier: QUICK.
 You ARE on ${localLabel} right now — not Haiku, not Opus.
@@ -365,7 +566,6 @@ You are on Opus this turn — not Ollama/Groq. Thorough when it matters, still n
 ${images.length ? 'Kai attached image(s) in this message — look at them and respond accordingly.' : ''}
 === END BRAIN ===`
 
-  const settings = getSettings()
   const projectFolder = settings.projectFolder?.trim()
   const projectBlock = projectFolder
     ? `\n\nConfigured project folder: ${projectFolder}`
@@ -378,15 +578,19 @@ ${images.length ? 'Kai attached image(s) in this message — look at them and re
   const personality = normalizePersonality(settings.personality)
   const personalityBlock = buildPersonalityPromptBlock(personality)
   // Repeat dials at the end — models weight late system instructions more
+  const brainLabel =
+    route.provider === 'codex' ? 'ChatGPT' : localLabel || 'Anthropic'
   const personalityTail =
     buildPersonalityReminder(personality) +
     `\n- SURFACE: Mac desktop app this turn — not the phone companion. Never contradict that.
-- BRAIN: ${localLabel || 'Anthropic'} / ${route.model} this turn. Never contradict that.
+- BRAIN: ${brainLabel} / ${route.model} this turn. Never contradict that.
 - ACT: never ask permission for screenshots/clicks when confirms are OFF. Never paste [OK]/[FAIL]/file paths as your reply.
 - EXPERIMENT: keep trying with Kai; don't pawn the task off on him as plan A.
 - VOICE: you can speak — just reply; TTS handles it. Never say you're text-only.`
 
   const surfaceBlock = `\n\n${activeSurfacePromptBlock('mac')}`
+  const resumeNote = consumePendingResumeNote()
+  const resumeBlock = resumeNote ? `\n\n=== RESTORED CONTEXT CAPSULE ===\n${resumeNote}\n=== END CAPSULE ===` : ''
 
   const system =
     ALBERT_SYSTEM_PROMPT +
@@ -395,6 +599,7 @@ ${images.length ? 'Kai attached image(s) in this message — look at them and re
     projectBlock +
     modeBlock +
     surfaceBlock +
+    resumeBlock +
     routingNote +
     dialAppliedNote +
     personalityTail
@@ -402,6 +607,19 @@ ${images.length ? 'Kai attached image(s) in this message — look at them and re
   // Soft prompts get ignored by QUICK models — max_tokens must track the dial.
   const replyBudget = completionTokenBudget(personality.verbosity)
   const toolBudget = completionTokenBudget(personality.verbosity, { forTools: true })
+
+  if (route.provider === 'codex') {
+    return runCodexChatTurn({
+      userText: text,
+      displayContent,
+      system,
+      route,
+      images,
+      win,
+      replyBudget,
+      toolBudget
+    })
+  }
 
   if (route.provider === 'ollama' || route.provider === 'groq' || route.provider === 'gemini') {
     return runOpenAiLocalTurn(
@@ -415,15 +633,359 @@ ${images.length ? 'Kai attached image(s) in this message — look at them and re
     )
   }
 
+  // Codex and the QUICK providers returned above, so this is an Anthropic tier.
   return runAnthropicTurn(
     displayContent,
     system,
     route.model,
-    route.tier,
+    route.tier === 'power' ? 'power' : 'fast',
     win,
     replyBudget,
     toolBudget
   )
+}
+
+/**
+ * Anthropic is a paid brain, so nothing may escalate into it implicitly.
+ * Returns the tier to escalate to, or null when Kai must be told it failed.
+ */
+function escalationTarget(): { provider: 'codex' | 'anthropic'; model: string } | null {
+  const settings = getSettings()
+  if (settings.codexEnabled !== false) {
+    return { provider: 'codex', model: settings.codexModel || 'codex' }
+  }
+  if (settings.paidFallbackEnabled) {
+    return { provider: 'anthropic', model: settings.fastModel || 'claude-haiku-4-5' }
+  }
+  return null
+}
+
+/**
+ * A QUICK-tier turn needs a stronger brain. Prefer Codex (covered by Kai's
+ * ChatGPT plan), use Anthropic only when he switched paid fallback on, and
+ * otherwise say what happened rather than billing him by surprise.
+ */
+async function escalateFromQuick(opts: {
+  displayContent: string
+  system: string
+  note: string
+  reason: string
+  win: BrowserWindow | null
+  replyBudget?: number
+  toolBudget?: number
+}): Promise<ChatMessage> {
+  const target = escalationTarget()
+  const { win } = opts
+
+  if (target?.provider === 'codex') {
+    return runCodexChatTurn({
+      userText: opts.displayContent,
+      displayContent: opts.displayContent,
+      system: opts.system + opts.note,
+      route: {
+        tier: 'codex',
+        model: target.model,
+        provider: 'codex',
+        reason: opts.reason
+      },
+      images: [],
+      win,
+      replyBudget: opts.replyBudget ?? 320,
+      toolBudget: opts.toolBudget ?? 768
+    })
+  }
+
+  if (target?.provider === 'anthropic') {
+    emit(win, { type: 'route', model: target.model, tier: 'fast', reason: opts.reason })
+    return runAnthropicTurn(
+      opts.displayContent,
+      opts.system + opts.note,
+      target.model,
+      'fast',
+      win,
+      opts.replyBudget,
+      opts.toolBudget
+    )
+  }
+
+  const content =
+    'That needs a stronger brain than QUICK, sir, and both escalation routes are off — ' +
+    'turn Codex back on in Systems, or enable paid fallback.'
+  const assistantMessage = addMessage({ id: uuid(), role: 'assistant', content })
+  emit(win, { type: 'token', content })
+  emit(win, { type: 'message', message: assistantMessage })
+  emit(win, { type: 'done' })
+  return assistantMessage
+}
+
+/** HUD-only; never spoken. File names and command lines stay off Comm. */
+async function runCodexChatTurn(args: {
+  userText: string
+  displayContent: string
+  system: string
+  route: ModelRoute
+  images: ChatImageRef[]
+  win: BrowserWindow | null
+  replyBudget: number
+  toolBudget: number
+}): Promise<ChatMessage> {
+  const { system, route, images, win } = args
+  const settings = getSettings()
+
+  // Reuse the warm bridge between turns; reconnect only when startup has not
+  // completed yet. This avoids repeating the account/allowance handshake.
+  const cachedStatus = getCodexStatus()
+  const status =
+    cachedStatus.connected && cachedStatus.availableModels.length > 0
+      ? cachedStatus
+      : await connectCodex()
+  if (!status.installed) {
+    return codexFallback(
+      args,
+      new CodexFault(
+        'notInstalled',
+        `The Codex CLI isn't installed on this Mac, sir. ${status.installHint ?? ''}`.trim()
+      )
+    )
+  }
+  if (!status.signedIn) {
+    return codexFallback(
+      args,
+      new CodexFault(
+        'notSignedIn',
+        'Codex is not signed in, sir — open Systems → Codex and sign in with ChatGPT.'
+      )
+    )
+  }
+
+  const models = status.availableModels.map((m) => ({
+    id: m.id,
+    displayName: m.displayName,
+    description: '',
+    efforts: m.efforts,
+    defaultEffort: null,
+    isDefault: false
+  }))
+  const model =
+    (route.escalate
+      ? pickModel(models, CODEX_ESCALATION_PREFERENCE, settings.codexEscalationModel)
+      : pickModel(models, CODEX_MODEL_PREFERENCE, settings.codexModel)) || status.model
+
+  emit(win, {
+    type: 'route',
+    model: model || 'codex',
+    tier: 'codex',
+    reason: route.reason
+  })
+  emit(win, { type: 'codex_status', codex: { ...status, model: model ?? status.model } })
+
+  const input: Parameters<typeof runCodexBridgeTurn>[0]['input'] = []
+  if (args.userText.trim()) input.push({ type: 'text', text: args.userText.trim() })
+  for (const img of images.slice(0, 4)) {
+    const bytes = await resolveImageBytes(img)
+    if (!bytes) continue
+    input.push({ type: 'image', url: `data:${bytes.mediaType};base64,${bytes.data}` })
+  }
+  if (!input.length) input.push({ type: 'text', text: args.displayContent })
+
+  let lastProgressAt = 0
+  let streamedAnswer = ''
+  const openCommands = new Map<string, string>()
+  emit(win, { type: 'codex_progress', content: 'On it, sir.' })
+
+  const onEvent = (event: CodexBridgeEvent): void => {
+    switch (event.kind) {
+      case 'reasoning':
+        break
+      case 'delta':
+        streamedAnswer += event.text
+        emit(win, { type: 'token', content: event.text })
+        if (Date.now() - lastProgressAt > 2_400) {
+          lastProgressAt = Date.now()
+          emit(win, { type: 'codex_progress', content: 'On it, sir.' })
+        }
+        break
+      case 'plan':
+        emit(win, { type: 'codex_plan', plan: event.steps })
+        break
+      case 'diff':
+        emit(win, { type: 'codex_diff', diff: event.diff.slice(0, 8_000) })
+        break
+      case 'commandStart':
+        openCommands.set(event.itemId, event.command)
+        emit(win, {
+          type: 'tool_start',
+          toolName: 'codex_command',
+          toolArgs: { command: event.command, cwd: event.cwd }
+        })
+        break
+      case 'commandEnd':
+        openCommands.delete(event.itemId)
+        emit(win, {
+          type: 'tool_end',
+          toolName: 'codex_command',
+          toolArgs: { command: event.command },
+          toolResult: event.output.slice(-4_000),
+          ok: event.ok
+        })
+        break
+      case 'fileChange':
+        emit(win, {
+          type: 'tool_end',
+          toolName: 'codex_edit',
+          toolArgs: { paths: event.paths },
+          toolResult: event.paths.join('\n'),
+          ok: event.ok
+        })
+        break
+      case 'toolCall':
+        emit(win, {
+          type: 'tool_end',
+          toolName: `codex_${event.name}`,
+          toolArgs: {},
+          toolResult: event.ok ? 'ok' : 'failed',
+          ok: event.ok
+        })
+        break
+      case 'error':
+        emit(win, { type: 'codex_progress', content: `Fault: ${event.fault.message}` })
+        break
+      default:
+        break
+    }
+  }
+
+  try {
+    const result = await runCodexBridgeTurn({
+      input,
+      onEvent,
+      developerInstructions: system,
+      model: model || undefined,
+      effort: status.effort
+    })
+
+    void refreshCodexAllowance().then((allowance) => {
+      if (allowance) emit(win, { type: 'codex_status', codex: getCodexStatus() })
+    })
+
+    if (result.interrupted) {
+      const content = 'Stopped there, sir.'
+      const assistantMessage = addMessage({ role: 'assistant', content })
+      emit(win, { type: 'token', content })
+      emit(win, { type: 'message', message: assistantMessage })
+      emit(win, { type: 'done' })
+      return assistantMessage
+    }
+
+    const finalText =
+      result.text.trim() ||
+      (openCommands.size
+        ? 'Codex stopped mid-command, sir — nothing conclusive to report.'
+        : 'Codex finished but said nothing, sir — want me to run that again?')
+
+    // Streamed deltas already reached the UI and voice queue. Only send a
+    // missing suffix here; the final persisted message remains authoritative.
+    if (!streamedAnswer) {
+      emit(win, { type: 'token', content: finalText })
+    } else if (finalText.startsWith(streamedAnswer)) {
+      const tail = finalText.slice(streamedAnswer.length)
+      if (tail) emit(win, { type: 'token', content: tail })
+    }
+    const assistantMessage = addMessage({ id: uuid(), role: 'assistant', content: finalText })
+    emit(win, { type: 'message', message: assistantMessage })
+    emit(win, { type: 'done' })
+    return assistantMessage
+  } catch (err) {
+    return codexFallback(args, err)
+  }
+}
+
+/**
+ * Codex failed. Escalate only where Kai has opted in; otherwise say plainly
+ * what broke instead of quietly spending Anthropic credit.
+ */
+async function codexFallback(
+  args: {
+    displayContent: string
+    system: string
+    win: BrowserWindow | null
+    replyBudget: number
+    toolBudget: number
+  },
+  err: unknown
+): Promise<ChatMessage> {
+  const fault =
+    err instanceof CodexFault
+      ? err
+      : new CodexFault('unknown', err instanceof Error ? err.message : String(err))
+  const { win } = args
+  const settings = getSettings()
+
+  if (settings.geminiApiKey?.trim()) {
+    const model = settings.geminiModel || DEFAULT_GEMINI_MODEL
+    emit(win, {
+      type: 'route',
+      model,
+      tier: 'local',
+      reason: `ChatGPT failed → Gemini`
+    })
+    return runOpenAiLocalTurn(
+      args.displayContent,
+      args.system +
+        `\n\n=== ACTIVE BRAIN (THIS TURN — GEMINI FALLBACK) ===
+ChatGPT/Codex failed: ${fault.message}
+You are NOW on Gemini (${model}), the free fallback. Answer the ask. Do not claim to be ChatGPT. Do not narrate the ChatGPT fault unless Kai asks.
+=== END BRAIN ===`,
+      model,
+      win,
+      'gemini',
+      args.replyBudget,
+      args.toolBudget
+    )
+  }
+
+  if (settings.paidFallbackEnabled && settings.anthropicApiKey?.trim()) {
+    const model = settings.powerModel || 'claude-opus-5'
+    emit(win, {
+      type: 'route',
+      model,
+      tier: 'power',
+      reason: `ChatGPT failed → Opus (paid)`
+    })
+    return runAnthropicTurn(
+      args.displayContent,
+      args.system +
+        `\n\n=== ACTIVE BRAIN (THIS TURN — PAID FALLBACK) ===
+ChatGPT/Codex failed: ${fault.message}
+You are NOW on Anthropic Opus (${model}), which Kai pays for per token. He turned paid Opus fallback ON, so this is expected.
+Answer the ask. Do not claim to be ChatGPT. Do not narrate the ChatGPT fault unless Kai asks.
+=== END BRAIN ===`,
+      model,
+      'power',
+      win,
+      args.replyBudget,
+      args.toolBudget
+    )
+  }
+
+  const advice =
+    fault.kind === 'notInstalled'
+      ? ' Run `npm install -g @openai/codex` and reopen me.'
+      : fault.kind === 'notSignedIn'
+        ? ' Sign in from Systems → Brain.'
+        : fault.kind === 'usageLimit'
+          ? ' Add a Gemini key in Systems, or turn on paid Opus fallback.'
+          : fault.kind === 'contextWindow'
+            ? ' Say “new ChatGPT thread” and I’ll start clean.'
+            : ' Gemini (free) or Opus (paid) can cover if you enable them in Systems.'
+  const content = `${fault.message}${advice}`
+
+  emit(win, { type: 'error', error: fault.message })
+  const assistantMessage = addMessage({ id: uuid(), role: 'assistant', content })
+  emit(win, { type: 'token', content })
+  emit(win, { type: 'message', message: assistantMessage })
+  emit(win, { type: 'done' })
+  return assistantMessage
 }
 
 async function runOpenAiLocalTurn(
@@ -476,26 +1038,19 @@ async function runOpenAiLocalTurn(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       const short = message.replace(/\s+/g, ' ').slice(0, 100)
-      emit(win, {
-        type: 'route',
-        model: getSettings().fastModel || 'claude-haiku-4-5',
-        tier: 'fast',
-        reason: `QUICK (${label}) failed → Haiku this turn (${short})`
-      })
-      return runAnthropicTurn(
-        _userText,
-        system +
-          `\n\n=== ACTIVE BRAIN (THIS TURN — FALLBACK) ===
-${label} failed (${short}). You are NOW on Anthropic Haiku (${getSettings().fastModel || 'claude-haiku-4-5'}).
-Kai still has QUICK selected — only this turn fell back. If asked, say ${label} errored and Haiku covered it.
+      return escalateFromQuick({
+        displayContent: _userText,
+        system,
+        reason: `QUICK (${label}) failed → escalating (${short})`,
+        note: `\n\n=== ACTIVE BRAIN (THIS TURN — FALLBACK) ===
+${label} failed (${short}). You are NOT on ${label} any more; the brain named above is answering.
+Kai still has QUICK selected — only this turn fell back. If asked, say ${label} errored and this brain covered it.
 Do not keep claiming fallback on later turns unless this note appears again.
 === END BRAIN ===`,
-        getSettings().fastModel || 'claude-haiku-4-5',
-        'fast',
         win,
-        replyTokens,
-        toolTokens
-      )
+        replyBudget: replyTokens,
+        toolBudget: toolTokens
+      })
     }
 
     if (result.model && result.model !== activeModel) {
@@ -535,20 +1090,15 @@ Do not keep claiming fallback on later turns unless this note appears again.
       }
 
       if (shotWithoutClick) {
-        emit(win, {
-          type: 'route',
-          model: getSettings().fastModel || 'claude-haiku-4-5',
-          tier: 'fast',
-          reason: 'Escalated — desktop click needs vision → Haiku'
+        return escalateFromQuick({
+          displayContent: _userText,
+          system,
+          reason: 'Escalated — desktop click needs vision',
+          note: `\n\n(Escalated from ${label}: screenshot was taken but the click was not finished. Take a fresh desktop_screenshot if needed, desktop_click the correct control, and finish the user's task. Never ask permission. Never dump raw tool output — one short human sentence when done.)`,
+          win,
+          replyBudget: replyTokens,
+          toolBudget: toolTokens
         })
-        return runAnthropicTurn(
-          _userText,
-          system +
-            `\n\n(Escalated from ${label}: screenshot was taken but the click was not finished. Take a fresh desktop_screenshot if needed, desktop_click the correct control, and finish the user's task. Never ask permission. Never dump raw tool output — one short human sentence when done.)`,
-          getSettings().fastModel || 'claude-haiku-4-5',
-          'fast',
-          win
-        )
       }
 
       if (raw && !/^done\.?$/i.test(raw) && !looksLikeRawToolDump(raw)) {
@@ -564,20 +1114,15 @@ Do not keep claiming fallback on later turns unless this note appears again.
     }
 
     if (toolCalls.length >= 2 && loops === 1) {
-      emit(win, {
-        type: 'route',
-        model: getSettings().fastModel || 'claude-haiku-4-5',
-        tier: 'fast',
-        reason: 'Escalated — multi-tool task → Haiku'
+      return escalateFromQuick({
+        displayContent: _userText,
+        system,
+        reason: 'Escalated — multi-tool task',
+        note: `\n\n(Escalated from ${label} for tool-heavy work. Never ask permission for screenshots/clicks. Never dump raw tool output.)`,
+        win,
+        replyBudget: replyTokens,
+        toolBudget: toolTokens
       })
-      return runAnthropicTurn(
-        _userText,
-        system +
-          `\n\n(Escalated from ${label} for tool-heavy work. Never ask permission for screenshots/clicks. Never dump raw tool output.)`,
-        getSettings().fastModel || 'claude-haiku-4-5',
-        'fast',
-        win
-      )
     }
 
     messages.push({
@@ -585,6 +1130,12 @@ Do not keep claiming fallback on later turns unless this note appears again.
       content: result.content || '',
       tool_calls: toolCalls
     })
+
+    // OpenAI-compatible APIs reject image parts on a `tool` message, so any
+    // screenshot has to ride along in a follow-up user turn. Without this the
+    // QUICK tier (Gemini especially) only ever saw a text description of the
+    // screen and then guessed where to click.
+    const toolImages: Array<{ mediaType: string; data: string; toolName: string }> = []
 
     for (const call of toolCalls) {
       let args: Record<string, unknown> = {}
@@ -614,6 +1165,34 @@ Do not keep claiming fallback on later turns unless this note appears again.
         role: 'tool',
         content: `${toolResult.ok ? 'SUCCESS' : 'FAILURE'}: ${toolResult.result}`,
         tool_call_id: call.id
+      })
+      if (toolResult.image) {
+        toolImages.push({ ...toolResult.image, toolName: call.function.name })
+      }
+    }
+
+    if (toolImages.length) {
+      const parts: Array<
+        { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
+      > = [
+        {
+          type: 'text',
+          text:
+            `Here is the actual image from ${toolImages.map((i) => i.toolName).join(', ')}. ` +
+            'Look at it and continue the task — click the real control you can see. Do not ask permission.'
+        }
+      ]
+      for (const image of toolImages.slice(0, 2)) {
+        parts.push({
+          type: 'image_url',
+          image_url: { url: `data:${image.mediaType};base64,${image.data}` }
+        })
+      }
+      messages.push({
+        role: 'user',
+        content: parts,
+        // Ollama takes raw base64 on its own `images` field.
+        images: toolImages.slice(0, 2).map((i) => i.data)
       })
     }
   }

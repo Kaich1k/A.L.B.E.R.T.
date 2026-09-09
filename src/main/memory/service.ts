@@ -326,7 +326,39 @@ export function updateMemory(id: string, content: string, category?: string): Me
   return { ...existing, content, category: category ?? existing.category, updatedAt: now }
 }
 
-export async function recallMemories(query: string, limit = 6): Promise<MemoryFact[]> {
+function lexicalRecall(
+  rows: Array<MemoryFact & { embedding: string | null }>,
+  query: string,
+  limit: number
+): MemoryFact[] {
+  const stop = new Set([
+    'about', 'after', 'again', 'also', 'and', 'are', 'but', 'can', 'could', 'for',
+    'from', 'have', 'just', 'like', 'not', 'please', 'that', 'the', 'then', 'this',
+    'was', 'what', 'when', 'with', 'would', 'you', 'your'
+  ])
+  const tokens = [...new Set(
+    query.toLowerCase().match(/[a-z0-9']{3,}/g)?.filter((token) => !stop.has(token)) || []
+  )]
+  if (!tokens.length) return []
+
+  return rows
+    .map((row) => {
+      const haystack = row.content.toLowerCase()
+      const hits = tokens.reduce((count, token) => count + (haystack.includes(token) ? 1 : 0), 0)
+      const exactBonus = haystack.includes(query.toLowerCase().trim()) ? 2 : 0
+      return { row, score: hits + exactBonus }
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || b.row.updatedAt - a.row.updatedAt)
+    .slice(0, limit)
+    .map(({ row: { embedding: _embedding, ...memory } }) => memory)
+}
+
+export async function recallMemories(
+  query: string,
+  limit = 6,
+  options?: { semantic?: boolean }
+): Promise<MemoryFact[]> {
   const rows = getDb()
     .prepare(
       `SELECT id, content, category, embedding, source, confidence, last_used_at as lastUsedAt,
@@ -337,14 +369,16 @@ export async function recallMemories(query: string, limit = 6): Promise<MemoryFa
 
   if (rows.length === 0) return []
 
+  if (options?.semantic === false) {
+    const matches = lexicalRecall(rows, query, limit)
+    if (matches.length) getDb().prepare(`UPDATE memories SET last_used_at=? WHERE id IN (${matches.map(() => '?').join(',')})`).run(Date.now(), ...matches.map((m) => m.id))
+    return matches
+  }
+
   const queryVec = await embed(query)
 
   if (!queryVec) {
-    const q = query.toLowerCase()
-    const matches = rows
-      .filter((r) => r.content.toLowerCase().includes(q))
-      .slice(0, limit)
-      .map(({ embedding: _e, ...rest }) => rest)
+    const matches = lexicalRecall(rows, query, limit)
     if (matches.length) getDb().prepare(`UPDATE memories SET last_used_at=? WHERE id IN (${matches.map(() => '?').join(',')})`).run(Date.now(), ...matches.map((m) => m.id))
     return matches
   }

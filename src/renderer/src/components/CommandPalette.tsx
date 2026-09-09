@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { PanelId } from '../../../shared/types'
 import { useAlbertStore } from '../store'
 
-const commands: Array<{ label: string; hint: string; panel?: PanelId; action?: 'capture' | 'mission' | 'computer' | 'approvals' | 'focus' | 'routines' | 'voice' }> = [
+const commands: Array<{ label: string; hint: string; panel?: PanelId; action?: 'capture' | 'mission' | 'computer' | 'approvals' | 'focus' | 'routines' | 'voice' | 'pulse' | 'capsules' | 'theater' }> = [
   { label: 'Go home', hint: 'System overview', panel: 'home' },
   { label: 'Open communications', hint: 'Chat and voice', panel: 'conversation' },
   { label: 'Toggle voice interface', hint: 'Engage or end the live channel', action: 'voice' },
@@ -12,7 +12,9 @@ const commands: Array<{ label: string; hint: string; panel?: PanelId; action?: '
   { label: 'Open approvals', hint: 'Human checkpoints', action: 'approvals' },
   { label: 'Start focus mode', hint: 'Attention protocol', action: 'focus' },
   { label: 'Configure routines', hint: 'Recurring preparations', action: 'routines' },
-  { label: 'Review memory', hint: 'Long-term context', panel: 'memory' },
+  { label: 'Command theater', hint: 'Live tool operations map', action: 'theater' },
+  { label: 'Context capsules', hint: 'Save or resume a working position', action: 'capsules' },
+  { label: 'Review memory', hint: 'Memory graph and provenance', panel: 'memory' },
   { label: 'Inspect activity', hint: 'Tool flight recorder', panel: 'activity' },
   { label: 'Configure systems', hint: 'Models, voice, and access', panel: 'settings' },
   { label: 'Open Albert Computer', hint: 'Sandbox browser', action: 'computer' }

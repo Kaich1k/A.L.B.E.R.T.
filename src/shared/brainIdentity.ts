@@ -1,6 +1,6 @@
 export type ActiveBrainRoute = {
-  provider: 'ollama' | 'groq' | 'gemini' | 'anthropic'
-  tier: 'local' | 'fast' | 'power'
+  provider: 'ollama' | 'groq' | 'gemini' | 'anthropic' | 'codex'
+  tier: 'local' | 'fast' | 'power' | 'codex'
   model: string
 }
 
@@ -19,13 +19,18 @@ export function isActiveBrainQuestion(text: string): boolean {
       normalized
     ) ||
     /\b(?:current|active)\s+(?:ai|model|brain|provider)\s*\??$/.test(normalized) ||
-    /\bare\s+you\s+(?:using|running|on)\s+(?:haiku|opus|anthropic|ollama|groq|gemini|google|gpt[- ]?oss|llama|qwen)\b/.test(
+    /\bare\s+you\s+(?:using|running|on)\s+(?:haiku|opus|anthropic|ollama|groq|gemini|google|gpt[- ]?oss|llama|qwen|codex|chatgpt)\b/.test(
       normalized
     )
   )
 }
 
 export function activeBrainReply(route: ActiveBrainRoute): string {
+  if (route.provider === 'codex') {
+    // Codex resolves the exact slug at turn time; don't claim one we don't have.
+    const model = route.model && route.model !== 'codex' ? ` — ${route.model}` : ''
+    return `Active brain this turn: ChatGPT${model}, sir — running on your ChatGPT allowance.`
+  }
   if (route.provider === 'groq') {
     return `Active brain this turn: Groq Cloud — ${route.model}, sir.`
   }

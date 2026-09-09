@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { mkdirSync, existsSync, copyFileSync } from 'fs'
 import { join } from 'path'
 import { fork, type ChildProcess } from 'child_process'
+import { mergeTranscriptChunks } from '../../shared/voiceReliability'
 
 type Pending = {
   resolve: (value: string) => void
@@ -173,35 +174,43 @@ export async function transcribeFloat32(
     samples instanceof Float32Array ? samples : Float32Array.from(samples)
   if (raw.length < 2400) return ''
 
-  // Cap before IPC — matches worker limit, keeps peak RAM down
-  const maxSamples = 16_000 * 20
-  const clipped = raw.length > maxSamples ? raw.subarray(raw.length - maxSamples) : raw
-
   return enqueue(async () => {
-    try {
-      await ensureWorker()
-      return await callWorker({
-        type: 'transcribe',
-        pcmBase64: samplesToBase64(clipped),
-        cacheDir: cacheDir(),
-        prompt
-      })
-    } catch (err) {
-      // Worker may have died mid-run (OOM) — one retry with a fresh process
-      const message = err instanceof Error ? err.message : String(err)
-      if (/exited|not running/i.test(message)) {
+    // Keep every word from longer turns while respecting the worker's 20-second
+    // memory ceiling. A small overlap gives Whisper context at each boundary.
+    const chunkSamples = 16_000 * 18
+    const overlapSamples = 16_000
+    const chunks: Float32Array[] = []
+    for (let start = 0; start < raw.length; start += chunkSamples - overlapSamples) {
+      chunks.push(raw.subarray(start, Math.min(raw.length, start + chunkSamples)))
+      if (start + chunkSamples >= raw.length) break
+    }
+
+    const transcripts: string[] = []
+    for (const chunk of chunks) {
+      try {
+        await ensureWorker()
+        transcripts.push(await callWorker({
+          type: 'transcribe',
+          pcmBase64: samplesToBase64(chunk),
+          cacheDir: cacheDir(),
+          prompt
+        }))
+      } catch (err) {
+        // Worker may have died mid-run (OOM) — retry this chunk once fresh.
+        const message = err instanceof Error ? err.message : String(err)
+        if (!/exited|not running/i.test(message)) throw err
         worker = null
         workerReady = null
         await ensureWorker()
-        return await callWorker({
+        transcripts.push(await callWorker({
           type: 'transcribe',
-          pcmBase64: samplesToBase64(clipped),
+          pcmBase64: samplesToBase64(chunk),
           cacheDir: cacheDir(),
           prompt
-        })
+        }))
       }
-      throw err
     }
+    return mergeTranscriptChunks(transcripts)
   })
 }
 

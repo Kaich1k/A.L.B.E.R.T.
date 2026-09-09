@@ -1,5 +1,6 @@
 import type {
   ChatMessage,
+  ChatImagePayload,
   CompanionConfig,
   LocalData,
   MemoryFact,
@@ -325,6 +326,49 @@ export class MacSyncError extends Error {
 
 export function normalizeBase(url: string): string {
   return normalizeMacUrl(url)
+}
+
+export async function chatWithMac(opts: {
+  config: CompanionConfig
+  text: string
+  images?: ChatImagePayload[]
+  userMessageId: string
+}): Promise<import('./prompt').ProviderReply> {
+  const base = normalizeBase(opts.config.macBaseUrl)
+  if (!base || !opts.config.macCredential.trim()) {
+    throw new MacSyncError('Enroll this phone under Systems → Mac Link first', 0, 'auth')
+  }
+  const startedAt = Date.now()
+  const response = await fetchWithTimeout(
+    `${base}/v2/chat/complete`,
+    {
+      method: 'POST',
+      headers: authHeaders(opts.config.macCredential),
+      body: JSON.stringify({
+        text: opts.text,
+        images: opts.images || [],
+        userMessageId: opts.userMessageId
+      })
+    },
+    90_000
+  )
+  const parsed = await responseJson<{
+    ok?: boolean
+    error?: string
+    provider?: string
+    model?: string
+    message?: { content?: string }
+  }>(response)
+  if (!parsed.ok || !parsed.message?.content) {
+    throw new MacSyncError(parsed.error || 'Mac brain returned an incomplete response', response.status, 'protocol')
+  }
+  return {
+    reply: parsed.message.content,
+    newMemories: [],
+    provider: 'mac',
+    model: parsed.model || 'ChatGPT / Codex',
+    latencyMs: Math.max(0, Date.now() - startedAt)
+  }
 }
 
 async function fetchWithTimeout(

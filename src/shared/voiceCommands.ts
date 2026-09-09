@@ -137,7 +137,20 @@ const HALLUCINATION_PATTERNS: RegExp[] = [
   /^\(.*\)$/,
   // Whisper silence / noise crumbs that used to fake end-voice (“Bye.” → standby)
   /^(bye|goodbye|good\s*bye|hello|hi|hey|yes|no|okay|ok|so|the|a|to|and)\.?$/i,
-  /^(thanks?|thank\s+you)(\s+for\s+watching)?\.?$/i
+  /^(thanks?|thank\s+you)(\s+for\s+watching)?\.?$/i,
+  // Fan / HVAC / keyboard noise crumbs observed from the local Whisper build.
+  /^(you\s+know|i\s+don'?t\s+know|i\s+think\s+so)\.?$/i,
+  /^(yeah|yep|nope|mm+|mhm+|huh|eh|ha+|oh+|ow|wow|whoa)\.?$/i,
+  /^(okay|alright|all\s+right)(\s+so)?\.?$/i,
+  /^(let'?s\s+go|here\s+we\s+go|come\s+on)\.?$/i,
+  /^(what|why|how|who|where|when)\??\.?$/i,
+  /^(and|but|or|if|then|that'?s\s+it|that'?s\s+all)\.?$/i,
+  // Boilerplate Whisper emits for near-silence, especially on video-trained data.
+  /^(?:.*\b)?(?:like\s+and\s+subscribe|see\s+you\s+(?:next\s+time|in\s+the\s+next\s+video)|don'?t\s+forget\s+to\s+subscribe)\b.*$/i,
+  /^(?:transcription|transcript|translated|subtitles?)\b.*$/i,
+  /^[\p{P}\p{S}\s]+$/u,
+  // A single repeated token ("the the the", "you you") is never a real ask.
+  /^(\b\w+\b)(\s+\1\b){1,}\.?$/i
 ]
 
 /** Soft phonetic / Whisper repairs before command matching + chat. */
@@ -259,8 +272,28 @@ export function isEndVoiceCommand(text: string): boolean {
   return clauseIsEndVoice(corrected)
 }
 
-const STOPWORD_ONLY =
-  /^(?:the|a|an|to|and|or|of|in|on|at|for|is|are|was|were|be|you|i|it|that|this|so|ok|okay|yes|no|uh|um|hmm|ah|oh|hey|hi|hello|bye|thanks?|thank\s+you|please|well|yeah|yep|nope)(?:\s+(?:the|a|an|to|and|or|of|in|on|at|for|is|are|was|were|be|you|i|it|that|this|so|ok|okay|yes|no|uh|um|hmm|ah|oh|hey|hi|hello|bye|thanks?|please|well|yeah|yep|nope)){0,3}\.?$/i
+const STOPWORD =
+  '(?:the|a|an|to|and|or|of|in|on|at|for|is|are|was|were|be|been|am|you|your|i|my|me|it|its|that|this|there|here|now|just|like|so|ok|okay|yes|no|not|uh|um|hmm|mhm|ah|oh|eh|huh|hey|hi|hello|bye|thanks?|thank\\s+you|please|well|yeah|yep|nope|right|really|very|got|get|do|did|does|know|think|mean)'
+
+const STOPWORD_ONLY = new RegExp(
+  `^${STOPWORD}(?:\\s+${STOPWORD}){0,5}\\.?$`,
+  'i'
+)
+
+/**
+ * Real speech carries content words. Noise-driven Whisper output is almost
+ * always short filler, so requiring at least one content word — and two for
+ * anything that would trigger a command — is the cheapest reliable filter.
+ */
+export function voiceContentWords(text: string): string[] {
+  const cleaned = text
+    .toLowerCase()
+    .replace(/[^a-z0-9' ]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+  const stop = new RegExp(`^${STOPWORD}$`, 'i')
+  return cleaned.filter((word) => word.length > 1 && !stop.test(word))
+}
 
 export function isLikelyHallucination(text: string): boolean {
   const t = text.trim()
@@ -269,8 +302,12 @@ export function isLikelyHallucination(text: string): boolean {
   const words = t.split(/\s+/).filter(Boolean)
   if (words.length === 1 && t.length < 4) return true
   // Whisper noise crumbs: "you", "the", "you the", "thank you", etc.
-  if (words.length <= 4 && STOPWORD_ONLY.test(t.replace(/[^\w\s']/g, '').trim())) return true
-  return HALLUCINATION_PATTERNS.some((re) => re.test(t))
+  if (words.length <= 6 && STOPWORD_ONLY.test(t.replace(/[^\w\s']/g, '').trim())) return true
+  if (HALLUCINATION_PATTERNS.some((re) => re.test(t))) return true
+  // Long-ish output with no content words at all is noise, however many filler
+  // words Whisper strung together.
+  if (words.length >= 3 && voiceContentWords(t).length === 0) return true
+  return false
 }
 
 export function isMuteCommand(text: string): boolean {
@@ -295,9 +332,54 @@ export function isHideCommand(text: string): boolean {
   )
 }
 
+/** Voice/chat shortcut so Kai can drop a bloated Codex thread without opening Systems. */
+export function isNewCodexThreadCommand(text: string): boolean {
+  const t = text.replace(/\s+/g, ' ').trim().toLowerCase()
+  return /^(hey\s+)?(a\.?l\.?b\.?e\.?r\.?t\.?[,\s]+)?((please\s+)?(start|open|make|begin)\s+(a\s+)?)?new\s+codex\s+thread\b/.test(
+    t
+  )
+}
+
 export function isShowCommand(text: string): boolean {
   const corrected = correctTranscript(text)
   if (!corrected) return false
   if (/\bshow\s+me\b/i.test(corrected)) return false
   return clauses(corrected).some((c) => matchesWhole(c, SHOW_WHOLE) && !CLAUSE_TASK.test(c))
+}
+
+const RESUME_MEDIA =
+  /\b(playback|music|song|video|download|spotify|podcast|recording|timer|focus)\b/i
+
+export function parseResumeCapsuleCommand(
+  text: string
+): { query: string; remainder: string } | null {
+  const core = coreUtterance(text)
+  if (!core || RESUME_MEDIA.test(core)) return null
+  const match = core.match(
+    /^(?:resume|restore|load|reopen)\s+(?:the\s+)?(?:context\s+)?(?:capsule\s+)?(?:for\s+|called\s+|named\s+)?["']?(.+?)["']?$/i
+  )
+  if (!match?.[1]) return null
+  const raw = match[1].trim().replace(/[.!]+$/, '')
+  const split = raw.match(/^(.*?)(?:\s+(?:and|,)\s+)(.+)$/i)
+  const query = (split?.[1] || raw).trim()
+  const remainder = (split?.[2] || '').trim()
+  if (query.length < 2 || query.length > 80) return null
+  if (/^(this|that|it|here|now)$/i.test(query)) return null
+  return { query, remainder }
+}
+
+export function parseSaveCapsuleCommand(text: string): { title: string } | null {
+  const core = coreUtterance(text)
+  if (!core) return null
+  const named = core.match(
+    /^(?:please\s+)?(?:seal|save|store|capture)\s+(?:this\s+)?(?:as\s+)?(?:a\s+)?(?:context\s+)?capsule(?:\s+(?:as|called|named|for)\s+["']?(.+?)["']?)?$/i
+  )
+  if (named) {
+    return { title: (named[1] || '').trim().replace(/[.!]+$/, '') }
+  }
+  const session = core.match(
+    /^(?:please\s+)?(?:save|seal)\s+(?:this\s+)?(?:session|context|position|working state)(?:\s+(?:as|called|named)\s+["']?(.+?)["']?)?$/i
+  )
+  if (!session) return null
+  return { title: (session[1] || '').trim().replace(/[.!]+$/, '') }
 }

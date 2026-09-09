@@ -80,6 +80,7 @@ export function defaultModelFor(provider: LlmProvider): string {
 }
 
 export function modelsFor(provider: LlmProvider): ReadonlyArray<{ value: string; label: string }> {
+  if (provider === 'mac') return [{ value: 'codex', label: 'ChatGPT / Codex (paired Mac)' }]
   if (provider === 'anthropic') return ANTHROPIC_MODELS
   const groqModels = groqModelsForDate()
   const gemini = geminiModels()

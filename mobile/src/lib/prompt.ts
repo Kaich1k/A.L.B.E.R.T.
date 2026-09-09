@@ -27,7 +27,7 @@ export interface ProviderReply {
   reply: string
   newMemories: { category: string; content: string }[]
   /** The provider that actually answered, including after auto fallback. */
-  provider: StandaloneProvider
+  provider: StandaloneProvider | 'mac'
   /** The model reported by the provider, falling back to the requested model. */
   model: string
   /** End-to-end route latency, including retries and fallback. */

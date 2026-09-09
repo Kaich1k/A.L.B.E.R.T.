@@ -237,7 +237,7 @@ export const projectTools: ToolDefinition[] = [
   {
     name: 'write_project_file',
     description:
-      'Create or overwrite a file in the project folder. Prefer apply_project_patch for existing files. Logged to Activity.',
+      'Create or overwrite a file in the project folder. Prefer apply_project_patch for existing files. While ALBERT is running live, do not write ALBERT src/scripts/package.json — call cursor_agent instead.',
     parameters: {
       type: 'object',
       properties: {

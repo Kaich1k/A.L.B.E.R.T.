@@ -52,6 +52,7 @@ import {
 } from './src/lib/storage'
 import {
   checkMacHealth,
+  chatWithMac,
   enrollWithMac,
   MacSyncError,
   normalizeBase,
@@ -525,12 +526,19 @@ export default function App(): React.JSX.Element {
                 latencyMs: 0,
                 fallbackFrom: undefined as undefined
               }
-            : await chatWithProvider({
-                config: configRef.current,
-                messages: providerMessages,
-                memories: dataRef.current.memories,
-                signal: controller.signal
-              })
+            : paired && linkState === 'authenticated'
+              ? await chatWithMac({
+                  config: configRef.current,
+                  text,
+                  images: imagePayloads,
+                  userMessageId: userId
+                })
+              : await chatWithProvider({
+                  config: configRef.current,
+                  messages: providerMessages,
+                  memories: dataRef.current.memories,
+                  signal: controller.signal
+                })
           if (controller.signal.aborted) throw new ProviderRequestError({
             message: 'Response cancelled.',
             code: 'cancelled',
@@ -1075,7 +1083,10 @@ export default function App(): React.JSX.Element {
   }, [data.operations.missions])
   const pendingApprovals = data.operations.approvals.filter((approval) => approval.state === 'pending').length
   const brainConfigured = Boolean(
-    config.anthropicApiKey.trim() || config.groqApiKey.trim() || config.geminiApiKey.trim()
+    linkState === 'authenticated' ||
+      config.anthropicApiKey.trim() ||
+      config.groqApiKey.trim() ||
+      config.geminiApiKey.trim()
   )
   const systemsAttention = !brainConfigured || linkState === 'auth-failed' || linkState === 'fault'
 
@@ -1120,7 +1131,7 @@ export default function App(): React.JSX.Element {
                 voiceStatus={voice.status}
                 voiceSupported={voice.supported}
                 wakeArmed={voice.wakeArmed}
-                brainLabel={`PHONE · ${config.provider.toUpperCase()}`}
+                brainLabel={linkState === 'authenticated' ? 'PHONE · CHATGPT / MAC' : `PHONE · ${config.provider.toUpperCase()}`}
                 modelLabel={config.model.replace(/^.*\//, '').toUpperCase()}
                 memoryCount={data.memories.length}
                 priorityMission={priorityMission}
@@ -1259,7 +1270,7 @@ export default function App(): React.JSX.Element {
           <StatusRail
             voicePhase={voice.phase}
             linkState={linkState}
-            routeLabel={config.provider}
+                routeLabel={linkState === 'authenticated' ? 'CHATGPT / MAC' : config.provider}
             pendingCount={data.sync.outbox.length}
             lastSyncLabel={formatSyncLabel(data.sync.lastSyncAt)}
             onPressLink={() => setTab('systems')}

@@ -118,7 +118,7 @@ async function writeSecret(key: string, value: string): Promise<void> {
 
 function normalizeConfig(value: Partial<CompanionConfig>): CompanionConfig {
   const provider =
-    value.provider === 'anthropic' || value.provider === 'groq' || value.provider === 'gemini'
+    value.provider === 'anthropic' || value.provider === 'groq' || value.provider === 'gemini' || value.provider === 'mac'
       ? value.provider
       : 'auto'
   const voiceRate = typeof value.voiceRate === 'number' && Number.isFinite(value.voiceRate)

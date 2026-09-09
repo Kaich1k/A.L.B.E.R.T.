@@ -2,6 +2,7 @@ import type {
   ActivityEntry,
   AgentStreamEvent,
   AlbertSettings,
+  ChatImagePayload,
   ChatMessage,
   ChatSendPayload,
   ComputerState,
@@ -14,8 +15,43 @@ import type {
   Routine,
   ApprovalRequest,
   CaptureItem,
-  RealtimeSessionConfig
+  CodexAllowance,
+  CodexStatus,
+  ContextCapsule,
+  CursorAgentStatus,
+  DailyBrief,
+  HudSnapshot,
+  MissionArtifact,
+  ProjectPulse,
+  TheaterEvent,
+  RealtimeSessionConfig,
+  VoiceState
 } from './types'
+
+export interface ChatGptImportScan {
+  foundMemoryJson: boolean
+  foundConversationsJson: boolean
+  /** Enabled saved memories present in the export. */
+  totalMemories: number
+  /** Saved memories switched off in ChatGPT — skipped on purpose. */
+  disabledMemories: number
+  /** Durable-looking facts distilled from transcripts. */
+  totalHistory: number
+  conversationsSeen: number
+  messagesScanned: number
+  /** Counts after removing anything already in memory. */
+  newMemories: number
+  newHistory: number
+  warnings: string[]
+}
+
+export interface ChatGptImportResult {
+  importedMemories: number
+  importedHistory: number
+  skippedDuplicates: number
+  failed: number
+  warnings: string[]
+}
 
 export interface AlbertApi {
   getSettings: () => Promise<AlbertSettings>
@@ -26,6 +62,7 @@ export interface AlbertApi {
   /** Text or `{ text, images }` — images are base64 payloads from Comm. */
   sendChat: (payload: string | ChatSendPayload) => Promise<ChatMessage>
   getChatImageDataUrl: (fileName: string) => Promise<string | null>
+  readClipboardImage: () => Promise<ChatImagePayload | null>
   onChatEvent: (handler: (event: AgentStreamEvent) => void) => () => void
   listMemories: () => Promise<MemoryFact[]>
   deleteMemory: (id: string) => Promise<boolean>
@@ -129,4 +166,58 @@ export interface AlbertApi {
   createCapture: (content: string, kind?: CaptureItem['kind']) => Promise<CaptureItem>
   updateCapture: (id: string, state: CaptureItem['state']) => Promise<CaptureItem | null>
   onOperationsChanged: (handler: () => void) => () => void
+
+  /** Codex engineering brain */
+  getCodexStatus: () => Promise<CodexStatus>
+  connectCodex: () => Promise<CodexStatus>
+  loginCodex: () => Promise<{ authUrl: string | null; error?: string }>
+  cancelCodexLogin: () => Promise<void>
+  logoutCodex: () => Promise<CodexStatus>
+  refreshCodexAllowance: () => Promise<CodexAllowance | null>
+  interruptCodex: () => Promise<boolean>
+  newCodexThread: () => Promise<CodexStatus>
+
+  /** One-time ChatGPT export import (no memory API exists) */
+  pickChatGptExport: () => Promise<string | null>
+  scanChatGptExport: (path: string) => Promise<ChatGptImportScan>
+  runChatGptImport: (
+    path: string,
+    includeHistory?: boolean
+  ) => Promise<ChatGptImportResult>
+
+  listCapsules: () => Promise<ContextCapsule[]>
+  saveCapsule: (input?: { title?: string; notes?: string; panel?: string; missionId?: string }) => Promise<ContextCapsule>
+  restoreCapsule: (idOrQuery: string) => Promise<{ capsule: ContextCapsule | null; reply: string }>
+  deleteCapsule: (id: string) => Promise<boolean>
+  importCapsules: (raw: unknown) => Promise<ContextCapsule[]>
+  onCapsulesChanged: (handler: () => void) => () => void
+  onCapsuleRestored: (handler: (capsule: ContextCapsule) => void) => () => void
+  getProjectPulse: (force?: boolean) => Promise<ProjectPulse>
+  getDailyBrief: (force?: boolean) => Promise<DailyBrief>
+  listArtifacts: () => Promise<MissionArtifact[]>
+  saveArtifact: (input: { title: string; body: string; kind?: string; missionId?: string }) => Promise<MissionArtifact>
+  listTheater: () => Promise<TheaterEvent[]>
+  getHudSnapshot: () => Promise<HudSnapshot>
+  getCursorAgentStatus: () => Promise<CursorAgentStatus>
+  runCursorAgent: (prompt: string, workspace?: string) => Promise<{ ok: boolean; result: string }>
+  openInCursor: (workspace?: string) => Promise<{ ok: boolean; result: string }>
+  interruptCursorAgent: () => Promise<boolean>
+  setAmbientHud: (enabled: boolean) => Promise<boolean>
+  hudDrag: (payload: {
+    phase: 'start' | 'move' | 'end'
+    screenX: number
+    screenY: number
+  }) => Promise<void>
+  setHudRoam: (enabled: boolean) => Promise<boolean>
+  dockHud: (slot?: {
+    x: number
+    y: number
+    width: number
+    height: number
+    park?: boolean
+  }) => Promise<void>
+  undockHud: () => Promise<void>
+  reportHudRuntime: (state: { voiceState?: VoiceState; busy?: boolean; tool?: string }) => Promise<void>
+  setHudClickThrough: (ignore: boolean) => Promise<void>
+  toggleVoice: () => Promise<void>
 }

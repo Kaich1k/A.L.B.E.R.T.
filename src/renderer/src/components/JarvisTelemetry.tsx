@@ -76,15 +76,13 @@ function shortenModel(model: string): string {
 function routeLabel(settings: AlbertSettings): string {
   switch (settings.routingMode) {
     case 'local':
-      if (settings.localProvider === 'groq') return 'QUICK · GROQ CLOUD'
-      if (settings.localProvider === 'gemini') return 'QUICK · GEMINI'
-      return 'QUICK · OLLAMA'
+      return settings.localProvider === 'gemini' ? 'GEMINI FALLBACK' : 'LOCKED FALLBACK'
     case 'fast':
-      return `FAST · ${shortenModel(settings.fastModel)}`
+      return `OPUS FAMILY · ${shortenModel(settings.fastModel)}`
     case 'power':
-      return `POWER · ${shortenModel(settings.powerModel)}`
+      return `OPUS · ${shortenModel(settings.powerModel)}`
     default:
-      return 'AUTO · ADAPTIVE'
+      return 'CHATGPT'
   }
 }
 
@@ -329,7 +327,7 @@ export function JarvisTelemetry({
           <TelemetryReadout
             code="RTE"
             label="Cognitive routing"
-            value={settings.routingMode.toUpperCase()}
+            value={settings.routingMode === 'codex' || settings.routingMode === 'auto' ? 'CHATGPT' : settings.routingMode.toUpperCase()}
             detail={route}
             meta={configured ? 'ROUTE CONFIGURED' : 'PROVIDER REQUIRED'}
             active={busy || streamingText.length > 0}

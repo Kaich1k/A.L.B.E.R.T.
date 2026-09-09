@@ -3,6 +3,8 @@ import type {
   ActivityEntry,
   AlbertSettings,
   ChatMessage,
+  CodexPlanStepView,
+  CodexStatus,
   MemoryFact,
   PanelId,
   VoiceState
@@ -22,6 +24,14 @@ interface AlbertState {
   voiceStatus: string
   routeInfo: string
   wakeArmed: boolean
+  /** Latest Codex bridge status — drives the allowance readout. */
+  codexStatus: CodexStatus | null
+  /** Codex plan for the current turn (empty between turns). */
+  codexPlan: CodexPlanStepView[]
+  /** Newest Codex progress line (reasoning, command, edit). */
+  codexProgress: string
+  /** Unified diff Codex has produced so far this turn. */
+  codexDiff: string
   setPanel: (panel: PanelId) => void
   setSettings: (settings: AlbertSettings) => void
   setMessages: (messages: ChatMessage[]) => void
@@ -36,6 +46,12 @@ interface AlbertState {
   setVoiceStatus: (status: string) => void
   setRouteInfo: (info: string) => void
   setWakeArmed: (armed: boolean) => void
+  setCodexStatus: (status: CodexStatus | null) => void
+  setCodexPlan: (plan: CodexPlanStepView[]) => void
+  setCodexProgress: (line: string) => void
+  setCodexDiff: (diff: string) => void
+  /** Wipe per-turn Codex HUD state when a turn ends. */
+  clearCodexTurn: () => void
 }
 
 export const useAlbertStore = create<AlbertState>((set) => ({
@@ -51,6 +67,10 @@ export const useAlbertStore = create<AlbertState>((set) => ({
   voiceStatus: '',
   routeInfo: '',
   wakeArmed: false,
+  codexStatus: null,
+  codexPlan: [],
+  codexProgress: '',
+  codexDiff: '',
   setPanel: (panel) => set({ panel }),
   setSettings: (settings) => set({ settings }),
   setMessages: (messages) => set({ messages }),
@@ -78,5 +98,10 @@ export const useAlbertStore = create<AlbertState>((set) => ({
   setVoiceState: (voiceState) => set({ voiceState }),
   setVoiceStatus: (voiceStatus) => set({ voiceStatus }),
   setRouteInfo: (routeInfo) => set({ routeInfo }),
-  setWakeArmed: (wakeArmed) => set({ wakeArmed })
+  setWakeArmed: (wakeArmed) => set({ wakeArmed }),
+  setCodexStatus: (codexStatus) => set({ codexStatus }),
+  setCodexPlan: (codexPlan) => set({ codexPlan }),
+  setCodexProgress: (codexProgress) => set({ codexProgress }),
+  setCodexDiff: (codexDiff) => set({ codexDiff }),
+  clearCodexTurn: () => set({ codexPlan: [], codexProgress: '', codexDiff: '' })
 }))

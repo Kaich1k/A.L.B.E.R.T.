@@ -9,6 +9,7 @@ import type {
   OperationsSnapshot,
   Routine
 } from '../../shared/types'
+import { classifyApprovalKind } from '../../shared/approvalKind'
 import { getDb } from '../memory/db'
 
 type MissionRow = Omit<Mission, 'steps' | 'deadline' | 'budgetCents'> & {
@@ -214,17 +215,22 @@ export function deleteRoutine(id: string): boolean {
 }
 
 export function listApprovals(): ApprovalRequest[] {
-  return getDb().prepare(
+  const rows = getDb().prepare(
     `SELECT id, mission_id as missionId, title, description, action_label as actionLabel, risk, preview,
-            state, created_at as createdAt, COALESCE(updated_at, resolved_at, created_at) as updatedAt,
+            kind, state, created_at as createdAt, COALESCE(updated_at, resolved_at, created_at) as updatedAt,
             resolved_at as resolvedAt FROM approvals ORDER BY state='pending' DESC, created_at DESC`
   ).all() as ApprovalRequest[]
+  return rows.map((row) => ({
+    ...row,
+    kind: row.kind || classifyApprovalKind(row)
+  }))
 }
 
 export function createApproval(input: Omit<ApprovalRequest, 'id' | 'state' | 'createdAt' | 'updatedAt' | 'resolvedAt'>): ApprovalRequest {
   const id = uuid(); const now = Date.now()
-  getDb().prepare(`INSERT INTO approvals (id,mission_id,title,description,action_label,risk,preview,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'pending',?,?)`)
-    .run(id, input.missionId ?? null, input.title, input.description, input.actionLabel, input.risk, input.preview ?? null, now, now)
+  const kind = input.kind || classifyApprovalKind(input)
+  getDb().prepare(`INSERT INTO approvals (id,mission_id,title,description,action_label,risk,preview,kind,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'pending',?,?)`)
+    .run(id, input.missionId ?? null, input.title, input.description, input.actionLabel, input.risk, input.preview ?? null, kind, now, now)
   if (input.missionId) updateMission(input.missionId, { state: 'approval' })
   event('approval', id, 'created', input.title)
   return listApprovals().find((approval) => approval.id === id)!

@@ -1,5 +1,13 @@
 import { APP_NAME } from '../../../shared/brand'
-import type { PanelId, RoutingMode } from '../../../shared/types'
+import {
+  brainChoice,
+  brainLockHint,
+  chatgptStatusLine,
+  hasTalkableBrain,
+  settingsForBrain,
+  type BrainChoice
+} from '../../../shared/brainRouting'
+import type { PanelId } from '../../../shared/types'
 import { useAlbertStore } from '../store'
 
 const items: { id: PanelId; label: string }[] = [
@@ -18,21 +26,13 @@ export function Sidebar(): React.JSX.Element {
   const wakeArmed = useAlbertStore((s) => s.wakeArmed)
   const settings = useAlbertStore((s) => s.settings)
   const setSettings = useAlbertStore((s) => s.setSettings)
-  const routeInfo = useAlbertStore((s) => s.routeInfo)
-  const hasBrain = Boolean(
-    settings.anthropicApiKey?.trim() ||
-      settings.ollamaApiKey?.trim() ||
-      settings.groqApiKey?.trim() ||
-      settings.geminiApiKey?.trim() ||
-      settings.localProvider === 'ollama'
-  )
+  const codexStatus = useAlbertStore((s) => s.codexStatus)
+  const hasBrain = hasTalkableBrain(settings)
+  const active = brainChoice(settings)
 
-  const mode = settings.routingMode || 'auto'
-  const isAuto = mode === 'auto'
-
-  async function setMode(next: RoutingMode): Promise<void> {
+  async function setBrain(next: BrainChoice): Promise<void> {
     try {
-      const updated = await window.albert.setSettings({ routingMode: next })
+      const updated = await window.albert.setSettings(settingsForBrain(next))
       setSettings(updated)
     } catch {
       /* ignore */
@@ -43,7 +43,7 @@ export function Sidebar(): React.JSX.Element {
     <aside className="sidebar">
       <div className="brand-mark">
         <h1>{APP_NAME}</h1>
-        <span>Interface protocol · v0.1.0</span>
+        <span>ChatGPT · on comms</span>
       </div>
       <nav className="nav">
         {items.map((item, index) => (
@@ -63,43 +63,43 @@ export function Sidebar(): React.JSX.Element {
           Computer
         </button>
       </nav>
-      <div className="sidebar-command-hint"><span>Command deck</span><kbd>⌘ K</kbd></div>
+      <div className="sidebar-command-hint">
+        <span>Command deck</span>
+        <kbd>⌘ K</kbd>
+      </div>
 
-      <div
-        className="mode-toggle"
-        title={
-          isAuto
-            ? 'Auto: QUICK (Ollama/Groq/Gemini) → Haiku → Opus'
-            : routeInfo || undefined
-        }
-      >
-        <span className="hud-label">Routing mode</span>
-        <div className="mode-toggle-row triple">
+      <div className="brain-picker">
+        <span className="hud-label">Brain</span>
+        <button
+          type="button"
+          className={`brain-primary ${active === 'chatgpt' ? 'active' : ''}`}
+          onClick={() => void setBrain('chatgpt')}
+        >
+          <span className="brain-primary-name">ChatGPT</span>
+          <span className="brain-primary-meta">
+            {codexStatus?.signedIn
+              ? codexStatus.allowance?.label || 'Signed in'
+              : 'Sign in · Systems'}
+          </span>
+        </button>
+        <span className="hud-label faint">Fallback — only if you lock it, or ChatGPT fails</span>
+        <div className="mode-toggle-row">
           <button
             type="button"
-            className={mode === 'local' ? 'active' : ''}
-            onClick={() => void setMode(mode === 'local' ? 'auto' : 'local')}
+            className={active === 'gemini' ? 'active' : ''}
+            onClick={() => void setBrain(active === 'gemini' ? 'chatgpt' : 'gemini')}
           >
-            QUICK
+            Gemini
           </button>
           <button
             type="button"
-            className={mode === 'fast' ? 'active' : ''}
-            onClick={() => void setMode(mode === 'fast' ? 'auto' : 'fast')}
+            className={active === 'opus' ? 'active' : ''}
+            onClick={() => void setBrain(active === 'opus' ? 'chatgpt' : 'opus')}
           >
-            HAIKU
-          </button>
-          <button
-            type="button"
-            className={mode === 'power' ? 'active' : ''}
-            onClick={() => void setMode(mode === 'power' ? 'auto' : 'power')}
-          >
-            OPUS
+            Opus
           </button>
         </div>
-        {isAuto ? <span className="mode-auto-hint">auto · click to lock</span> : (
-          <span className="mode-auto-hint">locked · click again for auto</span>
-        )}
+        <span className="mode-auto-hint">{brainLockHint(active)}</span>
       </div>
 
       <div className="sidebar-footer">
@@ -118,8 +118,8 @@ export function Sidebar(): React.JSX.Element {
             : wakeArmed
               ? 'Wake · “Albert, wake up”'
               : hasBrain
-                ? 'Ready · ⌘⇧A'
-                : 'Awaiting key'}
+                ? chatgptStatusLine(codexStatus).split('·')[0]
+                : 'Sign in to ChatGPT'}
         </div>
       </div>
     </aside>

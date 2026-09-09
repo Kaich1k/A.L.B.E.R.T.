@@ -63,6 +63,14 @@ function migrateSettings(raw: Partial<AlbertSettings>): AlbertSettings {
   if (typeof settings.allowBargeIn !== 'boolean') {
     settings.allowBargeIn = DEFAULT_SETTINGS.allowBargeIn
   }
+  if (
+    typeof settings.micSensitivity !== 'number' ||
+    !Number.isFinite(settings.micSensitivity) ||
+    settings.micSensitivity < 0 ||
+    settings.micSensitivity > 100
+  ) {
+    settings.micSensitivity = DEFAULT_SETTINGS.micSensitivity
+  }
   if (typeof settings.wakeWordEnabled !== 'boolean') {
     settings.wakeWordEnabled = DEFAULT_SETTINGS.wakeWordEnabled
   }
@@ -163,13 +171,53 @@ function migrateSettings(raw: Partial<AlbertSettings>): AlbertSettings {
     settings.ollamaLocalBase = DEFAULT_SETTINGS.ollamaLocalBase
   }
   settings.personality = normalizePersonality(settings.personality)
+  if (settings.routingMode === 'auto') {
+    // ChatGPT is the brain now — old "auto" ladder (QUICK → Haiku → Codex) is gone.
+    settings.routingMode = 'codex'
+  }
   if (
-    settings.routingMode !== 'auto' &&
     settings.routingMode !== 'local' &&
     settings.routingMode !== 'fast' &&
-    settings.routingMode !== 'power'
+    settings.routingMode !== 'power' &&
+    settings.routingMode !== 'codex'
   ) {
-    settings.routingMode = 'auto'
+    settings.routingMode = 'codex'
+  }
+  if (typeof settings.codexEnabled !== 'boolean') {
+    settings.codexEnabled = DEFAULT_SETTINGS.codexEnabled
+  }
+  for (const key of ['codexModel', 'codexEscalationModel', 'codexThreadId'] as const) {
+    if (typeof settings[key] !== 'string') settings[key] = ''
+  }
+  if (typeof settings.codexEffort !== 'string' || !settings.codexEffort.trim()) {
+    settings.codexEffort = DEFAULT_SETTINGS.codexEffort
+  }
+  if (
+    settings.codexApprovalMode !== 'project' &&
+    settings.codexApprovalMode !== 'always' &&
+    settings.codexApprovalMode !== 'never'
+  ) {
+    settings.codexApprovalMode = DEFAULT_SETTINGS.codexApprovalMode
+  }
+  // Paid fallback must never turn itself on during a migration.
+  if (typeof settings.paidFallbackEnabled !== 'boolean') {
+    settings.paidFallbackEnabled = DEFAULT_SETTINGS.paidFallbackEnabled
+  }
+  if (typeof settings.autoRememberEnabled !== 'boolean') {
+    settings.autoRememberEnabled = DEFAULT_SETTINGS.autoRememberEnabled
+  }
+  if (typeof settings.cursorApiKey !== 'string') {
+    settings.cursorApiKey = DEFAULT_SETTINGS.cursorApiKey
+  }
+  if (typeof settings.speechOrbDesktop !== 'boolean') {
+    settings.speechOrbDesktop = true
+    settings.ambientHudEnabled = true
+  }
+  if (typeof settings.ambientHudEnabled !== 'boolean') {
+    settings.ambientHudEnabled = DEFAULT_SETTINGS.ambientHudEnabled
+  }
+  if (typeof settings.ambientHudRoam !== 'boolean') {
+    settings.ambientHudRoam = DEFAULT_SETTINGS.ambientHudRoam
   }
   if (!settings.ollamaApiKey && process.env.OLLAMA_API_KEY) {
     settings.ollamaApiKey = process.env.OLLAMA_API_KEY
@@ -179,6 +227,9 @@ function migrateSettings(raw: Partial<AlbertSettings>): AlbertSettings {
   }
   if (!settings.geminiApiKey && (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY)) {
     settings.geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || ''
+  }
+  if (!settings.cursorApiKey && process.env.CURSOR_API_KEY) {
+    settings.cursorApiKey = process.env.CURSOR_API_KEY
   }
 
   return settings
@@ -207,6 +258,9 @@ export function getSettings(): AlbertSettings {
   }
   if (!settings.groqApiKey && process.env.GROQ_API_KEY) {
     settings = { ...settings, groqApiKey: process.env.GROQ_API_KEY }
+  }
+  if (!settings.cursorApiKey && process.env.CURSOR_API_KEY) {
+    settings = { ...settings, cursorApiKey: process.env.CURSOR_API_KEY }
   }
   return settings
 }

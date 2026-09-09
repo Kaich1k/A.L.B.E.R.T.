@@ -12,6 +12,8 @@ import {
   type RoutingMode,
   type TtsProvider
 } from '../../../shared/types'
+import type { ChatGptImportScan } from '../../../shared/api'
+import type { CodexStatus } from '../../../shared/types'
 import { normalizePersonality } from '../../../shared/personality'
 import { APP_NAME } from '../../../shared/brand'
 import { groqTransitionWindowOpen } from '../../../shared/groqModels'
@@ -114,6 +116,13 @@ export function SettingsPanel(): React.JSX.Element {
   const [groqStatus, setGroqStatus] = useState<string>('')
   const [geminiStatus, setGeminiStatus] = useState<string>('')
   const [kokoroStatus, setKokoroStatus] = useState<string>('')
+  const [codex, setCodex] = useState<CodexStatus | null>(null)
+  const [codexBusy, setCodexBusy] = useState(false)
+  const [codexNote, setCodexNote] = useState('')
+  const [importPath, setImportPath] = useState('')
+  const [importScan, setImportScan] = useState<ChatGptImportScan | null>(null)
+  const [importNote, setImportNote] = useState('')
+  const [importBusy, setImportBusy] = useState(false)
   const lastSavedJson = useRef(JSON.stringify(settingsPayload(settings)))
   const saveTimer = useRef(0)
   const savedFlashTimer = useRef(0)
@@ -138,6 +147,96 @@ export function SettingsPanel(): React.JSX.Element {
   useEffect(() => {
     void refreshCompanion()
   }, [refreshCompanion])
+
+  // Codex: connect once when the panel opens, then follow pushed status events
+  // (sign-in completing in the browser arrives asynchronously).
+  useEffect(() => {
+    void window.albert
+      .connectCodex()
+      .then(setCodex)
+      .catch((err) => setCodexNote(err instanceof Error ? err.message : String(err)))
+    return window.albert.onChatEvent((event) => {
+      if (event.type === 'codex_status' && event.codex) setCodex(event.codex)
+    })
+  }, [])
+
+  async function signInCodex(): Promise<void> {
+    setCodexBusy(true)
+    setCodexNote('Opening ChatGPT sign-in in your browser…')
+    try {
+      const result = await window.albert.loginCodex()
+      setCodexNote(
+        result.error
+          ? result.error
+          : result.authUrl
+            ? 'Finish sign-in in the browser — this panel updates itself.'
+            : 'Codex did not return a sign-in URL.'
+      )
+    } catch (err) {
+      setCodexNote(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCodexBusy(false)
+    }
+  }
+
+  async function signOutCodex(): Promise<void> {
+    setCodexBusy(true)
+    try {
+      setCodex(await window.albert.logoutCodex())
+      setCodexNote('Signed out of Codex.')
+    } catch (err) {
+      setCodexNote(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCodexBusy(false)
+    }
+  }
+
+  async function resetCodexThread(): Promise<void> {
+    try {
+      setCodex(await window.albert.newCodexThread())
+      setCodexNote('Fresh Codex thread — previous project context dropped.')
+    } catch (err) {
+      setCodexNote(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  async function pickExport(): Promise<void> {
+    setImportNote('')
+    setImportScan(null)
+    try {
+      const path = await window.albert.pickChatGptExport()
+      if (!path) return
+      setImportPath(path)
+      setImportBusy(true)
+      const scan = await window.albert.scanChatGptExport(path)
+      setImportScan(scan)
+      setImportNote(
+        `${scan.newMemories} saved memories and ${scan.newHistory} distilled facts are new.`
+      )
+    } catch (err) {
+      setImportNote(err instanceof Error ? err.message : String(err))
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
+  async function runImport(includeHistory: boolean): Promise<void> {
+    if (!importPath) return
+    setImportBusy(true)
+    setImportNote('Importing — each fact is embedded, so this takes a moment…')
+    try {
+      const result = await window.albert.runChatGptImport(importPath, includeHistory)
+      setImportNote(
+        `Imported ${result.importedMemories} saved memories and ${result.importedHistory} distilled facts. ` +
+          `${result.skippedDuplicates} were already known${result.failed ? `, ${result.failed} failed` : ''}.`
+      )
+      setImportScan(null)
+    } catch (err) {
+      setImportNote(err instanceof Error ? err.message : String(err))
+    } finally {
+      setImportBusy(false)
+    }
+  }
 
   useEffect(() => {
     const refresh = (): void => setVoices(listTtsVoices())
@@ -406,14 +505,225 @@ export function SettingsPanel(): React.JSX.Element {
           </div>
 
           <div className="settings-section" id="systems-ai">
-            <h3 className="settings-section-title">2 · AI</h3>
+            <h3 className="settings-section-title">2 · Brain</h3>
             <p className="section-sub">
-              Keys, routing, and QUICK brain. Auto: QUICK (Ollama/Groq/Gemini) → Haiku → Opus —
-              or lock via the sidebar.
+              ChatGPT is the brain for every turn. Gemini is the free backup. Opus is the paid
+              backup. Use the sidebar to lock a fallback; otherwise ChatGPT always answers.
+            </p>
+
+            <div className={`settings-brain-card ${codex?.signedIn ? 'ok' : ''}`}>
+              <div className="settings-brain-card-head">
+                <strong>ChatGPT</strong>
+                <span>{codex?.signedIn ? 'Primary · online' : 'Primary · needs sign-in'}</span>
+              </div>
+              <p className="section-sub" style={{ margin: 0 }}>
+                {!codex
+                  ? 'Checking ChatGPT…'
+                  : !codex.installed
+                    ? `ChatGPT CLI not found. ${codex.installHint ?? ''}`
+                    : !codex.signedIn
+                      ? 'Found on this Mac — sign in with your ChatGPT account. No API key.'
+                      : `Signed in as ${codex.email ?? 'your ChatGPT account'}${
+                          codex.planType ? ` (${codex.planType})` : ''
+                        } · ${codex.allowance?.label ?? 'allowance unknown'}`}
+              </p>
+            </div>
+
+            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={codexBusy || !codex?.installed || codex?.signedIn}
+                onClick={() => void signInCodex()}
+              >
+                Sign in with ChatGPT
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={codexBusy || !codex?.signedIn}
+                onClick={() => void signOutCodex()}
+              >
+                Sign out
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={!codex?.threadId}
+                onClick={() => void resetCodexThread()}
+              >
+                New thread
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={!codex?.signedIn}
+                onClick={() =>
+                  void window.albert
+                    .refreshCodexAllowance()
+                    .then((a) => setCodexNote(a?.label ?? 'Allowance not reported'))
+                    .catch(() => setCodexNote('Could not read the allowance'))
+                }
+              >
+                Refresh allowance
+              </button>
+            </div>
+            {(codexNote || codex?.lastError) && (
+              <p className="section-sub" style={{ marginTop: 4 }}>
+                {codexNote || codex?.lastError}
+              </p>
+            )}
+
+            {codex?.availableModels?.length ? (
+              <>
+                <div className="field">
+                  <label htmlFor="codexModel">ChatGPT model (everyday)</label>
+                  <select
+                    id="codexModel"
+                    value={form.codexModel || ''}
+                    onChange={(e) => setForm({ ...form, codexModel: e.target.value })}
+                  >
+                    <option value="">
+                      auto — currently {codex.model ?? 'unset'}
+                    </option>
+                    {codex.availableModels.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.displayName} ({m.id})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="field">
+                  <label htmlFor="codexEscalationModel">ChatGPT model (hard work)</label>
+                  <select
+                    id="codexEscalationModel"
+                    value={form.codexEscalationModel || ''}
+                    onChange={(e) => setForm({ ...form, codexEscalationModel: e.target.value })}
+                  >
+                    <option value="">
+                      auto — currently {codex.escalationModel ?? 'unset'}
+                    </option>
+                    {codex.availableModels.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.displayName} ({m.id})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="field">
+                  <label htmlFor="codexEffort">Reasoning effort</label>
+                  <select
+                    id="codexEffort"
+                    value={form.codexEffort || 'medium'}
+                    onChange={(e) => setForm({ ...form, codexEffort: e.target.value })}
+                  >
+                    {(
+                      codex.availableModels.find((m) => m.id === (codex.model ?? ''))?.efforts ?? [
+                        'low',
+                        'medium',
+                        'high'
+                      ]
+                    ).map((effort) => (
+                      <option key={effort} value={effort}>
+                        {effort}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="section-sub" style={{ marginTop: 4 }}>
+                    Higher effort thinks longer and spends more of your weekly allowance.
+                  </p>
+                </div>
+              </>
+            ) : null}
+
+            <div className="field">
+              <label htmlFor="codexApprovalMode">ChatGPT approvals</label>
+              <select
+                id="codexApprovalMode"
+                value={form.codexApprovalMode || 'project'}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    codexApprovalMode: e.target.value as AlbertSettings['codexApprovalMode']
+                  })
+                }
+              >
+                <option value="project">
+                  project — run freely inside the project folder, ask for anything outside
+                </option>
+                <option value="always">always ask — Allow/Deny for every command and edit</option>
+                <option value="never">never ask — approve everything (dangerous)</option>
+              </select>
+              <p className="section-sub" style={{ marginTop: 4 }}>
+                Network access and write requests beyond the sandbox always ask, whichever mode you
+                pick.
+              </p>
+            </div>
+
+            <h4 className="section-title" style={{ margin: '0.75rem 0 0', fontSize: '0.85rem' }}>
+              Fallbacks
+            </h4>
+            <p className="section-sub">
+              Used only when ChatGPT is signed out, hits a limit, or you lock one from the sidebar.
             </p>
 
             <div className="field">
-              <label htmlFor="anthropicApiKey">Anthropic API key (required)</label>
+              <label htmlFor="geminiApiKey">Gemini — free fallback</label>
+              <input
+                id="geminiApiKey"
+                type="password"
+                value={form.geminiApiKey || ''}
+                onChange={(e) =>
+                  setForm({ ...form, geminiApiKey: e.target.value, localProvider: 'gemini' })
+                }
+                placeholder="from aistudio.google.com/apikey"
+                autoComplete="off"
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="geminiModel">Gemini model</label>
+              <select
+                id="geminiModel"
+                value={form.geminiModel || DEFAULT_GEMINI_MODEL}
+                onChange={(e) => setForm({ ...form, geminiModel: e.target.value })}
+              >
+                {GEMINI_MODEL_OPTIONS.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={() => {
+                void (async () => {
+                  const r = await window.albert.probeGemini()
+                  setGeminiStatus(r.ok ? `OK · ${r.detail}` : `Fail · ${r.detail}`)
+                })()
+              }}
+            >
+              Test Gemini
+            </button>
+            {geminiStatus ? <p className="section-sub">{geminiStatus}</p> : null}
+
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={form.paidFallbackEnabled === true}
+                onChange={(e) => setForm({ ...form, paidFallbackEnabled: e.target.checked })}
+              />
+              <span>Allow paid Opus when ChatGPT and Gemini both fail</span>
+            </label>
+            <p className="section-sub" style={{ marginTop: 4 }}>
+              Off by default. Opus bills your Anthropic key. Leave this off unless you want that.
+            </p>
+
+            <div className="field">
+              <label htmlFor="anthropicApiKey">Anthropic API key (Opus only)</label>
               <input
                 id="anthropicApiKey"
                 type="password"
@@ -423,40 +733,8 @@ export function SettingsPanel(): React.JSX.Element {
                 autoComplete="off"
               />
             </div>
-
             <div className="field">
-              <label htmlFor="routingMode">Model routing</label>
-              <select
-                id="routingMode"
-                value={form.routingMode}
-                onChange={(e) =>
-                  setForm({ ...form, routingMode: e.target.value as RoutingMode })
-                }
-              >
-                <option value="auto">auto — cheap by default, Opus when needed</option>
-                <option value="local">quick only — always the configured Groq/Ollama provider</option>
-                <option value="fast">fast only — always Haiku</option>
-                <option value="power">power only — always Opus</option>
-              </select>
-            </div>
-
-            <div className="field">
-              <label htmlFor="fastModel">Fast model (light chat)</label>
-              <select
-                id="fastModel"
-                value={form.fastModel}
-                onChange={(e) => setForm({ ...form, fastModel: e.target.value })}
-              >
-                {MODEL_OPTIONS.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="field">
-              <label htmlFor="powerModel">Power model (hard tasks)</label>
+              <label htmlFor="powerModel">Opus model</label>
               <select
                 id="powerModel"
                 value={form.powerModel || form.model}
@@ -472,6 +750,74 @@ export function SettingsPanel(): React.JSX.Element {
               </select>
             </div>
 
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={form.autoRememberEnabled !== false}
+                onChange={(e) => setForm({ ...form, autoRememberEnabled: e.target.checked })}
+              />
+              <span>Auto-remember lasting facts</span>
+            </label>
+            <p className="section-sub" style={{ marginTop: 4 }}>
+              On by default. Saves preferences, identity, and project details Kai mentions. Skips
+              one-off tasks and anything that looks like a secret. Review or delete them in Memory.
+            </p>
+
+            <h4 className="section-title" style={{ margin: '0.5rem 0 0', fontSize: '0.85rem' }}>
+              Import ChatGPT memories
+            </h4>
+            <p className="section-sub">
+              One-time import: OpenAI has no API for ChatGPT&apos;s saved memories, so this reads an
+              official data export instead. Request one at ChatGPT → Settings → Data controls →
+              Export, then pick the .zip here. Saved memories come across verbatim; conversations
+              are scanned for durable facts about you, not copied in full.
+            </p>
+            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={importBusy}
+                onClick={() => void pickExport()}
+              >
+                Choose export…
+              </button>
+              {importScan ? (
+                <>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={importBusy}
+                    onClick={() => void runImport(true)}
+                  >
+                    Import memories + facts
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={importBusy}
+                    onClick={() => void runImport(false)}
+                  >
+                    Saved memories only
+                  </button>
+                </>
+              ) : null}
+            </div>
+            {importScan ? (
+              <p className="section-sub" style={{ marginTop: 4 }}>
+                Found {importScan.totalMemories} saved memories (
+                {importScan.disabledMemories} disabled in ChatGPT, skipped) and{' '}
+                {importScan.totalHistory} candidate facts from {importScan.conversationsSeen}{' '}
+                conversations. New after dedupe: {importScan.newMemories} memories,{' '}
+                {importScan.newHistory} facts.
+                {importScan.warnings.length ? ` · ${importScan.warnings[0]}` : ''}
+              </p>
+            ) : null}
+            {importNote ? (
+              <p className="section-sub" style={{ marginTop: 4 }}>
+                {importNote}
+              </p>
+            ) : null}
+
             <div className="field">
               <label htmlFor="openaiApiKey">OpenAI API key (optional embeddings)</label>
               <input
@@ -484,14 +830,29 @@ export function SettingsPanel(): React.JSX.Element {
               />
             </div>
 
-            <h4 className="section-title" style={{ margin: '0.25rem 0 0', fontSize: '0.85rem' }}>
-              QUICK brain provider
-            </h4>
-            <p className="section-sub">
-              Casual Auto routes and the QUICK lock use this provider. Groq and Gemini are free cloud
-              tiers with rate limits; Ollama can run in its cloud or genuinely on-device. Gemini keys:
-              aistudio.google.com/apikey.
-            </p>
+            <details className="settings-advanced">
+              <summary>Advanced · Groq / Ollama / extra routing</summary>
+              <p className="section-sub">
+                Not needed for normal use. ChatGPT is the brain. These stay available if you lock
+                them from a voice command.
+              </p>
+              <div className="field">
+                <label htmlFor="routingMode">Force a brain</label>
+                <select
+                  id="routingMode"
+                  value={form.routingMode === 'auto' ? 'codex' : form.routingMode}
+                  onChange={(e) =>
+                    setForm({ ...form, routingMode: e.target.value as RoutingMode })
+                  }
+                >
+                  <option value="codex">ChatGPT (default)</option>
+                  <option value="local">Gemini / Groq / Ollama lock</option>
+                  <option value="power">Opus lock</option>
+                </select>
+              </div>
+              <h4 className="section-title" style={{ margin: '0.5rem 0 0', fontSize: '0.85rem' }}>
+                Extra local / cloud providers
+              </h4>
             <div className="field">
               <label htmlFor="localProvider">Provider</label>
               <select
@@ -684,6 +1045,7 @@ export function SettingsPanel(): React.JSX.Element {
                 {ollamaStatus ? <p className="section-sub">{ollamaStatus}</p> : null}
               </>
             )}
+            </details>
 
             <h4 className="section-title" style={{ margin: '0.5rem 0 0', fontSize: '0.85rem' }}>
               Workspace &amp; tools
@@ -697,9 +1059,40 @@ export function SettingsPanel(): React.JSX.Element {
                 placeholder="/Users/kai/Documents/VS/ALBERT"
               />
               <p className="section-sub" style={{ marginTop: 6 }}>
-                Point this at the ALBERT repo so he can edit his own code (grep / patch / npm).
+                Point this at the ALBERT repo. Live src/ writes are blocked while the app is running — he dispatches the Cursor agent instead.
               </p>
             </div>
+            <div className="field">
+              <label htmlFor="cursorApiKey">Cursor API key</label>
+              <input
+                id="cursorApiKey"
+                type="password"
+                value={form.cursorApiKey || ''}
+                onChange={(e) => setForm({ ...form, cursorApiKey: e.target.value })}
+                placeholder="cursor_… (Dashboard → API Keys). Optional if `agent login` already ran."
+                autoComplete="off"
+              />
+              <p className="section-sub" style={{ marginTop: 6 }}>
+                Lets ALBERT run the same Cursor agent as this IDE tab, in a child process, so the live app does not rewrite itself.
+              </p>
+            </div>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={form.ambientHudEnabled !== false}
+                onChange={(e) => setForm({ ...form, ambientHudEnabled: e.target.checked })}
+              />
+              Desktop speech orb (floats outside the window)
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={form.ambientHudRoam !== false}
+                onChange={(e) => setForm({ ...form, ambientHudRoam: e.target.checked })}
+                disabled={form.ambientHudEnabled === false}
+              />
+              Fly to Albert’s work, or step aside of the pointer (drag to pin)
+            </label>
             <div className="field">
               <label htmlFor="allowedFsRoots">Extra allowed folders (one per line)</label>
               <textarea
@@ -922,6 +1315,28 @@ export function SettingsPanel(): React.JSX.Element {
               />
               Allow interrupting {APP_NAME} while he speaks
             </label>
+
+            <div className="field">
+              <label htmlFor="micSensitivity">
+                Mic sensitivity — {form.micSensitivity ?? 50}
+              </label>
+              <input
+                id="micSensitivity"
+                type="range"
+                min={0}
+                max={100}
+                step={5}
+                value={form.micSensitivity ?? 50}
+                onChange={(e) =>
+                  setForm({ ...form, micSensitivity: Number(e.target.value) })
+                }
+              />
+              <p className="section-sub" style={{ marginTop: 4 }}>
+                Thresholds track your room&apos;s measured noise floor; this shifts the margin above
+                it. Lower it if a fan, keyboard, or air conditioning makes him hear things you
+                didn&apos;t say or cut himself off mid-sentence. Raise it if he misses quiet speech.
+              </p>
+            </div>
 
             <label className="check">
               <input

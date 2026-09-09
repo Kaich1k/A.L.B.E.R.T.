@@ -1,4 +1,4 @@
-import { BrowserWindow, app, ipcMain, shell } from 'electron'
+import { BrowserWindow, app, clipboard, dialog, ipcMain, shell } from 'electron'
 import { IpcChannels } from '../../shared/ipc'
 import type { ChatSendPayload } from '../../shared/types'
 import { getSettings, setSettings } from '../config'
@@ -24,6 +24,18 @@ import {
   startCompanionServer
 } from '../companion/server'
 import { registerComputerIpc } from '../computer/tabs'
+import {
+  cancelCodexLogin,
+  connectCodex,
+  getCodexStatus,
+  interruptCodexTurn,
+  loginCodex,
+  logoutCodexAccount,
+  newCodexThread,
+  onCodexStatus,
+  refreshCodexAllowance
+} from '../codex/service'
+import { importChatGptExport, scanChatGptExport } from '../chatgptImport'
 import { synthesizeElevenLabs } from '../voice/elevenlabs'
 import { synthesizeKokoro, warmKokoro } from '../voice/kokoro'
 import { probeOllama, pullOllamaModel } from '../ollama/client'
@@ -45,8 +57,40 @@ import {
   updateMissionStep,
   updateRoutine
 } from '../operations/service'
+import {
+  captureCapsule,
+  deleteCapsule,
+  importLegacyCapsules,
+  listCapsules,
+  restoreCapsule
+} from '../context/capsules'
+import { getProjectPulse } from '../pulse/projectPulse'
+import { getDailyBrief } from '../brief/dailyBrief'
+import { listArtifacts, saveArtifact } from '../artifacts/store'
+import { listTheaterEvents } from '../theater/bus'
+import {
+  getCursorAgentStatus,
+  interruptCursorAgent,
+  openInCursor,
+  runCursorAgent
+} from '../cursor/agent'
+import {
+  setAmbientHud,
+  setHudRoam,
+  dockHud,
+  releaseHudDock,
+  isHudDocked,
+  dragAmbientHud,
+  getHudRoam,
+  getHudRuntime,
+  reportHudRuntime,
+  setHudClickThrough
+} from '../hud/miniHud'
 
-export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void {
+export function registerIpcHandlers(
+  getWindow: () => BrowserWindow | null,
+  ensureWindow?: () => BrowserWindow | null
+): void {
   registerComputerIpc()
   const changed = (): void => getWindow()?.webContents.send('albert:operations:changed')
 
@@ -63,6 +107,93 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   ipcMain.handle(IpcChannels.captureCreate, (_e, { content, kind }) => { const value = createCapture(content, kind); changed(); return value })
   ipcMain.handle(IpcChannels.captureUpdate, (_e, { id, state }) => { const value = updateCapture(id, state); changed(); return value })
 
+  const capsulesChanged = (): void => getWindow()?.webContents.send('albert:capsules:changed')
+  ipcMain.handle(IpcChannels.capsulesList, () => listCapsules())
+  ipcMain.handle(IpcChannels.capsulesSave, async (_e, input) => {
+    const value = await captureCapsule(input || {})
+    capsulesChanged()
+    return value
+  })
+  ipcMain.handle(IpcChannels.capsulesRestore, async (_e, idOrQuery: string) => {
+    const value = await restoreCapsule(String(idOrQuery || ''))
+    capsulesChanged()
+    if (value.capsule) {
+      getWindow()?.webContents.send('albert:capsule:restored', value.capsule)
+    }
+    return value
+  })
+  ipcMain.handle(IpcChannels.capsulesDelete, (_e, id: string) => {
+    const value = deleteCapsule(String(id || ''))
+    capsulesChanged()
+    return value
+  })
+  ipcMain.handle(IpcChannels.capsulesImport, (_e, raw: unknown) => {
+    importLegacyCapsules(raw)
+    capsulesChanged()
+    return listCapsules()
+  })
+  ipcMain.handle(IpcChannels.projectPulseGet, (_e, force?: boolean) => getProjectPulse(Boolean(force)))
+  ipcMain.handle(IpcChannels.dailyBriefGet, (_e, force?: boolean) => getDailyBrief(Boolean(force)))
+  ipcMain.handle(IpcChannels.artifactsList, () => listArtifacts())
+  ipcMain.handle(IpcChannels.artifactsSave, (_e, input) => saveArtifact(input || {}))
+  ipcMain.handle(IpcChannels.theaterList, () => listTheaterEvents())
+  ipcMain.handle(IpcChannels.hudSnapshot, (): import('../../shared/types').HudSnapshot => {
+    const ops = getOperationsSnapshot()
+    const active = ops.missions.find((m) => m.state === 'active') || ops.missions.find((m) => !['complete', 'cancelled'].includes(m.state))
+    const live = getHudRuntime()
+    return {
+      voiceState: live.voiceState,
+      busy: live.busy,
+      missionTitle: active?.title || live.tool || null,
+      nextStep: active?.steps.find((s) => s.state !== 'complete')?.title || null,
+      focusRemaining: 0,
+      theaterCount: listTheaterEvents().length,
+      roam: getHudRoam(),
+      docked: isHudDocked()
+    }
+  })
+  ipcMain.handle(IpcChannels.cursorStatus, () => getCursorAgentStatus())
+  ipcMain.handle(IpcChannels.cursorRun, (_e, payload: { prompt: string; workspace?: string }) =>
+    runCursorAgent(String(payload?.prompt || ''), payload?.workspace)
+  )
+  ipcMain.handle(IpcChannels.cursorOpen, (_e, workspace?: string) => openInCursor(workspace))
+  ipcMain.handle(IpcChannels.cursorInterrupt, () => interruptCursorAgent())
+  ipcMain.handle(IpcChannels.ambientHudSet, (_e, enabled: boolean) => {
+    setAmbientHud(Boolean(enabled))
+    return Boolean(enabled)
+  })
+  ipcMain.handle(IpcChannels.hudDrag, (_e, payload: { phase: 'start' | 'move' | 'end'; screenX: number; screenY: number }) => {
+    dragAmbientHud(payload)
+  })
+  ipcMain.handle(IpcChannels.hudRoamSet, (_e, enabled: boolean) => setHudRoam(Boolean(enabled)))
+  ipcMain.handle(
+    IpcChannels.hudDock,
+    (
+      _e,
+      slot?: { x: number; y: number; width: number; height: number; park?: boolean } | null
+    ) => dockHud(slot)
+  )
+  ipcMain.handle(IpcChannels.hudUndock, () => {
+    releaseHudDock()
+  })
+  ipcMain.handle(IpcChannels.hudRuntime, (_e, state: { voiceState?: import('../../shared/types').VoiceState; busy?: boolean; tool?: string }) => {
+    reportHudRuntime(state || {})
+  })
+  ipcMain.handle(IpcChannels.hudClickThrough, (_e, ignore: boolean) => {
+    setHudClickThrough(Boolean(ignore))
+  })
+  ipcMain.handle(IpcChannels.voiceToggle, () => {
+    const win = getWindow()
+    if (win && !win.isDestroyed()) win.webContents.send('albert:voice-toggle')
+  })
+  ipcMain.handle(IpcChannels.clipboardImage, (): import('../../shared/types').ChatImagePayload | null => {
+    const image = clipboard.readImage()
+    if (image.isEmpty()) return null
+    const png = image.toPNG()
+    if (!png.length || png.length > 4_500_000) return null
+    return { mediaType: 'image/png', data: png.toString('base64') }
+  })
+
   ipcMain.handle(IpcChannels.windowHide, () => {
     const win = getWindow()
     if (!win) return false
@@ -71,8 +202,8 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   })
 
   ipcMain.handle(IpcChannels.windowShow, () => {
-    const win = getWindow()
-    if (!win) return false
+    const win = ensureWindow?.() ?? getWindow()
+    if (!win || win.isDestroyed()) return false
     if (win.isMinimized()) win.restore()
     win.show()
     win.focus()
@@ -156,6 +287,12 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     ) {
       await applyCompanionSettings()
     }
+    if (partial.ambientHudEnabled !== undefined) {
+      setAmbientHud(next.ambientHudEnabled !== false)
+    }
+    if (partial.ambientHudRoam !== undefined) {
+      setHudRoam(next.ambientHudRoam !== false)
+    }
     return { ...next, ...getSettings() }
   })
 
@@ -181,10 +318,13 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
         return await runChatTurn(payload, getWindow())
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        getWindow()?.webContents.send('albert:chat:event', {
-          type: 'error',
-          error: message
-        })
+        const win = getWindow()
+        if (win && !win.isDestroyed()) {
+          win.webContents.send('albert:chat:event', {
+            type: 'error',
+            error: message
+          })
+        }
         throw err
       }
     }
@@ -302,4 +442,60 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       throw new Error(message)
     }
   })
+
+  // Push Codex status (sign-in, allowance, faults) so the HUD stays live
+  // without the renderer polling.
+  onCodexStatus((status) => {
+    getWindow()?.webContents.send('albert:chat:event', { type: 'codex_status', codex: status })
+  })
+
+  ipcMain.handle(IpcChannels.codexStatus, () => getCodexStatus())
+  ipcMain.handle(IpcChannels.codexConnect, () => connectCodex())
+  ipcMain.handle(IpcChannels.codexLogin, () => loginCodex())
+  ipcMain.handle(IpcChannels.codexLoginCancel, () => cancelCodexLogin())
+  ipcMain.handle(IpcChannels.codexLogout, () => logoutCodexAccount())
+  ipcMain.handle(IpcChannels.codexRateLimits, () => refreshCodexAllowance())
+  ipcMain.handle(IpcChannels.codexInterrupt, () => interruptCodexTurn())
+  ipcMain.handle(IpcChannels.codexNewThread, () => {
+    newCodexThread()
+    return getCodexStatus()
+  })
+
+  ipcMain.handle(IpcChannels.chatgptImportPick, async () => {
+    const win = getWindow()
+    const options = {
+      title: 'Choose your ChatGPT data export',
+      message: 'Pick the export .zip, or the folder you already unzipped.',
+      properties: ['openFile', 'openDirectory'] as Array<'openFile' | 'openDirectory'>,
+      filters: [{ name: 'ChatGPT export', extensions: ['zip'] }]
+    }
+    const result = win
+      ? await dialog.showOpenDialog(win, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled || !result.filePaths.length) return null
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle(IpcChannels.chatgptImportScan, (_e, path: string) => {
+    try {
+      return scanChatGptExport(String(path || ''))
+    } catch (err) {
+      throw new Error(err instanceof Error ? err.message : String(err))
+    }
+  })
+
+  ipcMain.handle(
+    IpcChannels.chatgptImportRun,
+    async (_e, payload: { path: string; includeHistory?: boolean }) => {
+      try {
+        const result = await importChatGptExport(String(payload?.path || ''), {
+          includeHistory: payload?.includeHistory !== false
+        })
+        getWindow()?.webContents.send('albert:memory:changed')
+        return result
+      } catch (err) {
+        throw new Error(err instanceof Error ? err.message : String(err))
+      }
+    }
+  )
 }

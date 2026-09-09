@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IpcChannels } from '../shared/ipc'
 import type { AlbertApi } from '../shared/api'
-import type { AgentStreamEvent, ComputerState } from '../shared/types'
+import type { AgentStreamEvent, ComputerState, ContextCapsule } from '../shared/types'
 
 const api: AlbertApi = {
   getSettings: () => ipcRenderer.invoke(IpcChannels.settingsGet),
@@ -14,6 +14,7 @@ const api: AlbertApi = {
   sendChat: (payload) => ipcRenderer.invoke(IpcChannels.chatSend, payload),
   getChatImageDataUrl: (fileName) =>
     ipcRenderer.invoke(IpcChannels.chatImageData, fileName),
+  readClipboardImage: () => ipcRenderer.invoke(IpcChannels.clipboardImage),
   onChatEvent: (handler) => {
     const listener = (_: Electron.IpcRendererEvent, event: AgentStreamEvent): void =>
       handler(event)
@@ -117,7 +118,61 @@ const api: AlbertApi = {
     const listener = (): void => handler()
     ipcRenderer.on('albert:operations:changed', listener)
     return () => ipcRenderer.removeListener('albert:operations:changed', listener)
-  }
+  },
+
+  getCodexStatus: () => ipcRenderer.invoke(IpcChannels.codexStatus),
+  connectCodex: () => ipcRenderer.invoke(IpcChannels.codexConnect),
+  loginCodex: () => ipcRenderer.invoke(IpcChannels.codexLogin),
+  cancelCodexLogin: () => ipcRenderer.invoke(IpcChannels.codexLoginCancel),
+  logoutCodex: () => ipcRenderer.invoke(IpcChannels.codexLogout),
+  refreshCodexAllowance: () => ipcRenderer.invoke(IpcChannels.codexRateLimits),
+  interruptCodex: () => ipcRenderer.invoke(IpcChannels.codexInterrupt),
+  newCodexThread: () => ipcRenderer.invoke(IpcChannels.codexNewThread),
+
+  pickChatGptExport: () => ipcRenderer.invoke(IpcChannels.chatgptImportPick),
+  scanChatGptExport: (path) => ipcRenderer.invoke(IpcChannels.chatgptImportScan, path),
+  runChatGptImport: (path, includeHistory) =>
+    ipcRenderer.invoke(IpcChannels.chatgptImportRun, { path, includeHistory }),
+
+  listCapsules: () => ipcRenderer.invoke(IpcChannels.capsulesList),
+  saveCapsule: (input) => ipcRenderer.invoke(IpcChannels.capsulesSave, input || {}),
+  restoreCapsule: (idOrQuery) => ipcRenderer.invoke(IpcChannels.capsulesRestore, idOrQuery),
+  deleteCapsule: (id) => ipcRenderer.invoke(IpcChannels.capsulesDelete, id),
+  importCapsules: (raw) => ipcRenderer.invoke(IpcChannels.capsulesImport, raw),
+  onCapsulesChanged: (handler) => {
+    const listener = (): void => handler()
+    ipcRenderer.on('albert:capsules:changed', listener)
+    return () => ipcRenderer.removeListener('albert:capsules:changed', listener)
+  },
+  onCapsuleRestored: (handler) => {
+    const listener = (_: Electron.IpcRendererEvent, capsule: ContextCapsule): void =>
+      handler(capsule)
+    ipcRenderer.on('albert:capsule:restored', listener)
+    return () => ipcRenderer.removeListener('albert:capsule:restored', listener)
+  },
+  getProjectPulse: (force) => ipcRenderer.invoke(IpcChannels.projectPulseGet, Boolean(force)),
+  getDailyBrief: (force) => ipcRenderer.invoke(IpcChannels.dailyBriefGet, Boolean(force)),
+  listArtifacts: () => ipcRenderer.invoke(IpcChannels.artifactsList),
+  saveArtifact: (input) => ipcRenderer.invoke(IpcChannels.artifactsSave, input),
+  listTheater: () => ipcRenderer.invoke(IpcChannels.theaterList),
+  getHudSnapshot: () => ipcRenderer.invoke(IpcChannels.hudSnapshot),
+  getCursorAgentStatus: () => ipcRenderer.invoke(IpcChannels.cursorStatus),
+  runCursorAgent: (prompt, workspace) =>
+    ipcRenderer.invoke(IpcChannels.cursorRun, { prompt, workspace }),
+  openInCursor: (workspace) => ipcRenderer.invoke(IpcChannels.cursorOpen, workspace),
+  interruptCursorAgent: () => ipcRenderer.invoke(IpcChannels.cursorInterrupt),
+  setAmbientHud: (enabled) => ipcRenderer.invoke(IpcChannels.ambientHudSet, enabled),
+  hudDrag: (payload) => ipcRenderer.invoke(IpcChannels.hudDrag, payload),
+  setHudRoam: (enabled) => ipcRenderer.invoke(IpcChannels.hudRoamSet, enabled),
+  dockHud: (slot) => ipcRenderer.invoke(IpcChannels.hudDock, slot),
+  undockHud: () => ipcRenderer.invoke(IpcChannels.hudUndock),
+  reportHudRuntime: (state) => ipcRenderer.invoke(IpcChannels.hudRuntime, state),
+  setHudClickThrough: (ignore) => ipcRenderer.invoke(IpcChannels.hudClickThrough, ignore),
+  toggleVoice: () => ipcRenderer.invoke(IpcChannels.voiceToggle)
 }
+
+ipcRenderer.on('albert:voice-toggle', () => {
+  window.dispatchEvent(new CustomEvent('albert:voice-toggle'))
+})
 
 contextBridge.exposeInMainWorld('albert', api)

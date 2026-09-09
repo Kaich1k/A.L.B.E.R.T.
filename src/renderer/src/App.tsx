@@ -9,6 +9,8 @@ import { CommandPalette } from './components/CommandPalette'
 import { StartupSequence } from './components/StartupSequence'
 import { SystemStatusRail } from './components/SystemStatusRail'
 import { SettingsPanel } from './components/SettingsPanel'
+import { MissionDock } from './components/MissionDock'
+import { PanelErrorBoundary } from './components/PanelErrorBoundary'
 import { ClaudeVoiceSession } from './voice/claudeVoiceSession'
 import { isWakeWordSupported, WakeWordListener } from './voice/wakeWord'
 import { useAlbertStore } from './store'
@@ -31,6 +33,11 @@ export default function App(): React.JSX.Element {
   const setRouteInfo = useAlbertStore((s) => s.setRouteInfo)
   const setActivity = useAlbertStore((s) => s.setActivity)
   const setWakeArmed = useAlbertStore((s) => s.setWakeArmed)
+  const setCodexStatus = useAlbertStore((s) => s.setCodexStatus)
+  const setCodexPlan = useAlbertStore((s) => s.setCodexPlan)
+  const setCodexProgress = useAlbertStore((s) => s.setCodexProgress)
+  const setCodexDiff = useAlbertStore((s) => s.setCodexDiff)
+  const clearCodexTurn = useAlbertStore((s) => s.clearCodexTurn)
   const voiceState = useAlbertStore((s) => s.voiceState)
   const settings = useAlbertStore((s) => s.settings)
   const sessionRef = useRef<ActiveVoice | null>(null)
@@ -51,6 +58,10 @@ export default function App(): React.JSX.Element {
     document.body.classList.toggle('perf-mode', settings.performanceMode !== false)
     document.body.dataset.hudDensity = settings.hudDensity || 'cinematic'
   }, [settings.performanceMode, settings.hudDensity])
+
+  useEffect(() => {
+    void window.albert.reportHudRuntime({ voiceState, busy })
+  }, [voiceState, busy])
 
   useEffect(() => {
     const onVis = (): void => {
@@ -77,16 +88,17 @@ export default function App(): React.JSX.Element {
     if (sessionRef.current) return
 
     const current = useAlbertStore.getState().settings
-    // Local Ollama needs no API key — only the daemon + a model
-    const hasBrain = Boolean(
-      current.anthropicApiKey?.trim() ||
-        current.ollamaApiKey?.trim() ||
-        current.groqApiKey?.trim() ||
+    const hasBrain =
+      current.codexEnabled !== false ||
+      Boolean(
         current.geminiApiKey?.trim() ||
-        current.localProvider === 'ollama'
-    )
+          current.anthropicApiKey?.trim() ||
+          current.groqApiKey?.trim() ||
+          current.ollamaApiKey?.trim() ||
+          current.localProvider === 'ollama'
+      )
     if (!hasBrain) {
-      setError('Add an Anthropic, Groq, Gemini, or Ollama key under Systems to talk.')
+      setError('Sign in to ChatGPT under Systems, or add a Gemini / Opus fallback key.')
       setPanel('settings')
       return
     }
@@ -187,6 +199,20 @@ export default function App(): React.JSX.Element {
   }, [voiceState, startVoice, stopVoice])
 
   useEffect(() => {
+    return window.albert.onCapsuleRestored((capsule) => {
+      const nextPanel =
+        capsule.panel === 'conversation' || capsule.panel === 'missions' || capsule.panel === 'home'
+          ? capsule.panel
+          : 'missions'
+      setPanel(nextPanel)
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('albert:operations-view', { detail: 'missions' }))
+      }, nextPanel === 'missions' ? 0 : 80)
+      flashSystemEvent(`CAPSULE / ${capsule.title.toUpperCase().slice(0, 48)}`, 'ok')
+    })
+  }, [setPanel])
+
+  useEffect(() => {
     // Populate TTS voice list (Chrome/Electron loads async)
     window.speechSynthesis.getVoices()
     window.speechSynthesis.onvoiceschanged = () => {
@@ -195,14 +221,16 @@ export default function App(): React.JSX.Element {
 
     void (async () => {
       try {
-        const [nextSettings, history, activity] = await Promise.all([
+        const [nextSettings, history, activity, codex] = await Promise.all([
           window.albert.getSettings(),
           window.albert.getChatHistory(),
-          window.albert.listActivity()
+          window.albert.listActivity(),
+          window.albert.connectCodex().catch(() => window.albert.getCodexStatus())
         ])
         setSettings(nextSettings)
         setMessages(history.filter((m) => m.role === 'user' || m.role === 'assistant'))
         setActivity(activity)
+        setCodexStatus(codex)
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
       } finally {
@@ -215,12 +243,30 @@ export default function App(): React.JSX.Element {
         setSettings(event.settings)
       } else if (event.type === 'route') {
         const tier =
-          event.tier === 'power' ? 'POWER' : event.tier === 'local' ? 'QUICK' : 'FAST'
-        setRouteInfo(`${tier} · ${event.model}${event.reason ? ` — ${event.reason}` : ''}`)
-        flashSystemEvent(`ROUTING INTELLIGENCE / ${tier} / ${event.model || 'MODEL READY'}`)
+          event.tier === 'power'
+            ? 'Opus'
+            : event.tier === 'local'
+              ? 'Gemini'
+              : event.tier === 'codex'
+                ? 'ChatGPT'
+                : 'Fallback'
+        setRouteInfo(`${tier} · ${event.model && event.model !== 'codex' ? event.model : 'ready'}${event.reason ? ` — ${event.reason}` : ''}`)
+        flashSystemEvent(`BRAIN / ${tier.toUpperCase()} / ${(event.model || 'READY').toUpperCase()}`)
+        if (event.tier === 'codex') clearCodexTurn()
         if (event.reason?.toLowerCase().includes('locked')) {
           void window.albert.getSettings().then(setSettings)
         }
+      } else if (event.type === 'codex_status' && event.codex) {
+        setCodexStatus(event.codex)
+      } else if (event.type === 'codex_progress') {
+        // Visual only — Codex reasoning and command chatter is never spoken.
+        setCodexProgress(event.content || '')
+      } else if (event.type === 'codex_plan') {
+        setCodexPlan(event.plan || [])
+        const active = (event.plan || []).find((step) => /in_?progress/i.test(step.status))
+        if (active) flashSystemEvent(`CODEX PLAN / ${active.step.toUpperCase().slice(0, 60)}`)
+      } else if (event.type === 'codex_diff') {
+        setCodexDiff(event.diff || '')
       } else if (event.type === 'token' && event.content) {
         appendStreamingText(event.content)
       } else if (event.type === 'message' && event.message) {
@@ -244,6 +290,10 @@ export default function App(): React.JSX.Element {
       } else if (event.type === 'standby') {
         // Main (or chat) confirmed an end-voice command — actually leave voice
         void stopVoiceRef.current()
+      } else if (event.type === 'pause_speech') {
+        sessionRef.current?.muteNow()
+      } else if (event.type === 'theater' && event.theater?.phase === 'start') {
+        flashSystemEvent(`THEATER / ${(event.theater.toolName || 'TOOL').replaceAll('_', ' ').toUpperCase()}`)
       } else if (event.type === 'chat_cleared') {
         setMessages([])
         setStreamingText('')
@@ -254,10 +304,12 @@ export default function App(): React.JSX.Element {
       } else if (event.type === 'done') {
         setBusy(false)
         setStreamingText('')
+        clearCodexTurn()
       } else if (event.type === 'error') {
         setError(event.error || 'Unknown error')
         setBusy(false)
         setStreamingText('')
+        clearCodexTurn()
       }
     })
 
@@ -369,21 +421,48 @@ export default function App(): React.JSX.Element {
         <span className="hud-corner bottom-right" />
       </div>
       <CommandPalette />
-      {systemEvent ? <div className={`system-event ${systemEvent.tone}`} role="status"><i />{systemEvent.text}</div> : null}
+      {systemEvent ? <div className={`system-event ${systemEvent.tone}`} role="status"><i /><span>{systemEvent.text}</span></div> : null}
       <div className="drag-bar" />
       <Sidebar />
+      {settingsReady ? (
+        <PanelErrorBoundary name="Mission dock">
+          <MissionDock />
+        </PanelErrorBoundary>
+      ) : null}
       <main className="main">
-        {panel === 'home' ? <HomePanel onTalk={() => void toggleVoice()} /> : null}
-        {panel === 'conversation' ? (
-          <ConversationPanel
-            onTalk={() => void toggleVoice()}
-            onStandby={stopVoice}
-          />
+        {panel === 'home' ? (
+          <PanelErrorBoundary name="Home">
+            <HomePanel onTalk={() => void toggleVoice()} />
+          </PanelErrorBoundary>
         ) : null}
-        {panel === 'missions' ? <MissionsPanel /> : null}
-        {panel === 'memory' ? <MemoryPanel /> : null}
-        {panel === 'activity' ? <ActivityPanel /> : null}
-        {panel === 'settings' ? <SettingsPanel /> : null}
+        {panel === 'conversation' ? (
+          <PanelErrorBoundary name="Communications">
+            <ConversationPanel
+              onTalk={() => void toggleVoice()}
+              onStandby={stopVoice}
+            />
+          </PanelErrorBoundary>
+        ) : null}
+        {panel === 'missions' ? (
+          <PanelErrorBoundary name="Operations">
+            <MissionsPanel />
+          </PanelErrorBoundary>
+        ) : null}
+        {panel === 'memory' ? (
+          <PanelErrorBoundary name="Memory">
+            <MemoryPanel />
+          </PanelErrorBoundary>
+        ) : null}
+        {panel === 'activity' ? (
+          <PanelErrorBoundary name="Activity">
+            <ActivityPanel />
+          </PanelErrorBoundary>
+        ) : null}
+        {panel === 'settings' ? (
+          <PanelErrorBoundary name="Systems">
+            <SettingsPanel />
+          </PanelErrorBoundary>
+        ) : null}
       </main>
       <SystemStatusRail />
     </div>

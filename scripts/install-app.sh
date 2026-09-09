@@ -3,6 +3,14 @@
 # (Bundle folder must stay period-free — Electron Helper lookup breaks on dots.)
 set -euo pipefail
 
+RELAUNCH=0
+for arg in "$@"; do
+  case "$arg" in
+    --relaunch) RELAUNCH=1 ;;
+    --no-relaunch) RELAUNCH=0 ;;
+  esac
+done
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -17,6 +25,11 @@ echo "==> Building A.L.B.E.R.T.…"
 ELECTRON_RUN_AS_NODE= npm run build
 
 echo "==> Packaging macOS app…"
+# Electron Builder can reuse a partially renamed Electron.app after an interrupted
+# packaging run. Remove only generated macOS staging folders before rebuilding.
+if [[ -d "${ROOT}/dist" ]]; then
+  find "${ROOT}/dist" -maxdepth 1 -type d -name 'mac*' -exec rm -rf {} +
+fi
 # `dir` is faster than dmg for local install loops
 npx electron-builder --mac dir --publish never
 
@@ -29,16 +42,18 @@ fi
 
 mkdir -p "${DEST_DIR}"
 
-# Quit running instance if present
-if pgrep -f "ALBERT.app/Contents/MacOS" >/dev/null 2>&1 || \
-   pgrep -f "A.L.B.E.R.T" >/dev/null 2>&1; then
+# Quit the packaged app only — never pkill a regex that can match this script.
+if pgrep -f "ALBERT.app/Contents/MacOS/" >/dev/null 2>&1; then
   echo "==> Quitting running A.L.B.E.R.T.…"
   osascript -e 'tell application "ALBERT" to quit' >/dev/null 2>&1 || true
-  osascript -e 'tell application "A.L.B.E.R.T" to quit' >/dev/null 2>&1 || true
   sleep 1
-  pkill -f "A.L.B.E.R.T" >/dev/null 2>&1 || true
-  pkill -f "ALBERT.app/Contents/MacOS" >/dev/null 2>&1 || true
+  pkill -f "ALBERT.app/Contents/MacOS/" >/dev/null 2>&1 || true
   sleep 1
+fi
+
+# Snapshot the outgoing bundle first — a bad build should never be one-way.
+if [[ -d "${DEST}" ]]; then
+  bash "${ROOT}/scripts/archive-app.sh" || echo "WARN: archive step failed; continuing install"
 fi
 
 echo "==> Installing to ${DEST}"
@@ -57,3 +72,8 @@ echo ""
 echo "Open with:  open \"${DEST}\""
 echo ""
 echo "While iterating: edit code, then run  npm run install:app  again."
+
+if [[ "$RELAUNCH" == "1" ]]; then
+  echo "==> Relaunching ${APP_NAME}…"
+  open "${DEST}"
+fi

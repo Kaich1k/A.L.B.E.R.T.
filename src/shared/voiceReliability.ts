@@ -35,6 +35,34 @@ export function collapseRepeatedTranscript(text: string): string {
   return normalized
 }
 
+/** Join overlapping Whisper chunks without repeating words at each boundary. */
+export function mergeTranscriptChunks(parts: string[]): string {
+  const clean = parts.map((part) => part.replace(/\s+/g, ' ').trim()).filter(Boolean)
+  if (clean.length < 2) return clean[0] || ''
+
+  const key = (word: string): string =>
+    word.toLocaleLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')
+  let merged = clean[0]!
+
+  for (const part of clean.slice(1)) {
+    const left = merged.split(' ')
+    const right = part.split(' ')
+    let overlap = 0
+    const max = Math.min(12, left.length, right.length)
+    for (let size = max; size >= 2; size--) {
+      const leftTail = left.slice(-size).map(key)
+      const rightHead = right.slice(0, size).map(key)
+      if (leftTail.every((word, index) => word && word === rightHead[index])) {
+        overlap = size
+        break
+      }
+    }
+    merged = `${merged} ${right.slice(overlap).join(' ')}`.trim()
+  }
+
+  return merged
+}
+
 export function shouldUseSystemTtsFallback(input: {
   enqueued: number
   neuralEnqueued: boolean

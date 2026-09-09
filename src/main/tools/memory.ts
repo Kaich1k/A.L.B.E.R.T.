@@ -5,7 +5,7 @@ export const memoryTools: ToolDefinition[] = [
   {
     name: 'remember',
     description:
-      'Persist a long-term fact or preference about Kai (name, projects, voice/standby habits, etc.). Use this when he asks you to remember something or to “update your internal logic” — you cannot edit app code, but you CAN store preferences here.',
+      'Persist a long-term fact or preference about Kai. The app already auto-saves many durable facts; still use this when he explicitly asks, or for something lasting that the auto-filter might miss. App-code edits go through cursor_agent, not this tool.',
     parameters: {
       type: 'object',
       properties: {

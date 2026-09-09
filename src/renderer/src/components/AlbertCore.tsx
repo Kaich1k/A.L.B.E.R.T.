@@ -8,7 +8,7 @@ export function AlbertCore({
   label
 }: {
   state: VoiceState
-  variant?: 'home' | 'comm'
+  variant?: 'home' | 'comm' | 'orb'
   wakeArmed?: boolean
   fault?: boolean
   label?: string
@@ -20,20 +20,22 @@ export function AlbertCore({
         ? 'Albert core, wake phrase armed'
         : 'Albert core, standing by'
       : `Albert core, ${state}`)
+  const homeLike = variant !== 'comm'
   return (
     <div
-      className={`reactor-wrap albert-core albert-core--${variant} state-${state}${variant === 'home' ? ' jarvis-reactor' : ' voice-stage'}${wakeArmed ? ' is-wake-armed' : ''}${fault ? ' has-fault' : ''}`}
+      className={`reactor-wrap albert-core albert-core--${variant} state-${state}${
+        homeLike ? ' jarvis-reactor' : ' voice-stage'
+      }${wakeArmed ? ' is-wake-armed' : ''}${fault ? ' has-fault' : ''}${
+        variant === 'orb' ? ' is-orb' : ''
+      }`}
       role="img"
       aria-label={liveLabel}
     >
-      {/* Slow forward sweep — matches mobile slowSpin */}
       <div className="reactor-ring sweep" aria-hidden="true" />
-      {/* Two orbit nodes — spins opposite the mid/cardinal ring (mobile forward) */}
       <div className="reactor-ring outer" aria-hidden="true">
         <span className="reactor-sat n" />
         <span className="reactor-sat s" />
       </div>
-      {/* Four cardinals — reverse of the two-dot outer ring (mobile reverseSpin) */}
       <div className="reactor-ring mid" aria-hidden="true">
         <span className="reactor-dot n" />
         <span className="reactor-dot e" />

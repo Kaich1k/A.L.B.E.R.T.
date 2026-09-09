@@ -20,6 +20,13 @@ interface DraftImage {
 
 const MAX_ATTACH = 4
 const MAX_BYTES = 4_500_000
+const voiceStackCommands = [
+  { label: 'Short version', prompt: 'Give me the short version of your last answer.' },
+  { label: 'Hold thought', prompt: 'Hold that thought and save the current thread context for later.' },
+  { label: 'Show me', prompt: 'Show me the relevant screen, file, source, or artifact for that.' },
+  { label: 'Take over screen', prompt: 'Take over the screen and do the next safe step yourself.' },
+  { label: 'Send to phone', prompt: 'Package the useful part of this and send it to my phone or companion context if available.' }
+]
 
 function voiceCaption(state: string): string {
   switch (state) {
@@ -47,7 +54,18 @@ function normalizeMediaType(raw: string): ChatImageMediaType | null {
 
 function fileToDraft(file: File): Promise<DraftImage | null> {
   return new Promise((resolve) => {
-    const mediaType = normalizeMediaType(file.type)
+    const named = /\.(png|jpe?g|gif|webp)$/i.exec(file.name || '')
+    const mediaType =
+      normalizeMediaType(file.type) ||
+      (named?.[1] === 'jpg' || named?.[1] === 'jpeg'
+        ? 'image/jpeg'
+        : named?.[1] === 'gif'
+          ? 'image/gif'
+          : named?.[1] === 'webp'
+            ? 'image/webp'
+            : named
+              ? 'image/png'
+              : null)
     if (!mediaType) {
       resolve(null)
       return
@@ -74,6 +92,31 @@ function fileToDraft(file: File): Promise<DraftImage | null> {
     reader.onerror = () => resolve(null)
     reader.readAsDataURL(file)
   })
+}
+
+function filesFromClipboard(data: DataTransfer | null): File[] {
+  if (!data) return []
+  const files: File[] = []
+  const seen = new Set<string>()
+  const push = (file: File | null): void => {
+    if (!file) return
+    const key = `${file.name}:${file.size}:${file.type}`
+    if (seen.has(key)) return
+    seen.add(key)
+    files.push(file)
+  }
+  for (const file of Array.from(data.files || [])) push(file)
+  for (const item of Array.from(data.items || [])) {
+    if (item.kind === 'file' && (item.type.startsWith('image/') || item.type === '' || item.type === 'image/tiff')) {
+      push(item.getAsFile())
+    }
+  }
+  return files.filter(
+    (file) =>
+      file.type.startsWith('image/') ||
+      file.type === '' ||
+      /\.(png|jpe?g|gif|webp|tiff?|heic)$/i.test(file.name)
+  )
 }
 
 function MessageImages({ images }: { images: ChatImageRef[] }): React.JSX.Element {
@@ -132,6 +175,9 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
   const voiceState = useAlbertStore((s) => s.voiceState)
   const voiceStatus = useAlbertStore((s) => s.voiceStatus)
   const routeInfo = useAlbertStore((s) => s.routeInfo)
+  const codexPlan = useAlbertStore((s) => s.codexPlan)
+  const codexProgress = useAlbertStore((s) => s.codexProgress)
+  const codexDiff = useAlbertStore((s) => s.codexDiff)
   const setBusy = useAlbertStore((s) => s.setBusy)
   const setError = useAlbertStore((s) => s.setError)
   const setMessages = useAlbertStore((s) => s.setMessages)
@@ -144,34 +190,73 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
   const [purging, setPurging] = useState(false)
   const [followOutput, setFollowOutput] = useState(true)
   const [composerHeight, setComposerHeight] = useState(80)
+  const [orbParked, setOrbParked] = useState(true)
+  const [roam, setRoam] = useState(true)
   const messagesRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const composerRef = useRef<HTMLFormElement>(null)
+  const stageRef = useRef<HTMLDivElement>(null)
+  const dockRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const purgeTimerRef = useRef(0)
   const scrollFrameRef = useRef(0)
 
   const voiceLive = voiceState !== 'idle'
   const voiceLabel = voiceCaption(voiceState)
-  const micLabel =
-    voiceState === 'listening'
-      ? 'Open'
-      : voiceState === 'speaking'
-        ? 'Monitoring'
-        : voiceState === 'connecting'
-          ? 'Initializing'
-          : voiceState === 'thinking'
-            ? 'Processing'
-            : 'Standby'
   const standbyDraft =
     draft.trim().length > 0 && draftImages.length === 0 && isEndVoiceCommand(draft)
   const canSend =
     (draft.trim().length > 0 || draftImages.length > 0) &&
     !busy &&
     (!voiceLive || standbyDraft)
-  const voiceFault = /(?:^|·\s*)(?:Voice startup fault|Last turn fault|Voice output unavailable)\b/i.test(
-    voiceStatus
-  )
+
+  function dockSlot(park: boolean): { x: number; y: number; width: number; height: number; park: boolean } | undefined {
+    const node = dockRef.current
+    if (!node) return undefined
+    const r = node.getBoundingClientRect()
+    if (r.width < 80 || r.height < 80) return undefined
+    return { x: r.x, y: r.y, width: r.width, height: r.height, park }
+  }
+
+  function parkOrb(): void {
+    const slot = dockSlot(true)
+    setOrbParked(true)
+    void window.albert.dockHud(slot)
+  }
+
+  function undockOrb(): void {
+    setOrbParked(false)
+    void window.albert.undockHud()
+  }
+
+  useEffect(() => {
+    setOrbParked(false)
+    void window.albert.undockHud()
+    void window.albert
+      .getHudSnapshot()
+      .then((snap) => {
+        setRoam(snap.roam !== false)
+      })
+      .catch(() => undefined)
+    const node = dockRef.current
+    if (!node) return
+    const remember = (): void => {
+      const slot = dockSlot(false)
+      if (slot) void window.albert.dockHud(slot)
+    }
+    const observer = new ResizeObserver(remember)
+    observer.observe(node)
+    window.addEventListener('resize', remember)
+    const off = window.albert.onChatEvent((event) => {
+      if (event.type === 'hud_docked') setOrbParked(event.docked !== false)
+    })
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', remember)
+      off()
+      void window.albert.undockHud()
+    }
+  }, [])
 
   useEffect(() => {
     if (!followOutput) return
@@ -214,13 +299,23 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
     }
   }, [draftImages])
 
-  async function addFiles(files: FileList | File[]): Promise<void> {
-    if (busy || voiceLive) return
+  useEffect(() => {
+    const onPaste = (event: ClipboardEvent): void => {
+      const target = event.target as HTMLElement | null
+      if (target?.closest('input, textarea') && !target.closest('.panel-comm')) return
+      void ingestPaste(event)
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  })
+
+  async function addFiles(files: FileList | File[]): Promise<number> {
+    if (busy || voiceLive) return 0
     const list = Array.from(files)
     const next: DraftImage[] = [...draftImages]
     for (const file of list) {
       if (next.length >= MAX_ATTACH) break
-      if (!file.type.startsWith('image/')) continue
+      if (!file.type.startsWith('image/') && !/\.(png|jpe?g|gif|webp)$/i.test(file.name)) continue
       const draftImg = await fileToDraft(file)
       if (draftImg) next.push(draftImg)
     }
@@ -228,8 +323,53 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
       setError('Couldn’t attach that image (use PNG/JPEG/GIF/WebP under ~4.5MB, max 4).')
     }
     const current = useAlbertStore.getState()
-    if (current.busy || current.voiceState !== 'idle') return
+    if (current.busy || current.voiceState !== 'idle') return 0
     setDraftImages(next.slice(0, MAX_ATTACH))
+    return Math.max(0, next.length - draftImages.length)
+  }
+
+  async function addClipboardFallback(): Promise<boolean> {
+    const clip = await window.albert.readClipboardImage()
+    if (!clip) return false
+    const current = useAlbertStore.getState()
+    if (current.busy || current.voiceState !== 'idle') return false
+    setDraftImages((prev) => {
+      if (prev.length >= MAX_ATTACH) return prev
+      return [
+        ...prev,
+        {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          mediaType: clip.mediaType,
+          data: clip.data,
+          previewUrl: `data:${clip.mediaType};base64,${clip.data}`
+        }
+      ].slice(0, MAX_ATTACH)
+    })
+    return true
+  }
+
+  async function ingestPaste(event: React.ClipboardEvent | ClipboardEvent): Promise<void> {
+    if (event.defaultPrevented || busy || voiceLive) return
+    const data = 'clipboardData' in event ? event.clipboardData : null
+    const files = filesFromClipboard(data)
+    if (files.length) {
+      event.preventDefault()
+      if (await addFiles(files)) return
+      if (await addClipboardFallback()) return
+      setError('Couldn’t attach that image (use PNG/JPEG/GIF/WebP under ~4.5MB, max 4).')
+      return
+    }
+    const types = Array.from(data?.types || [])
+    const looksLikeImage = types.some(
+      (type) =>
+        type.startsWith('image/') ||
+        /png|jpe?g|gif|webp|tiff/i.test(type) ||
+        type === 'Files'
+    )
+    if (!looksLikeImage) return
+    event.preventDefault()
+    const attached = await addClipboardFallback()
+    if (!attached) setError('Couldn’t read that clipboard image. Try PNG/JPEG/GIF/WebP under ~4.5MB.')
   }
 
   function removeDraftImage(id: string): void {
@@ -314,8 +454,38 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
     }
   }
 
+  async function stageVoiceCommand(prompt: string): Promise<void> {
+    setError(null)
+    setBusy(true)
+    try {
+      await window.albert.sendChat(prompt)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
-    <section className="panel panel-comm" aria-labelledby="comm-link-title">
+    <section
+      className={`panel panel-comm ${dragOver ? 'is-drop-target' : ''} ${busy ? 'is-busy' : ''}`}
+      aria-labelledby="comm-link-title"
+      onPaste={(e) => void ingestPaste(e)}
+      onDragOver={(e) => {
+        e.preventDefault()
+        if (!busy && !voiceLive && Array.from(e.dataTransfer.types).includes('Files')) setDragOver(true)
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false)
+      }}
+      onDrop={(e) => {
+        e.preventDefault()
+        setDragOver(false)
+        if (!busy && !voiceLive && e.dataTransfer.files?.length) {
+          void addFiles(e.dataTransfer.files)
+        }
+      }}
+    >
       <header className="comm-header">
         <div>
           <h2 className="section-title" id="comm-link-title">
@@ -325,17 +495,28 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
             Text, images, or voice. {APP_NAME} retains context and can act on your Mac.
           </p>
         </div>
-        <button
-          className={`btn ghost comm-purge ${purgeArmed ? 'armed' : ''}`}
-          type="button"
-          onClick={() => void clearChat()}
-          disabled={busy || voiceLive || purging || (messages.length === 0 && !streamingText)}
-          aria-busy={purging}
-          aria-label={purgeArmed ? 'Confirm clearing conversation history' : 'Clear conversation history'}
-          title={purgeArmed ? 'Click again within four seconds to confirm' : 'Clear conversation history'}
-        >
-          {purging ? 'Purging…' : purgeArmed ? 'Confirm purge' : 'Purge'}
-        </button>
+        <div className="comm-header-actions">
+          <button
+            type="button"
+            className={`btn ghost comm-talk ${voiceLive ? 'live' : ''}`}
+            onClick={onTalk}
+            aria-pressed={voiceLive}
+            aria-label={voiceLive ? 'End voice session' : 'Engage voice session'}
+          >
+            {voiceLive ? 'End voice' : 'Talk'}
+          </button>
+          <button
+            className={`btn ghost comm-purge ${purgeArmed ? 'armed' : ''}`}
+            type="button"
+            onClick={() => void clearChat()}
+            disabled={busy || voiceLive || purging || (messages.length === 0 && !streamingText)}
+            aria-busy={purging}
+            aria-label={purgeArmed ? 'Confirm clearing conversation history' : 'Clear conversation history'}
+            title={purgeArmed ? 'Click again within four seconds to confirm' : 'Clear conversation history'}
+          >
+            {purging ? 'Purging…' : purgeArmed ? 'Confirm purge' : 'Purge'}
+          </button>
+        </div>
         <span className="sr-only" role="status" aria-live="assertive" aria-atomic="true">
           {purgeArmed ? 'Purge armed. Activate Confirm purge within four seconds.' : ''}
         </span>
@@ -350,7 +531,7 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
         </div>
       ) : null}
 
-      <div className="comm-split">
+      <div ref={stageRef} className="comm-stage">
         <div className="comm-chat">
           {(voiceStatus || routeInfo) && (
             <div className="comm-meta" aria-label="Connection details">
@@ -368,6 +549,53 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
               ) : null}
             </div>
           )}
+
+          {codexPlan.length || codexProgress || codexDiff ? (
+            <div className="comm-meta" aria-label="Codex progress" aria-live="polite">
+              {codexProgress ? (
+                <span>
+                  <b>Codex</b>
+                  <span>{codexProgress.replace(/\s+/g, ' ').slice(0, 220)}</span>
+                </span>
+              ) : null}
+              {codexPlan.length ? (
+                <span>
+                  <b>Plan</b>
+                  <span>
+                    {codexPlan
+                      .map(
+                        (step) =>
+                          `${/completed|done/i.test(step.status) ? '✓' : /in_?progress/i.test(step.status) ? '▸' : '·'} ${step.step}`
+                      )
+                      .join('  ')
+                      .slice(0, 300)}
+                  </span>
+                </span>
+              ) : null}
+              {codexDiff ? (
+                <span>
+                  <b>Diff</b>
+                  <span>{`${codexDiff.split('\n').filter((l) => /^[+-][^+-]/.test(l)).length} changed lines`}</span>
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div className="voice-stack" aria-label="Voice interruption stack">
+            <div className="voice-stack-status">
+              <span>Voice stack</span>
+              <strong>{voiceLabel}</strong>
+            </div>
+            {voiceStackCommands.map((command) => (
+              <button
+                key={command.label}
+                type="button"
+                onClick={() => void stageVoiceCommand(command.prompt)}
+              >
+                {command.label}
+              </button>
+            ))}
+          </div>
 
           <div
             ref={messagesRef}
@@ -387,7 +615,7 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
           >
             {messages.length === 0 && !streamingText ? (
               <div className="empty">
-                Channel open — type, attach an image, or engage voice. Ask anything; he can search
+                Channel open — type, paste or drop an image, or engage voice. Ask anything; he can search
                 the web when facts need a live check.
               </div>
             ) : null}
@@ -450,18 +678,6 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
             className={`composer ${dragOver ? 'drag-over' : ''}`}
             aria-label="Message composer"
             onSubmit={(e) => void onSubmit(e)}
-            onDragOver={(e) => {
-              e.preventDefault()
-              if (!busy && !voiceLive) setDragOver(true)
-            }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={(e) => {
-              e.preventDefault()
-              setDragOver(false)
-              if (!busy && !voiceLive && e.dataTransfer.files?.length) {
-                void addFiles(e.dataTransfer.files)
-              }
-            }}
           >
             {draftImages.length > 0 ? (
               <div className="composer-previews">
@@ -496,12 +712,12 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
               <button
                 type="button"
                 className="btn ghost composer-attach"
-                title="Attach image"
+                title="Attach or paste an image"
                 aria-label="Attach images"
                 disabled={busy || voiceLive || draftImages.length >= MAX_ATTACH}
                 onClick={() => fileInputRef.current?.click()}
               >
-                +
+                Image
               </button>
               <textarea
                 value={draft}
@@ -515,22 +731,7 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
                 aria-label={`Message ${APP_NAME}`}
                 aria-describedby="comm-composer-hint"
                 rows={2}
-                onPaste={(e) => {
-                  if (busy || voiceLive) return
-                  const items = e.clipboardData?.items
-                  if (!items) return
-                  const files: File[] = []
-                  for (const item of Array.from(items)) {
-                    if (item.type.startsWith('image/')) {
-                      const file = item.getAsFile()
-                      if (file) files.push(file)
-                    }
-                  }
-                  if (files.length) {
-                    e.preventDefault()
-                    void addFiles(files)
-                  }
-                }}
+                onPaste={(e) => void ingestPaste(e)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault()
@@ -541,7 +742,7 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
               <span id="comm-composer-hint" className="sr-only">
                 {voiceLive
                   ? 'Voice is engaged. Use End voice before typing a message.'
-                  : 'Press Enter to send or Shift Enter for a new line. Up to four images may be attached.'}
+                  : 'Press Enter to send or Shift Enter for a new line. Paste or drop up to four images.'}
               </span>
               <button
                 className="btn primary"
@@ -555,58 +756,59 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
           </form>
         </div>
 
-        <aside
-          className={`comm-voice state-${voiceState}`}
-          aria-label="Voice link controls"
-          aria-describedby="voice-link-caption"
-        >
-          <AlbertCore
-            state={voiceState}
-            variant="comm"
-            fault={voiceFault}
-            label={`Voice link ${voiceLabel.toLowerCase()}`}
-          />
-
-          <div className="voice-waveform" aria-hidden="true">
-            {Array.from({ length: 19 }, (_, index) => (
-              <i key={index} style={{ '--wave-index': index } as React.CSSProperties} />
-            ))}
+        {dragOver ? (
+          <div className="comm-drop-hint" aria-hidden="true">
+            Drop image to attach
           </div>
-
+        ) : null}
+        <aside className="orb-dock" aria-label="A.L.B.E.R.T. orb dock">
+          <div className="orb-dock__header">
+            <span>Orb dock</span>
+            <b>{voiceLabel}</b>
+          </div>
+          <div className="orb-dock__controls">
+            <button
+              type="button"
+              className={`speech-orb__talk ${voiceLive ? 'live' : ''}`}
+              onClick={() => onTalk()}
+              aria-pressed={voiceLive}
+              aria-label={voiceLive ? 'End voice session' : 'Engage voice session'}
+            >
+              {voiceLive ? 'End' : 'Talk'}
+            </button>
+            <button
+              type="button"
+              className={`speech-orb__pin ${roam ? '' : 'pinned'}`}
+              onClick={() => {
+                const next = !roam
+                setRoam(next)
+                void window.albert.setHudRoam(next)
+              }}
+              aria-pressed={!roam}
+            >
+              {roam ? 'Pin' : 'Unpin'}
+            </button>
+          </div>
           <div
-            className="voice-caption"
-            id="voice-link-caption"
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
+            ref={dockRef}
+            className={`orb-dock__berth${orbParked ? '' : ' is-empty'}`}
+            onPointerDown={orbParked ? undockOrb : undefined}
+            role={orbParked ? 'button' : undefined}
+            tabIndex={orbParked ? 0 : -1}
+            aria-label={orbParked ? 'Undock and move the orb' : undefined}
+            title={orbParked ? 'Press to release the orb, then drag it from the dock' : undefined}
           >
-            <span className={`status-dot ${voiceLive ? voiceState : ''}`} aria-hidden="true" />
-            {voiceLabel}
+            {orbParked ? (
+              <AlbertCore
+                state={voiceState}
+                variant="orb"
+                label={`Orb dock, ${voiceLabel.toLowerCase()}`}
+              />
+            ) : null}
           </div>
-
-          <button
-            type="button"
-            className={`voice-toggle ${voiceLive ? 'live' : 'idle'}`}
-            onClick={onTalk}
-            aria-pressed={voiceLive}
-            aria-label={voiceLive ? 'End voice session' : 'Engage voice session'}
-          >
-            <span className="voice-toggle-track">
-              <span className="voice-toggle-label idle-label">Engage voice</span>
-              <span className="voice-toggle-label live-label">End voice</span>
-            </span>
+          <button type="button" className="orb-dock__button" onClick={() => parkOrb()}>
+            Return orb
           </button>
-          <div className="voice-diagnostics">
-            <span>
-              <b>Session</b> {voiceLive ? 'Active' : 'Standby'}
-            </span>
-            <span>
-              <b>Input</b> {micLabel}
-            </span>
-            <span>
-              <b>State</b> {voiceLabel}
-            </span>
-          </div>
         </aside>
       </div>
     </section>

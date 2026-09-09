@@ -66,6 +66,18 @@ test('detects current-brain questions without hijacking recommendations', () => 
   assert.equal(brainIdentity.isActiveBrainQuestion('Compare Groq and Gemini for me'), false)
 })
 
+test('formats Codex as the active brain without claiming Anthropic', () => {
+  assert.equal(brainIdentity.isActiveBrainQuestion('Are you on Codex?'), true)
+  assert.equal(
+    brainIdentity.activeBrainReply({
+      provider: 'codex',
+      tier: 'codex',
+      model: 'gpt-5.6-terra'
+    }),
+    'Active brain this turn: ChatGPT — gpt-5.6-terra, sir — running on your ChatGPT allowance.'
+  )
+})
+
 test('formats brain identity from the resolved route, never chat history', () => {
   assert.equal(
     brainIdentity.activeBrainReply({
@@ -98,6 +110,78 @@ test('detects active surface questions without hijacking unrelated ask', () => {
   assert.equal(
     brainIdentity.activeSurfaceReply('mac'),
     "You're on the Mac desktop app with me right now, sir — not the phone companion."
+  )
+})
+
+const voiceCommands = await import('../src/shared/voiceCommands.ts')
+const voiceGate = await import('../src/shared/voiceGate.ts')
+
+test('noise crumbs from HVAC and keyboard are treated as hallucinations', () => {
+  for (const crumb of ['you', 'the', 'yeah', 'okay', 'huh', 'you know', 'I think so', 'thanks for watching']) {
+    assert.equal(voiceCommands.isLikelyHallucination(crumb), true, crumb)
+  }
+  assert.equal(voiceCommands.isLikelyHallucination('inspect this project and run the tests'), false)
+})
+
+test('stopword-only utterances never count as a command', () => {
+  assert.equal(voiceCommands.voiceContentWords('yeah okay so').length, 0)
+  assert.equal(voiceCommands.voiceContentWords('inspect this project').length >= 2, true)
+})
+
+test('rolling noise floor plus voiced-frame ratio reject fan-like buffers', () => {
+  let floor = voiceGate.createNoiseFloor(0.01)
+  for (let i = 0; i < 40; i++) floor = voiceGate.updateNoiseFloor(floor, 0.012)
+  const thresholds = voiceGate.speechThresholds(floor, 50)
+  assert.ok(thresholds.barge >= 0.035, `barge ${thresholds.barge}`)
+  assert.ok(thresholds.speech > floor.value)
+
+  const noise = new Float32Array(16_000)
+  for (let i = 0; i < noise.length; i++) noise[i] = (i % 17 === 0 ? 0.08 : 0.01) * (i % 2 ? 1 : -1)
+  const gate = voiceGate.shouldTranscribe({ samples: noise, floor, sensitivity: 50 })
+  assert.equal(gate.ok, false)
+
+  const speech = new Float32Array(16_000)
+  for (let i = 0; i < speech.length; i++) {
+    const voiced = Math.floor(i / 320) % 3 !== 2
+    speech[i] = voiced ? Math.sin(i / 12) * 0.18 : 0.004
+  }
+  const speechGate = voiceGate.shouldTranscribe({ samples: speech, floor, sensitivity: 50 })
+  assert.equal(speechGate.ok, true)
+})
+
+test('default listening gate accepts normal conversational microphone levels', () => {
+  let floor = voiceGate.createNoiseFloor(0.012)
+  for (let i = 0; i < 30; i++) floor = voiceGate.updateNoiseFloor(floor, 0.012)
+  const thresholds = voiceGate.speechThresholds(floor, 50)
+  assert.ok(thresholds.speech < 0.035, `speech threshold ${thresholds.speech}`)
+
+  const quietSpeech = new Float32Array(16_000)
+  for (let i = 0; i < quietSpeech.length; i++) {
+    const voiced = Math.floor(i / 320) % 4 !== 3
+    quietSpeech[i] = voiced ? Math.sin(i / 9) * 0.055 : 0.004
+  }
+  assert.equal(voiceGate.shouldTranscribe({ samples: quietSpeech, floor, sensitivity: 50 }).ok, true)
+})
+
+test('barge-in hold and command confidence keep one-word noise from stopping him', () => {
+  assert.equal(voiceGate.commandConfident(0.1, 1), false)
+  assert.equal(voiceGate.commandConfident(0.4, 1), true)
+  assert.equal(voiceGate.commandConfident(0.1, 2), true)
+})
+
+test('voice endpointing answers short commands quickly without clipping longer thoughts', () => {
+  assert.equal(voiceGate.endOfUtteranceSilenceMs(600), 1_800)
+  assert.equal(voiceGate.endOfUtteranceSilenceMs(2_000), 2_200)
+  assert.equal(voiceGate.endOfUtteranceSilenceMs(8_000), 2_600)
+})
+
+test('overlapping Whisper chunks keep the whole thought without duplicated boundaries', () => {
+  assert.equal(
+    reliability.mergeTranscriptChunks([
+      'make the listening accurate and do not cut',
+      'do not cut my voice off when I pause'
+    ]),
+    'make the listening accurate and do not cut my voice off when I pause'
   )
 })
 

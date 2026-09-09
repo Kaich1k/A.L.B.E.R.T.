@@ -42,6 +42,8 @@ export interface ChatImageRef {
 export interface ChatSendPayload {
   text: string
   images?: ChatImagePayload[]
+  /** Optional stable id supplied by the phone companion for idempotent sync. */
+  userMessageId?: string
 }
 
 export interface ChatMessage {
@@ -123,6 +125,8 @@ export interface Routine {
   updatedAt: number
 }
 
+export type ApprovalKind = 'email' | 'diff' | 'purchase' | 'shell' | 'app' | 'file' | 'other'
+
 export interface ApprovalRequest {
   id: string
   missionId?: string
@@ -131,6 +135,7 @@ export interface ApprovalRequest {
   actionLabel: string
   risk: string
   preview?: string
+  kind?: ApprovalKind
   state: 'pending' | 'approved' | 'declined' | 'expired'
   createdAt: number
   /** Last state transition; added for deterministic phone ↔ Mac reconciliation. */
@@ -156,9 +161,182 @@ export interface OperationsSnapshot {
   generatedAt: number
 }
 
-export type RoutingMode = 'auto' | 'local' | 'fast' | 'power'
+export interface ContextCapsuleTab {
+  title: string
+  url: string
+}
 
-export type ModelTier = 'local' | 'fast' | 'power'
+export interface ContextCapsule {
+  id: string
+  title: string
+  notes: string
+  panel: string
+  missionId?: string
+  missionTitle?: string
+  projectFolder?: string
+  tabs: ContextCapsuleTab[]
+  apps: string[]
+  createdAt: number
+  lastRestoredAt?: number
+}
+
+export interface ProjectPulseChange {
+  path: string
+  status: string
+}
+
+export interface ProjectPulseCommit {
+  hash: string
+  subject: string
+  date: string
+}
+
+export interface ProjectPulseBranch {
+  name: string
+  lastCommitAt: number
+}
+
+export interface ProjectPulseTodo {
+  path: string
+  line: number
+  text: string
+}
+
+export interface ProjectPulse {
+  projectFolder: string | null
+  isGit: boolean
+  branch: string | null
+  aheadBehind?: string
+  dirty: ProjectPulseChange[]
+  recentCommits: ProjectPulseCommit[]
+  staleBranches: ProjectPulseBranch[]
+  todos: ProjectPulseTodo[]
+  testFailures: Array<{ toolName: string; result: string; createdAt: number }>
+  nextTask: string | null
+  score: number | null
+  generatedAt: number
+  error?: string
+}
+
+export type MemoryKind = 'person' | 'project' | 'preference' | 'decision' | 'place' | 'general'
+
+export interface MemoryGraphNode {
+  id: string
+  kind: MemoryKind
+  label: string
+  content: string
+  source: string
+  confidence: number
+  category: string
+  x: number
+  y: number
+}
+
+export interface MemoryGraphEdge {
+  from: string
+  to: string
+  reason: string
+}
+
+export interface MemoryGraph {
+  nodes: MemoryGraphNode[]
+  edges: MemoryGraphEdge[]
+}
+
+export interface MissionArtifact {
+  id: string
+  missionId?: string
+  kind: string
+  title: string
+  body: string
+  source: string
+  version: number
+  createdAt: number
+}
+
+export interface TheaterEvent {
+  id: string
+  toolName: string
+  argsPreview: string
+  resultPreview?: string
+  ok?: boolean
+  phase: 'start' | 'end'
+  createdAt: number
+}
+
+export interface DailyBrief {
+  generatedAt: number
+  weather: string
+  calendar: string[]
+  missions: string[]
+  overnight: string[]
+  firstMove: string
+  error?: string
+}
+
+export interface CursorAgentStatus {
+  running: boolean
+  pid: number | null
+  workspace: string | null
+  prompt: string
+  log: string
+  lastError: string | null
+  startedAt: number | null
+}
+
+export interface HudSnapshot {
+  voiceState: string
+  busy: boolean
+  missionTitle: string | null
+  nextStep: string | null
+  focusRemaining: number
+  theaterCount: number
+  roam: boolean
+  /** True when the floating HUD is hidden and the Comm berth owns the orb. */
+  docked: boolean
+}
+
+export type RoutingMode = 'auto' | 'local' | 'fast' | 'power' | 'codex'
+
+export type ModelTier = 'local' | 'fast' | 'power' | 'codex'
+
+/** How Codex command/file-write approvals are handled. */
+export type CodexApprovalMode = 'project' | 'always' | 'never'
+
+export interface CodexPlanStepView {
+  step: string
+  status: string
+}
+
+export interface CodexAllowance {
+  /** Percent of the ChatGPT allowance still available, when Codex reports it. */
+  remainingPercent: number | null
+  /** Short human sentence for the HUD, e.g. "82% allowance left · resets in 3h". */
+  label: string
+  planType: string | null
+  updatedAt: number
+}
+
+export interface CodexStatus {
+  /** `codex` CLI found on this Mac. */
+  installed: boolean
+  version: string | null
+  /** app-server handshake completed. */
+  connected: boolean
+  signedIn: boolean
+  authMode: 'chatgpt' | 'apiKey' | 'bedrock' | null
+  email: string | null
+  planType: string | null
+  model: string | null
+  escalationModel: string | null
+  effort: string
+  availableModels: Array<{ id: string; displayName: string; efforts: string[] }>
+  threadId: string | null
+  allowance: CodexAllowance | null
+  lastError: string | null
+  /** Populated when the CLI is missing so the UI can tell Kai what to run. */
+  installHint: string | null
+}
 
 export type OllamaEndpointMode = 'auto' | 'cloud' | 'local'
 
@@ -216,6 +394,11 @@ export interface AlbertSettings {
   ttsStripPunctuation: boolean
   /** Cancel A.L.B.E.R.T.'s speech when you start talking */
   allowBargeIn: boolean
+  /**
+   * 0–100 mic sensitivity. Thresholds are computed relative to the rolling room
+   * noise floor; this shifts the margin above it. Lower = ignores more noise.
+   */
+  micSensitivity: number
   /** Always listen for “wake up” / “hey albert” to start voice mode */
   wakeWordEnabled: boolean
   /** Skip heavy HUD animations (default on — saves GPU) */
@@ -245,6 +428,39 @@ export interface AlbertSettings {
   companionPort: number
   /** Bearer token phones must send */
   companionToken: string
+  /** Route engineering work to Codex over the app-server protocol */
+  codexEnabled: boolean
+  /** Everyday Codex model; empty means "let discovery pick" */
+  codexModel: string
+  /** Reserved for hard work — costs more allowance */
+  codexEscalationModel: string
+  /** Reasoning effort: minimal / low / medium / high (model-dependent) */
+  codexEffort: string
+  /** Persisted so Codex context survives an app restart */
+  codexThreadId: string
+  /**
+   * project = auto-accept inside projectFolder only; always = prompt every time;
+   * never = auto-accept anywhere (dangerous, opt-in).
+   */
+  codexApprovalMode: CodexApprovalMode
+  /**
+   * Allow paid Anthropic (Haiku/Opus) to cover for Codex failures.
+   * Off by default so a Codex outage never quietly spends money.
+   */
+  paidFallbackEnabled: boolean
+  /**
+   * Quietly store lasting facts Kai mentions (preferences, identity, projects).
+   * One-off tasks and secrets are ignored.
+   */
+  autoRememberEnabled: boolean
+  /** Cursor user API key for `agent` CLI dispatches (same agent as the IDE). */
+  cursorApiKey: string
+  /** Show the always-on-top speech orb. */
+  ambientHudEnabled: boolean
+  /** Desktop HUD drifts on its own until dragged. */
+  ambientHudRoam: boolean
+  /** One-shot: speech orb is now the desktop voice cursor. */
+  speechOrbDesktop?: boolean
 }
 
 export interface AgentStreamEvent {
@@ -260,6 +476,15 @@ export interface AgentStreamEvent {
     | 'chat_cleared'
     | 'chat_synced'
     | 'settings'
+    /** Codex reasoning/progress line — visual only, never spoken. */
+    | 'codex_progress'
+    | 'codex_plan'
+    | 'codex_diff'
+    | 'codex_status'
+    | 'pause_speech'
+    | 'theater'
+    | 'cursor_progress'
+    | 'hud_docked'
   content?: string
   message?: ChatMessage
   toolName?: string
@@ -271,6 +496,18 @@ export interface AgentStreamEvent {
   tier?: ModelTier
   reason?: string
   settings?: AlbertSettings
+  /** codex_plan */
+  plan?: CodexPlanStepView[]
+  /** codex_diff */
+  diff?: string
+  /** codex_status */
+  codex?: CodexStatus
+  /** Cursor local-agent progress (visual only). */
+  cursorLog?: string
+  /** Command theater tick. */
+  theater?: TheaterEvent
+  /** Floating HUD was parked in / released from the Comm berth. */
+  docked?: boolean
 }
 
 export interface RealtimeSessionConfig {
@@ -305,7 +542,7 @@ export const DEFAULT_SETTINGS: AlbertSettings = {
   geminiModel: DEFAULT_GEMINI_MODEL,
   fastModel: 'claude-haiku-4-5',
   powerModel: 'claude-opus-5',
-  routingMode: 'auto',
+  routingMode: 'codex',
   localProvider: 'ollama',
   ollamaEndpoint: 'auto',
   ollamaCloudBase: 'https://ollama.com',
@@ -322,6 +559,7 @@ export const DEFAULT_SETTINGS: AlbertSettings = {
   ttsPitch: 1,
   ttsStripPunctuation: true,
   allowBargeIn: true,
+  micSensitivity: 50,
   wakeWordEnabled: true,
   performanceMode: true,
   startupAnimationEnabled: true,
@@ -336,5 +574,17 @@ export const DEFAULT_SETTINGS: AlbertSettings = {
   allowedFsRoots: [],
   companionEnabled: false,
   companionPort: 47831,
-  companionToken: ''
+  companionToken: '',
+  codexEnabled: true,
+  codexModel: '',
+  codexEscalationModel: '',
+  codexEffort: 'medium',
+  codexThreadId: '',
+  codexApprovalMode: 'project',
+  paidFallbackEnabled: false,
+  autoRememberEnabled: true,
+  cursorApiKey: '',
+  ambientHudEnabled: true,
+  ambientHudRoam: true,
+  speechOrbDesktop: true
 }
