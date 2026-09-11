@@ -176,6 +176,8 @@ export default function App(): React.JSX.Element {
   const chatTaskRef = useRef<Promise<string> | null>(null)
   const chatAbortRef = useRef<AbortController | null>(null)
   const mutationSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const bootReadyRef = useRef(false)
   const performSyncRef = useRef<
     (options?: { quiet?: boolean; allowEnroll?: boolean }) => Promise<LocalData>
   >(async () => dataRef.current)
@@ -190,6 +192,7 @@ export default function App(): React.JSX.Element {
       mountedRef.current = false
       clearTimeout(timer)
       if (mutationSyncTimerRef.current) clearTimeout(mutationSyncTimerRef.current)
+      if (persistTimerRef.current) clearTimeout(persistTimerRef.current)
       chatAbortRef.current?.abort()
     }
   }, [])
@@ -226,6 +229,17 @@ export default function App(): React.JSX.Element {
   const updateConfig = useCallback((next: CompanionConfig) => {
     configRef.current = next
     setConfigState(next)
+    if (!bootReadyRef.current) return
+    if (persistTimerRef.current) clearTimeout(persistTimerRef.current)
+    persistTimerRef.current = setTimeout(() => {
+      const current = configRef.current
+      const saved = { ...current, macBaseUrl: normalizeBase(current.macBaseUrl) }
+      configRef.current = saved
+      void saveConfig(saved).catch((error) => {
+        if (!mountedRef.current) return
+        setLinkError(`Settings could not be saved — ${messageFor(error)}`)
+      })
+    }, 400)
   }, [])
 
   const loadApp = useCallback(async () => {
@@ -246,6 +260,7 @@ export default function App(): React.JSX.Element {
       setLinkState(
         storedConfig.macBaseUrl && storedConfig.macCredential ? 'checking' : 'unconfigured'
       )
+      bootReadyRef.current = true
       setBootReady(true)
       // Persist normalized defaults and complete any v1 → v2 migration.
       await Promise.all([saveConfig(storedConfig), saveLocalData(storedData)])
@@ -267,13 +282,18 @@ export default function App(): React.JSX.Element {
   const paired = Boolean(config.macBaseUrl.trim() && config.macCredential.trim())
 
   const persistConfig = useCallback(async () => {
+    if (persistTimerRef.current) {
+      clearTimeout(persistTimerRef.current)
+      persistTimerRef.current = null
+    }
     const current = configRef.current
     const next = { ...current, macBaseUrl: normalizeBase(current.macBaseUrl) }
-    updateConfig(next)
+    configRef.current = next
+    setConfigState(next)
     await saveConfig(next)
     setLinkError(null)
     showToast('Systems configuration secured on this device.', 'ok')
-  }, [showToast, updateConfig])
+  }, [showToast])
 
   const performSync = useCallback(
     (options: { quiet?: boolean; allowEnroll?: boolean } = {}): Promise<LocalData> => {

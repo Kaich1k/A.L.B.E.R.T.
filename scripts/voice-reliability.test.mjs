@@ -163,6 +163,14 @@ test('default listening gate accepts normal conversational microphone levels', (
   assert.equal(voiceGate.shouldTranscribe({ samples: quietSpeech, floor, sensitivity: 50 }).ok, true)
 })
 
+test('bare I am going to go does not end voice, standby still does', () => {
+  assert.equal(voiceCommands.isEndVoiceCommand("I'm going to go."), false)
+  assert.equal(voiceCommands.isEndVoiceCommand("I'm going to go"), false)
+  assert.equal(voiceCommands.isEndVoiceCommand("I'm going to go now."), true)
+  assert.equal(voiceCommands.isEndVoiceCommand('standby'), true)
+  assert.equal(voiceCommands.isEndVoiceCommand('go to standby'), true)
+})
+
 test('barge-in hold and command confidence keep one-word noise from stopping him', () => {
   assert.equal(voiceGate.commandConfident(0.1, 1), false)
   assert.equal(voiceGate.commandConfident(0.4, 1), true)

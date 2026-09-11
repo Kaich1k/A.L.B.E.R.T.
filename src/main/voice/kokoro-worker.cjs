@@ -102,6 +102,18 @@ async function ensureTts() {
   return tts
 }
 
+const ONES = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine']
+
+/** Last-chance: never let "3.14" reach Kokoro — it splits on "." and says "three… fourteen". */
+function expandWrittenDecimals(text) {
+  return String(text || '').replace(/\d+\.\d+/g, (raw) => {
+    const [whole, frac] = raw.split('.')
+    const head = [...(whole || '0')].map((ch) => ONES[Number(ch)] || ch).join(' ')
+    const tail = [...(frac || '')].map((ch) => ONES[Number(ch)] || ch).join(' ')
+    return tail ? `${head} and point and ${tail}` : head
+  })
+}
+
 process.on('message', async (msg) => {
   if (!msg || typeof msg !== 'object') return
   const { id, type } = msg
@@ -118,7 +130,10 @@ process.on('message', async (msg) => {
       process.send?.({ type: 'progress', status: 'generating', message: 'Generating speech…' })
       const voice = msg.voice || 'am_michael'
       const speed = Math.min(1.3, Math.max(0.7, Number(msg.speed) || 1))
-      const text = String(msg.text || '').replace(/\s+/g, ' ').trim().slice(0, 2500)
+      const text = expandWrittenDecimals(String(msg.text || ''))
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 2500)
       if (!text) throw new Error('Nothing to speak')
       const audio = await model.generate(text, { voice, speed })
       if (!audio?.audio?.length) throw new Error('Kokoro returned empty audio')

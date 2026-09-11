@@ -418,7 +418,11 @@ test('HTTP boundary enforces enrollment/auth, protocol identity, body limit, con
   response = await fetch(`${base}/v2/sync`, {
     method: 'POST',
     headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ protocolVersion: 2, deviceId: 'httpdevice01', padding: 'x'.repeat(2 * 1024 * 1024) })
+    body: JSON.stringify({
+      protocolVersion: 2,
+      deviceId: 'httpdevice01',
+      padding: 'x'.repeat(8 * 1024 * 1024)
+    })
   })
   assert.equal(response.status, 413)
 

@@ -212,7 +212,11 @@ export async function synthesizeKokoro(
   const settings = getSettings()
   const voice =
     (overrides?.voiceId || settings.kokoroVoiceId || 'am_michael').trim() || 'am_michael'
-  const cleaned = text.replace(/\s+/g, ' ').trim().slice(0, 2500)
+  const cleaned = text
+    .replace(/<\/?[a-zA-Z][^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 2500)
   if (!cleaned) throw new Error('Nothing to speak')
 
   return enqueueSynth(async () => {

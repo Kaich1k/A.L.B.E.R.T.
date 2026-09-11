@@ -77,10 +77,11 @@ const GROQ_MODEL_OPTIONS = [
 ]
 
 const GEMINI_MODEL_OPTIONS = [
-  { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash — recommended free tier' },
-  { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite — fastest / lightest' },
-  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite — newer lite route' },
-  { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro — stronger (tighter free quotas)' }
+  { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash — recommended current plan route' },
+  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite — fastest / lightest' },
+  { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash — legacy; missing from many current plans' },
+  { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite — legacy lite route' },
+  { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro — legacy; tighter quotas' }
 ]
 
 const PERSONALITY_KEYS = Object.keys(PERSONALITY_META) as PersonalityKey[]
@@ -769,8 +770,9 @@ export function SettingsPanel(): React.JSX.Element {
             <p className="section-sub">
               One-time import: OpenAI has no API for ChatGPT&apos;s saved memories, so this reads an
               official data export instead. Request one at ChatGPT → Settings → Data controls →
-              Export, then pick the .zip here. Saved memories come across verbatim; conversations
-              are scanned for durable facts about you, not copied in full.
+              Export, then pick the .zip or its extracted folder here. Saved memories come across
+              verbatim when included; split conversation files are scanned for durable facts about
+              you, not copied in full.
             </p>
             <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
               <button

@@ -10,6 +10,11 @@ import {
 } from '../src/lib/chat.ts'
 import { chatWithClaude } from '../src/lib/claude.ts'
 import {
+  chatWithGemini,
+  DEFAULT_GEMINI_MODEL,
+  geminiModelCandidates
+} from '../src/lib/gemini.ts'
+import {
   chatWithGroq,
   GROQ_TRANSITION_CUTOFF_MS,
   groqModelCandidates
@@ -88,6 +93,7 @@ test('Auto exposes both model families and defaults to fast free Groq', () => {
   assert.equal(defaultModelFor('auto'), 'openai/gpt-oss-20b')
   assert.equal(isModelForProvider('auto', 'claude-haiku-4-5'), true)
   assert.equal(isModelForProvider('auto', 'openai/gpt-oss-20b'), true)
+  assert.equal(isModelForProvider('auto', 'gemini-3.5-flash'), true)
   assert.equal(isModelForProvider('auto', 'gemini-2.5-flash'), true)
   assert.ok(modelsFor('auto').some((entry) => entry.label.startsWith('Groq ·')))
   assert.ok(modelsFor('auto').some((entry) => entry.label.startsWith('Gemini ·')))
@@ -124,7 +130,7 @@ test('Auto crosses providers only when both user keys exist', () => {
       anthropicApiKey: 'sk_user',
       groqApiKey: 'gsk_user',
       geminiApiKey: 'AIza_user',
-      model: 'gemini-2.5-flash'
+      model: 'gemini-3.5-flash'
     }),
     ['gemini', 'groq', 'anthropic']
   )
@@ -379,6 +385,44 @@ test('Groq safely exhausts malformed successful model responses', async () => {
   assert.ok(error instanceof ProviderRequestError)
   assert.equal(error.code, 'invalid_response')
   assert.equal(calls, 3)
+})
+
+test('Gemini defaults to 3.5 Flash and skips 2.5 when it is off-plan', async () => {
+  assert.equal(DEFAULT_GEMINI_MODEL, 'gemini-3.5-flash')
+  assert.equal(defaultModelFor('gemini'), 'gemini-3.5-flash')
+  assert.ok(modelsFor('gemini').some((entry) => entry.value === 'gemini-3.5-flash'))
+  assert.ok(modelsFor('auto').some((entry) => entry.value === 'gemini-3.5-flash'))
+  assert.deepEqual(geminiModelCandidates('gemini-2.5-flash').slice(0, 2), [
+    'gemini-2.5-flash',
+    'gemini-3.5-flash'
+  ])
+
+  const attempted = []
+  const result = await chatWithGemini({
+    apiKey: 'AIza_user',
+    model: 'gemini-2.5-flash',
+    messages,
+    memories: [],
+    fetchImpl: async (_url, init) => {
+      const model = modelFromRequest(init)
+      attempted.push(model)
+      if (model === 'gemini-2.5-flash') {
+        return jsonResponse(
+          { error: { message: 'gemini-2.5-flash is not included in your current plan' } },
+          400
+        )
+      }
+      return jsonResponse({
+        model: 'gemini-3.5-flash',
+        choices: [{ message: { content: 'Online, sir.' } }]
+      })
+    }
+  })
+  assert.equal(attempted[0], 'gemini-2.5-flash')
+  assert.ok(attempted.includes('gemini-3.5-flash'))
+  assert.equal(result.model, 'gemini-3.5-flash')
+  assert.equal(result.reply, 'Online, sir.')
+  assert.equal(result.provider, 'gemini')
 })
 
 test('Auto falls from Groq to Anthropic only when both keys are present', async () => {

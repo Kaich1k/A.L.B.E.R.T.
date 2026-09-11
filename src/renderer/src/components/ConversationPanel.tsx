@@ -254,6 +254,7 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
       observer.disconnect()
       window.removeEventListener('resize', remember)
       off()
+      void window.albert.dockHud(null)
       void window.albert.undockHud()
     }
   }, [])

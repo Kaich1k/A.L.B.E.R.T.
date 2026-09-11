@@ -10,7 +10,8 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   dedupeAgainstExisting,
-  parseConversationsJson,
+  isConversationExportFile,
+  parseConversationExports,
   parseMemoryJson,
   type ImportCandidate,
   type ImportScan
@@ -69,6 +70,33 @@ function findFile(root: string, name: string, depth = 3): string | null {
   return null
 }
 
+/** Find every matching export file, including numbered conversation shards. */
+function findFiles(root: string, matches: (name: string) => boolean, depth = 3): string[] {
+  if (depth < 0) return []
+  let entries: string[]
+  try {
+    entries = readdirSync(root)
+  } catch {
+    return []
+  }
+
+  const found: string[] = []
+  for (const entry of entries) {
+    if (entry.startsWith('.') || entry === '__MACOSX') continue
+    const full = join(root, entry)
+    try {
+      if (statSync(full).isDirectory()) {
+        found.push(...findFiles(full, matches, depth - 1))
+      } else if (matches(entry)) {
+        found.push(full)
+      }
+    } catch {
+      // Ignore unreadable export entries and continue scanning the rest.
+    }
+  }
+  return found.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+}
+
 function readJson(path: string | null): { value: unknown; error?: string } {
   if (!path) return { value: null }
   try {
@@ -117,24 +145,27 @@ function scanRoot(root: string): {
   const warnings: string[] = []
 
   const memoryPath = findFile(root, 'memory.json')
-  const conversationsPath = findFile(root, 'conversations.json')
+  const conversationPaths = findFiles(root, isConversationExportFile)
 
   const memoryRaw = readJson(memoryPath)
   if (memoryRaw.error) warnings.push(memoryRaw.error)
-  const conversationsRaw = readJson(conversationsPath)
-  if (conversationsRaw.error) warnings.push(conversationsRaw.error)
+  const conversationDocuments: unknown[] = []
+  for (const path of conversationPaths) {
+    const raw = readJson(path)
+    if (raw.error) warnings.push(raw.error)
+    else conversationDocuments.push(raw.value)
+  }
 
   const { memories, disabled } = parseMemoryJson(memoryRaw.value)
-  const { history, conversationsSeen, messagesScanned } = parseConversationsJson(
-    conversationsRaw.value
-  )
+  const { history, conversationsSeen, messagesScanned } =
+    parseConversationExports(conversationDocuments)
 
   if (!memoryPath) {
     warnings.push(
-      'No memory.json in this export — ChatGPT only includes it when saved memories are on.'
+      'No saved-memory file was included in this export; conversation facts can still be imported.'
     )
   }
-  if (!conversationsPath) warnings.push('No conversations.json in this export.')
+  if (!conversationPaths.length) warnings.push('No ChatGPT conversation files were found in this export.')
 
   return {
     memories,
@@ -146,7 +177,7 @@ function scanRoot(root: string): {
       conversationsSeen,
       messagesScanned,
       foundMemoryJson: Boolean(memoryPath),
-      foundConversationsJson: Boolean(conversationsPath),
+      foundConversationsJson: conversationPaths.length > 0,
       warnings
     }
   }

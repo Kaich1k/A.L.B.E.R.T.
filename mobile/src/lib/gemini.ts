@@ -26,12 +26,14 @@ const DEFAULT_TIMEOUT_MS = 42_000
 const DEFAULT_ATTEMPT_TIMEOUT_MS = 14_000
 const MAX_TOOL_ROUNDS = 3
 
-export const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash'
+/** Current Google AI Studio Flash route. 2.5 Flash is leaving free plans. */
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash'
 
 export const GEMINI_MODELS = [
   DEFAULT_GEMINI_MODEL,
-  'gemini-2.5-flash-lite',
   'gemini-3.5-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
   'gemini-2.5-pro'
 ] as const
 
@@ -85,9 +87,20 @@ function successfulMessage(data: Record<string, unknown> | null): {
   return { text: content, toolCalls }
 }
 
+function looksLikeUnavailableModel(status: number | undefined, message: string): boolean {
+  if (status === 404) return true
+  if (status === 403) {
+    return /model|plan|not (included|available|enabled|allowed)|permission/i.test(message)
+  }
+  return /model|not found|unsupported|unknown|not included|not (available|enabled|allowed)|your (current )?plan/i.test(
+    message
+  )
+}
+
 function shouldTryAnotherModel(error: ProviderRequestError): boolean {
   if (error.code === 'model_unavailable' || error.code === 'invalid_response') return true
   if (error.code === 'timeout') return true
+  if (looksLikeUnavailableModel(error.status, error.message)) return true
   return error.code === 'provider_unavailable' && (error.status === 408 || (error.status || 0) >= 500)
 }
 
@@ -195,12 +208,11 @@ export async function chatWithGemini(opts: {
               remoteMessage,
               retryAfterMs: parseRetryAfterMs(response.headers.get('retry-after'), now())
             })
-            if (
-              (response.status === 400 || response.status === 404) &&
-              /model|not found|unsupported|unknown/i.test(remoteMessage || '')
-            ) {
+            const planBlocked =
+              error.code !== 'authentication' || /model|plan/i.test(remoteMessage || '')
+            if (planBlocked && looksLikeUnavailableModel(response.status, remoteMessage || error.message)) {
               error = new ProviderRequestError({
-                message: remoteMessage || `${model} is not available on Gemini.`,
+                message: remoteMessage || `${model} is not available on this Gemini plan.`,
                 code: 'model_unavailable',
                 provider: 'gemini',
                 model,

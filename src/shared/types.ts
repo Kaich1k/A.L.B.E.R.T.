@@ -527,8 +527,8 @@ export interface RealtimeToolDefinition {
 
 export const CLAUDE_DASHBOARD_URL = 'https://platform.claude.com/dashboard'
 export const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-20b'
-/** Free-tier friendly default from Google AI Studio / Gemini API. */
-export const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash'
+/** Current Google AI Studio Flash route. 2.5 Flash is leaving free plans. */
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash'
 
 export const DEFAULT_SETTINGS: AlbertSettings = {
   anthropicApiKey: '',

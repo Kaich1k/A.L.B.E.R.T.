@@ -11,6 +11,7 @@ import {
 import {
   buildSyncPayloadBatches,
   slimMessageForSync,
+  SYNC_REQUEST_MAX_BYTES,
   SYNC_SERVER_ARRAY_LIMITS,
   syncAllWithMac,
   syncPayloadBytes
@@ -286,7 +287,8 @@ test('multi-request sync accumulates early acknowledgements and tailored tombsto
         macCredential: `v2.mobile_test_device.${'a'.repeat(64)}`,
         deviceId: 'mobile_test_device'
       },
-      data
+      data,
+      maxBytes: 80_000
     })
     assert.ok(requests > 1)
     assert.equal(merged.sync.outbox.length, 0)
@@ -404,7 +406,7 @@ test('oversized chat photos are stubbed so sync can proceed under the byte ceili
   assert.equal(skipped.length, 0)
   assert.ok(batches.length >= 1)
   for (const batch of batches) {
-    assert.ok(syncPayloadBytes(batch) <= 1_900_000)
+    assert.ok(syncPayloadBytes(batch) <= SYNC_REQUEST_MAX_BYTES)
     for (const message of batch.messages || []) {
       for (const image of message.images || []) {
         assert.equal(image.dataUrl, undefined)

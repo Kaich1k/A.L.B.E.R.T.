@@ -215,7 +215,7 @@ export interface AlbertApi {
     width: number
     height: number
     park?: boolean
-  }) => Promise<void>
+  } | null) => Promise<void>
   undockHud: () => Promise<void>
   reportHudRuntime: (state: { voiceState?: VoiceState; busy?: boolean; tool?: string }) => Promise<void>
   setHudClickThrough: (ignore: boolean) => Promise<void>

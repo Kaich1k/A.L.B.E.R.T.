@@ -19,8 +19,9 @@ import {
 export { mergeSyncedData, SyncCoordinator, syncBackoffMs, SYNC_PROTOCOL_VERSION } from './syncLogic'
 
 const TIMEOUT_MS = 12_000
-/** Keep comfortably below the desktop companion's exact 2 MiB request ceiling. */
-export const SYNC_REQUEST_MAX_BYTES = 1_900_000
+/** Per-request JSON budget. Must stay below Mac `MAX_BODY_BYTES` (8 MiB). */
+export const SYNC_REQUEST_MAX_BYTES = 7_500_000
+const SYNC_UPLOAD_TIMEOUT_MS = 45_000
 
 /** Mirrors the desktop v2 sanitization ceilings; byte size alone is not enough. */
 export const SYNC_SERVER_ARRAY_LIMITS = {
@@ -88,7 +89,7 @@ function truncateForSync(text: string, maxChars: number): string {
 
 /**
  * Prepare a chat message for the Mac uplink. The companion never persists phone
- * image bytes, so shipping multi‑MB dataUrls only blows the 2 MiB body ceiling
+ * image bytes, so shipping multi‑MB dataUrls only blows the body ceiling
  * and wedges the whole queue.
  */
 export function slimMessageForSync(message: ChatMessage): ChatMessage {
@@ -492,6 +493,8 @@ export async function syncAllWithMac(opts: {
   data: LocalData
   /** Re-read state after the network response so in-flight local edits survive. */
   getLatestData?: () => LocalData
+  /** Override the per-request JSON budget (tests). */
+  maxBytes?: number
 }): Promise<LocalData> {
   const { config, data } = opts
   const base = normalizeBase(config.macBaseUrl)
@@ -499,7 +502,7 @@ export async function syncAllWithMac(opts: {
     throw new MacSyncError('Enroll this phone under Systems → Mac Link first', 0, 'auth')
   }
   const sentOutbox = [...data.sync.outbox]
-  const { batches, skipped } = buildSyncPayloadBatches(data, config.deviceId)
+  const { batches, skipped } = buildSyncPayloadBatches(data, config.deviceId, opts.maxBytes)
   const acknowledgedMutationIds = new Set<string>()
   const tombstones = new Map<string, SyncTombstone>()
   let finalResponse: SyncResponse | null = null
@@ -509,7 +512,7 @@ export async function syncAllWithMac(opts: {
       method: 'POST',
       headers: authHeaders(config.macCredential),
       body: JSON.stringify(batch)
-    })
+    }, SYNC_UPLOAD_TIMEOUT_MS)
     const parsed = await responseJson<SyncResponse>(response)
     if (!parsed.ok) throw new MacSyncError(parsed.error || 'Mac sync failed', response.status)
     if (parsed.protocolVersion !== SYNC_PROTOCOL_VERSION) {

@@ -5,6 +5,7 @@ import {
   parsePersonalityVoiceCommand,
   personalityAdjustReply
 } from '../../../shared/personality'
+import { drainSpeakableUnits, takeSpeakableUnits } from '../../../shared/speechText'
 import { useAlbertStore } from '../store'
 import { decodeBlobToMono16k, trimSilence } from './audio'
 import { LiveKeywordMonitor } from './liveKeywords'
@@ -27,143 +28,11 @@ import {
   isShowCommand
 } from './voiceCommands'
 
+export { drainSpeakableUnits, takeSpeakableUnits }
+
 type VoiceListener = (state: VoiceState) => void
 type TranscriptListener = (role: 'user' | 'assistant', text: string) => void
 type StatusListener = (msg: string) => void
-
-/** Lossless split — never drop characters between speak / rest. */
-function splitAt(text: string, index: number): { speak: string; rest: string } {
-  if (index <= 0) return { speak: '', rest: text }
-  if (index >= text.length) return { speak: text, rest: '' }
-  return {
-    speak: text.slice(0, index).replace(/^\s+|\s+$/g, ''),
-    rest: text.slice(index).replace(/^\s+/g, '')
-  }
-}
-
-/** Trailing title / latin abbrev — not a real sentence end. */
-function endsWithAbbreviation(candidate: string): boolean {
-  return /(?:^|[\s("'])(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|vs|etc|e\.g|i\.e)\.?["')\]]?$/i.test(
-    candidate.trim()
-  )
-}
-
-/**
- * Pull speakable text from a streaming buffer.
- * Cuts at completed sentence ends so TTS can start on sentence 1 while tokens
- * (and later synth of sentence 2+) continue. Eager mode allows a soft clause
- * cut for the first audio of a turn when no period has landed yet.
- *
- * Markdown bullet lines rarely end with periods — treat newlines / next-bullet
- * markers as boundaries so long lists don’t become one giant skipped clip.
- */
-export function takeSpeakableUnits(
-  buffer: string,
-  final: boolean,
-  eager = false
-): { speak: string; rest: string } {
-  const text = buffer
-  if (!text.trim()) return { speak: '', rest: '' }
-
-  // Scan every terminator — skip "Mr." / short crumbs, keep looking
-  const re = /[.!?]["')\]]?(?:\s+|$)/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(text))) {
-    const end = m.index + m[0].length
-    const candidate = text.slice(0, end).replace(/\s+/g, ' ').trim()
-    if (!candidate) continue
-    if (endsWithAbbreviation(candidate)) continue
-    // Single-letter initial ("A.") — keep scanning
-    if (/^[A-Za-z]\.$/.test(candidate)) continue
-    // "Yes sir." is 8 chars — must fire early (old min of 12 blocked Albert openers)
-    if (candidate.length >= 5) return splitAt(text, end)
-  }
-
-  // List / paragraph breaks (common in parts lists — often no trailing period)
-  const lineRe = /\n+\s*(?:[-*•]\s+|\d+\.\s+)?/g
-  let lineMatch: RegExpExecArray | null
-  while ((lineMatch = lineRe.exec(text))) {
-    const end = lineMatch.index
-    const candidate = text.slice(0, end).replace(/\s+/g, ' ').trim()
-    // Need a real line of content before the break (skip leading blank / marker-only)
-    if (candidate.length >= 12 && end > 0) {
-      return splitAt(text, lineMatch.index + lineMatch[0].length)
-    }
-  }
-
-  // First audio of the turn: start synth on a clause while the LLM still streams
-  if (eager && !final) {
-    const trimmed = text.replace(/\s+/g, ' ').trim()
-    if (trimmed.length >= 48) {
-      const window = text.slice(0, Math.min(text.length, 110))
-      const soft = Math.max(
-        window.lastIndexOf(', '),
-        window.lastIndexOf('; '),
-        window.lastIndexOf(' — '),
-        window.lastIndexOf(': ')
-      )
-      if (soft >= 24) return splitAt(text, soft + 1)
-    }
-    if (trimmed.length >= 90) {
-      const cut = text.lastIndexOf(' ', Math.min(text.length, 80))
-      if (cut >= 36) return splitAt(text, cut)
-    }
-  }
-
-  // Hard cap — never hand Kokoro a novel-sized unit (silent truncation / skips)
-  if (text.replace(/\s+/g, ' ').trim().length >= 420) {
-    const window = text.slice(0, Math.min(text.length, 400))
-    let cut = Math.max(
-      window.lastIndexOf('. '),
-      window.lastIndexOf('! '),
-      window.lastIndexOf('? '),
-      window.lastIndexOf('\n'),
-      window.lastIndexOf(', ')
-    )
-    if (cut < 80) cut = window.lastIndexOf(' ')
-    if (cut >= 80) return splitAt(text, cut + 1)
-  }
-
-  if (final) {
-    return { speak: text.replace(/\s+/g, ' ').trim(), rest: '' }
-  }
-
-  return { speak: '', rest: text }
-}
-
-/**
- * Drain finished sentences into separate synth jobs.
- * Final flush still splits by sentence so sentence N+1 can synthesize while N plays.
- */
-export function drainSpeakableUnits(
-  buffer: string,
-  final: boolean,
-  eagerFirst = false
-): { units: string[]; rest: string } {
-  const units: string[] = []
-  let rest = buffer
-  let eager = eagerFirst
-
-  for (let i = 0; i < 32; i++) {
-    const next = takeSpeakableUnits(rest, false, eager)
-    if (!next.speak) {
-      rest = next.rest
-      break
-    }
-    units.push(next.speak)
-    rest = next.rest
-    eager = false
-    if (!rest) break
-  }
-
-  if (final) {
-    const tail = rest.replace(/\s+/g, ' ').trim()
-    if (tail) units.push(tail)
-    return { units, rest: '' }
-  }
-
-  return { units, rest }
-}
 
 /**
  * Local voice path:
@@ -491,17 +360,7 @@ export class ClaudeVoiceSession {
         this.muteNow()
         return
       }
-      // Standby via mute-watch only while audio is actually playing — never during
-      // the Thinking window (silence → Whisper “Bye.” was ending voice before TTS).
-      if (
-        this.speaking &&
-        (isEndVoiceCommand(text) || isEndVoiceCommand(raw)) &&
-        /\b(standby|stand\s*by|take\s*(a\s*)?(5|five)|end\s+voice|go\s+to\s+sleep)\b/i.test(
-          text
-        )
-      ) {
-        void this.engageStandbyFromLive()
-      }
+      // Do not map TTS bleed / "bye" crumbs onto standby while he is still talking.
     } catch {
       /* ignore watch errors */
     } finally {
@@ -527,8 +386,9 @@ export class ClaudeVoiceSession {
     this.onStatus('Speaking… (say “mute” / “standby” anytime)')
     // Capture over the end of TTS — next command often starts before he finishes.
     this.armHotMic('tts')
-    // Now that audio is live, standby keywords are safe again
-    this.startLiveKeywords(true)
+    // Now that audio is live, mute/hide/show still work. Standby stays off until
+    // playback ends — chunk gaps and speaker bleed were ending the session.
+    this.startLiveKeywords(false)
     this.startMuteWatch()
   }
 

@@ -7,6 +7,7 @@ import { APP_NAME } from '../../shared/brand'
 import {
   clampRectToArea,
   hintForTool,
+  orbShouldSnapToDock,
   overlaps,
   orbBesideWindow,
   orbOnDisplay,
@@ -32,6 +33,8 @@ let obstructionTimer: ReturnType<typeof setInterval> | null = null
 let obstructionCheckInFlight = false
 let dockedToMain = false
 let lastDockOrigin: HudPoint | null = null
+let lastDockRect: HudRect | null = null
+let dockSnapArmed = true
 let roamEnabled = true
 let dragOrigin: { cursorX: number; cursorY: number; winX: number; winY: number } | null = null
 let suppressRoamUntil = 0
@@ -248,12 +251,42 @@ function rememberDockSlot(slot?: { x: number; y: number; width: number; height: 
   const main = appWindow()
   if (!main || main.isDestroyed() || !slot || slot.width < 80 || slot.height < 80) return
   const content = main.getContentBounds()
+  lastDockRect = {
+    x: content.x + slot.x,
+    y: content.y + slot.y,
+    width: slot.width,
+    height: slot.height
+  }
   lastDockOrigin = clampToWorkArea(
-    content.x + slot.x + (slot.width - ORB_SIZE) / 2,
-    content.y + slot.y + (slot.height - ORB_SIZE) / 2,
+    lastDockRect.x + (lastDockRect.width - ORB_SIZE) / 2,
+    lastDockRect.y + (lastDockRect.height - ORB_SIZE) / 2,
     ORB_SIZE,
     ORB_SIZE
   )
+}
+
+function hudNearDock(): boolean {
+  if (!hudWindow || hudWindow.isDestroyed() || !lastDockRect) return false
+  return orbShouldSnapToDock(hudWindow.getBounds(), lastDockRect)
+}
+
+function parkHudInDock(): void {
+  dockedToMain = true
+  hideHudInDock()
+  broadcastHudDocked(true)
+}
+
+function snapHudIntoDock(): void {
+  const origin = lastDockOrigin
+  dragOrigin = null
+  if (!origin || !hudWindow || hudWindow.isDestroyed()) {
+    parkHudInDock()
+    return
+  }
+  void animateHudTo(origin, 11).then((landed) => {
+    if (!landed || dragOrigin) return
+    parkHudInDock()
+  })
 }
 
 function hideHudInDock(): void {
@@ -323,17 +356,17 @@ function syncMotionMode(): void {
   if (!obstructionTimer) obstructionTimer = setInterval(() => void tickObstructionCheck(), 1400)
 }
 
-function animateHudTo(dest: HudPoint, steps = 24): Promise<void> {
+function animateHudTo(dest: HudPoint, steps = 24): Promise<boolean> {
   return new Promise((resolve) => {
     if (!hudWindow || hudWindow.isDestroyed()) {
-      resolve()
+      resolve(false)
       return
     }
     stopRoamAnim()
     const gen = ++flightGen
     const start = hudWindow.getBounds()
     if (Math.hypot(dest.x - start.x, dest.y - start.y) < 8) {
-      resolve()
+      resolve(true)
       return
     }
     let step = 0
@@ -343,7 +376,7 @@ function animateHudTo(dest: HudPoint, steps = 24): Promise<void> {
           clearInterval(roamAnim)
           roamAnim = null
         }
-        resolve()
+        resolve(false)
         return
       }
       step += 1
@@ -356,7 +389,7 @@ function animateHudTo(dest: HudPoint, steps = 24): Promise<void> {
       if (step >= steps) {
         stopRoamAnim()
         saveBounds()
-        resolve()
+        resolve(true)
       }
     }, 32)
   })
@@ -398,8 +431,13 @@ export async function guideHudForTool(
 export function dockHud(
   slot?: { x: number; y: number; width: number; height: number; park?: boolean } | null
 ): void {
+  if (slot == null) {
+    lastDockOrigin = null
+    lastDockRect = null
+    return
+  }
   rememberDockSlot(slot)
-  if (slot?.park === false) return
+  if (slot.park === false) return
   if (dragOrigin) return
   const main = appWindow()
   if (!main || main.isDestroyed() || !main.isVisible()) return
@@ -407,9 +445,7 @@ export function dockHud(
     hideHudInDock()
     return
   }
-  dockedToMain = true
-  hideHudInDock()
-  broadcastHudDocked(true)
+  parkHudInDock()
 }
 
 export function releaseHudDock(): void {
@@ -502,8 +538,10 @@ export function dragAmbientHud(payload: {
     }
     const [winX, winY] = hudWindow.getPosition()
     dragOrigin = { cursorX: payload.screenX, cursorY: payload.screenY, winX, winY }
+    dockSnapArmed = !hudNearDock()
     suppressRoamUntil = Date.now() + 18_000
     stopRoamAnim()
+    flightGen += 1
     setHudClickThrough(false)
     return
   }
@@ -515,8 +553,14 @@ export function dragAmbientHud(payload: {
     hudWindow.getBounds().height
   )
   hudWindow.setPosition(next.x, next.y)
+  if (!dockSnapArmed && !hudNearDock()) dockSnapArmed = true
   if (payload.phase === 'end') {
+    const shouldSnap = dockSnapArmed && hudNearDock()
     dragOrigin = null
+    if (shouldSnap) {
+      snapHudIntoDock()
+      return
+    }
     saveBounds()
     syncMotionMode()
   }

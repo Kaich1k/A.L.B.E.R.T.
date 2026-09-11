@@ -38,7 +38,9 @@ export interface CompanionStatus {
   devices: ReturnType<typeof listCompanionDevices>
 }
 
-const MAX_BODY_BYTES = 2 * 1024 * 1024
+/** Incoming JSON ceiling. Keep mobile `SYNC_REQUEST_MAX_BYTES` slightly under this. */
+export const MAX_BODY_BYTES = 8 * 1024 * 1024
+const MAX_BODY_MB = Math.round(MAX_BODY_BYTES / (1024 * 1024))
 const rateWindows = new Map<string, { start: number; count: number }>()
 
 function discardRequestBody(req: IncomingMessage): void {
@@ -80,7 +82,7 @@ function readBody(req: IncomingMessage): Promise<string> {
     const contentLength = Number(req.headers['content-length'])
     if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
       req.resume()
-      reject(Object.assign(new Error('Request body exceeds 2 MB'), { statusCode: 413 }))
+      reject(Object.assign(new Error(`Request body exceeds ${MAX_BODY_MB} MB`), { statusCode: 413 }))
       return
     }
     const chunks: Buffer[] = []
@@ -92,7 +94,7 @@ function readBody(req: IncomingMessage): Promise<string> {
       size += chunk.byteLength
       if (size > MAX_BODY_BYTES) {
         tooLarge = true
-        reject(Object.assign(new Error('Request body exceeds 2 MB'), { statusCode: 413 }))
+        reject(Object.assign(new Error(`Request body exceeds ${MAX_BODY_MB} MB`), { statusCode: 413 }))
         return
       }
       chunks.push(chunk)
@@ -497,8 +499,9 @@ export async function startCompanionServer(): Promise<CompanionStatus> {
         }, req)
       })
     })
-    server.requestTimeout = 15_000
-    server.headersTimeout = 10_000
+    // Long enough to receive an 8 MiB sync/chat body over a slow Tailscale hop.
+    server.requestTimeout = 60_000
+    server.headersTimeout = 15_000
     server.keepAliveTimeout = 5_000
     server.maxHeadersCount = 50
     server.maxRequestsPerSocket = 200

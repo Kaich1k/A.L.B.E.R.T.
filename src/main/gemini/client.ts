@@ -17,9 +17,9 @@ import { DEFAULT_GEMINI_MODEL } from '../../shared/types'
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/openai'
 const GEMINI_FALLBACK_MODELS = [
   DEFAULT_GEMINI_MODEL,
+  'gemini-3.5-flash-lite',
   'gemini-2.5-flash',
-  'gemini-2.5-flash-lite',
-  'gemini-3.5-flash-lite'
+  'gemini-2.5-flash-lite'
 ] as const
 
 export function geminiModelCandidates(primary: string): string[] {
@@ -207,7 +207,13 @@ export async function geminiChatCompletion(opts: {
         const msg = lastError.message
         if (/\b401\b|invalid.*api.?key|authentication|API[_ ]?key/i.test(msg)) throw lastError
         if (/abort|timed?\s*out|timeout/i.test(msg)) break
-        if (/\b(403|404|429)\b|quota|rate.?limit|not found|not supported/i.test(msg)) break
+        if (
+          /\b(403|404|429)\b|quota|rate.?limit|not found|not supported|not included|not available|your (current )?plan/i.test(
+            msg
+          )
+        ) {
+          break
+        }
         // Missing thought_signature: rewrite history with Google's bypass token and retry once.
         if (/thought_signatur/i.test(msg) && attempt.messages.some((m) => m.tool_calls?.length)) {
           try {

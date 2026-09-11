@@ -1,9 +1,18 @@
 import { useAlbertStore } from '../store'
 import {
+  chunkForSystemTts,
+  joinGapSeconds,
+  segmentForSpeech,
+  stripMarkdownForSpeech,
+  type SpeechPause
+} from '../../../shared/speechText'
+import {
   isCurrentVoiceGeneration,
   shouldUseSystemTtsFallback,
   ttsRecoveryTail
 } from '../../../shared/voiceReliability'
+
+export { stripMarkdownForSpeech }
 
 let currentAudio: HTMLAudioElement | null = null
 let currentObjectUrl: string | null = null
@@ -75,113 +84,57 @@ function pickVoice(preferredName: string): SpeechSynthesisVoice | null {
   )
 }
 
-/**
- * Strip markdown / list markers so Kokoro doesn’t say “asterisk” or “hashtag”.
- * Also turns bullet lines into sentence-ish breaks for cleaner chunking upstream.
- */
-export function stripMarkdownForSpeech(text: string): string {
-  return text
-    .replace(/\r\n/g, '\n')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/__([^_]+)__/g, '$1')
-    .replace(/(?<!\w)\*([^*\n]+)\*(?!\w)/g, '$1')
-    .replace(/(?<!\w)_([^_\n]+)_(?!\w)/g, '$1')
-    .replace(/^#{1,6}\s+/gm, '')
-    // Bullets → plain lines (markers removed; newlines kept for splitters)
-    .replace(/^\s*[-*•]\s+/gm, '')
-    .replace(/^\s*\d+\.\s+/gm, '')
-    // Any leftover decorative asterisks / hashes (never speak “asterisk”)
-    .replace(/\*+/g, '')
-    .replace(/#+/g, '')
-    .replace(/~/g, '')
-    .replace(/\|/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-}
-
-/**
- * Prep text for TTS.
- * System TTS: optional punctuation strip (macOS inserts long pauses on .!?).
- * Neural (Kokoro/ElevenLabs): keep punctuation — stripping causes odd joins / “skipped” words.
- */
-function prepareForSpeech(text: string, stripPunctuation: boolean): string {
-  const demarked = stripMarkdownForSpeech(text)
-  const collapsed = demarked.replace(/\s+/g, ' ').trim()
-  if (!collapsed) return ''
-  if (!stripPunctuation) {
-    return collapsed
-      .replace(/[—–]/g, ' — ')
-      .replace(/\s+/g, ' ')
-      .trim()
-  }
-
-  const protected_ = collapsed.replace(
-    /\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|vs|etc|e\.g|i\.e)\./gi,
-    (_, a: string) => `${a}·`
-  )
-
-  return protected_
-    .replace(/[—–]/g, ' ')
-    .replace(/\.\.\./g, ' ')
-    .replace(/\s*[;:]\s*/g, ' ')
-    .replace(/[.!?]+/g, ' ')
-    .replace(/,/g, ' ')
-    .replace(/·/g, '.')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
 function stripPunctuationEnabled(): boolean {
   return useAlbertStore.getState().settings.ttsStripPunctuation !== false
 }
 
-/** System TTS: almost always ONE utterance — splitting causes dead air. */
-function chunkForSystemTts(text: string): string[] {
-  const cleaned = prepareForSpeech(text, stripPunctuationEnabled())
-  if (!cleaned) return []
-  if (cleaned.length <= 1600) return [cleaned]
-
-  const chunks: string[] = []
-  let remaining = cleaned
-  while (remaining.length > 1600) {
-    let cut = remaining.lastIndexOf(' ', 1500)
-    if (cut < 600) cut = 1500
-    chunks.push(remaining.slice(0, cut).trim())
-    remaining = remaining.slice(cut).trim()
-  }
-  if (remaining) chunks.push(remaining)
-  return chunks
+function systemTtsChunks(text: string): string[] {
+  return chunkForSystemTts(text, stripPunctuationEnabled())
 }
 
-/**
- * Neural TTS: keep as one clip whenever possible. Re-splitting into ~400-char
- * pieces caused audible gaps between each synth/play handoff.
- */
-function chunkForApiTts(text: string): string[] {
-  const cleaned = prepareForSpeech(text, false)
-  if (!cleaned) return []
-  if (cleaned.length <= 2400) return [cleaned]
+const TTS_SILENCE_THRESHOLD = 0.012
+const TTS_EDGE_PAD_SEC = 0.01
+const TTS_FADE_SEC = 0.008
 
-  const chunks: string[] = []
-  let remaining = cleaned
-  while (remaining.length > 2400) {
-    let cut = Math.max(
-      remaining.lastIndexOf('. ', 2300),
-      remaining.lastIndexOf('! ', 2300),
-      remaining.lastIndexOf('? ', 2300)
-    )
-    if (cut < 800) cut = remaining.lastIndexOf(' ', 2300)
-    if (cut < 800) cut = 2300
-    else cut += 1
-    chunks.push(remaining.slice(0, cut).trim())
-    remaining = remaining.slice(cut).trim()
+function channelRms(samples: Float32Array, start: number, end: number): number {
+  let sum = 0
+  const n = Math.max(1, end - start)
+  for (let i = start; i < end; i++) {
+    const value = samples[i] || 0
+    sum += value * value
   }
-  if (remaining) chunks.push(remaining)
-  return chunks
+  return Math.sqrt(sum / n)
+}
+
+/** Leading/trailing quiet in a Kokoro/ElevenLabs clip — used to join without stacked dead air. */
+function ttsActiveWindow(buffer: AudioBuffer): { offsetSec: number; durationSec: number; trailingSilentSec: number } {
+  const length = buffer.length
+  const sampleRate = buffer.sampleRate
+  const frame = Math.max(1, Math.floor(sampleRate * 0.008))
+  let firstActive = -1
+  let lastActive = -1
+  for (let offset = 0; offset < length; offset += frame) {
+    const end = Math.min(length, offset + frame)
+    let energy = 0
+    for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+      energy = Math.max(energy, channelRms(buffer.getChannelData(channel), offset, end))
+    }
+    if (energy >= TTS_SILENCE_THRESHOLD) {
+      if (firstActive < 0) firstActive = offset
+      lastActive = end
+    }
+  }
+  if (firstActive < 0 || lastActive <= firstActive) {
+    return { offsetSec: 0, durationSec: buffer.duration, trailingSilentSec: 0 }
+  }
+  const pad = Math.floor(sampleRate * TTS_EDGE_PAD_SEC)
+  const start = Math.max(0, firstActive - pad)
+  const end = Math.min(length, lastActive + pad)
+  return {
+    offsetSec: start / sampleRate,
+    durationSec: (end - start) / sampleRate,
+    trailingSilentSec: Math.max(0, (length - lastActive) / sampleRate)
+  }
 }
 
 function unwrapIpcError(err: unknown): Error {
@@ -231,6 +184,7 @@ async function ensureGaplessCtx(): Promise<AudioContext> {
 /**
  * Decode + schedule a clip to abut the previous one (no HTMLAudio gaps).
  * Resolves when the clip is scheduled — not when it finishes playing.
+ * Pauses are Web Audio gaps, never SSML.
  */
 async function scheduleGaplessBase64(
   base64: string,
@@ -238,6 +192,7 @@ async function scheduleGaplessBase64(
     shouldCancel?: () => boolean
     generation?: number
     onStart?: () => void
+    pauseAfter?: SpeechPause
   }
 ): Promise<{ ended: Promise<void> }> {
   const gen = options?.generation ?? speakGeneration
@@ -277,15 +232,27 @@ async function scheduleGaplessBase64(
     return { ended: Promise.resolve() }
   }
 
+  const active = ttsActiveWindow(audioBuffer)
+  const maxDur = Math.max(0.02, audioBuffer.duration - active.offsetSec)
+  const playDuration = Math.max(0.02, Math.min(active.durationSec, maxDur))
+  const fade = Math.min(TTS_FADE_SEC, playDuration / 4)
+  const gap = joinGapSeconds(options?.pauseAfter ?? 'sentence', TTS_EDGE_PAD_SEC)
+
   const source = ctx.createBufferSource()
   source.buffer = audioBuffer
-  source.connect(ctx.destination)
+  const gain = ctx.createGain()
+  source.connect(gain)
+  gain.connect(ctx.destination)
 
   const now = ctx.currentTime
   // Abut previous clip; small pad only when the timeline is idle
   const previousNextTime = gaplessNextTime
   const startAt = gaplessNextTime > now + 0.005 ? gaplessNextTime : now + 0.015
-  gaplessNextTime = startAt + audioBuffer.duration
+  gain.gain.setValueAtTime(0.0001, startAt)
+  gain.gain.linearRampToValueAtTime(1, startAt + fade)
+  gain.gain.setValueAtTime(1, startAt + Math.max(fade, playDuration - fade))
+  gain.gain.linearRampToValueAtTime(0.0001, startAt + playDuration)
+  gaplessNextTime = startAt + playDuration + gap
 
   gaplessSources.add(source)
   let startPollTimer = 0
@@ -312,6 +279,11 @@ async function scheduleGaplessBase64(
       }
       try {
         source.disconnect()
+      } catch {
+        /* already disconnected */
+      }
+      try {
+        gain.disconnect()
       } catch {
         /* already disconnected */
       }
@@ -366,18 +338,18 @@ async function scheduleGaplessBase64(
           finish()
           return
         }
-        const expectedEnd = startAt + audioBuffer.duration
+        const expectedEnd = startAt + playDuration
         if (markStartedFromAudioClock() && ctx.currentTime >= expectedEnd - 0.05) {
           finish()
           return
         }
         finish(new Error(`Voice audio output stalled (${ctx.state})`))
       },
-      Math.max(5_000, Math.ceil((startAt - ctx.currentTime + audioBuffer.duration) * 1000) + 3_000)
+      Math.max(5_000, Math.ceil((startAt - ctx.currentTime + playDuration) * 1000) + 3_000)
     )
   })
   try {
-    source.start(startAt)
+    source.start(startAt, active.offsetSec, playDuration)
   } catch (error) {
     gaplessNextTime = previousNextTime
     abortEnded()
@@ -627,9 +599,14 @@ async function playAudioUrl(
   })
 }
 
+type NeuralClip = {
+  audio: Promise<string>
+  pauseAfter: SpeechPause
+}
+
 async function playBase64Chunks(
-  chunkAudio: Promise<string>[],
-  mime: string,
+  clips: NeuralClip[],
+  _mime: string,
   label: string,
   options?: SpeakOptions & { generation?: number }
 ): Promise<void> {
@@ -643,7 +620,8 @@ async function playBase64Chunks(
   }
 
   let announced = false
-  for (let i = 0; i < chunkAudio.length; i++) {
+  const endedList: Promise<void>[] = []
+  for (let i = 0; i < clips.length; i++) {
     if (options?.shouldCancel?.()) {
       if (!options?.append) stopSpeaking()
       return
@@ -652,39 +630,17 @@ async function playBase64Chunks(
 
     let base64: string
     try {
-      base64 = await withTimeout(chunkAudio[i]!, NEURAL_TTS_TIMEOUT_MS, `${label} synthesis`)
+      base64 = await withTimeout(clips[i]!.audio, NEURAL_TTS_TIMEOUT_MS, `${label} synthesis`)
     } catch (err) {
       throw unwrapIpcError(err)
     }
     if (options?.shouldCancel?.()) return
     if (activeGeneration != null && activeGeneration !== speakGeneration) return
 
-    // Gapless path for streamed appends (Kokoro/ElevenLabs)
-    if (options?.append) {
-      const { ended } = await scheduleGaplessBase64(base64, {
-        shouldCancel: options.shouldCancel,
-        generation: activeGeneration,
-        onStart: () => {
-          if (!announced) {
-            announced = true
-            options.onStart?.()
-          }
-        }
-      })
-      await ended
-      continue
-    }
-
-    const src = base64ToObjectUrl(base64, mime)
-    const prevUrl = currentObjectUrl
-    currentObjectUrl = src
-    if (prevUrl && prevUrl !== src) {
-      window.setTimeout(() => URL.revokeObjectURL(prevUrl), 500)
-    }
-
-    await playAudioUrl(src, label, {
+    const { ended } = await scheduleGaplessBase64(base64, {
       shouldCancel: options?.shouldCancel,
       generation: activeGeneration,
+      pauseAfter: clips[i]!.pauseAfter,
       onStart: () => {
         if (!announced) {
           announced = true
@@ -692,7 +648,9 @@ async function playBase64Chunks(
         }
       }
     })
+    endedList.push(ended)
   }
+  await Promise.all(endedList)
 }
 
 type SpeakHandle = {
@@ -703,10 +661,10 @@ async function synthesizeNeuralParts(
   text: string,
   provider: 'kokoro' | 'elevenlabs',
   options?: SpeakOptions
-): Promise<{ parts: Promise<string>[]; mime: string }> {
+): Promise<{ clips: NeuralClip[]; mime: string }> {
   const settings = useAlbertStore.getState().settings
-  const chunks = chunkForApiTts(text)
-  if (!chunks.length) return { parts: [], mime: 'audio/wav' }
+  const chunks = segmentForSpeech(text)
+  if (!chunks.length) return { clips: [], mime: 'audio/wav' }
 
   if (provider === 'elevenlabs') {
     const apiKey = (options?.apiKey ?? settings.elevenLabsApiKey)?.trim()
@@ -718,14 +676,20 @@ async function synthesizeNeuralParts(
     }
     return {
       mime: 'audio/mpeg',
-      parts: chunks.map((chunk) => window.albert.speakElevenLabs(chunk, { apiKey, voiceId }))
+      clips: chunks.map((chunk) => ({
+        audio: window.albert.speakElevenLabs(chunk.text, { apiKey, voiceId }),
+        pauseAfter: chunk.pauseAfter
+      }))
     }
   }
 
   const voiceId = (options?.voiceId ?? settings.kokoroVoiceId)?.trim() || 'am_michael'
   return {
     mime: 'audio/wav',
-    parts: chunks.map((chunk) => window.albert.speakKokoro(chunk, { voiceId }))
+    clips: chunks.map((chunk) => ({
+      audio: window.albert.speakKokoro(chunk.text, { voiceId }),
+      pauseAfter: chunk.pauseAfter
+    }))
   }
 }
 
@@ -736,26 +700,26 @@ async function synthesizeNeuralParts(
 export function beginSpeak(text: string, options?: SpeakOptions): SpeakHandle {
   const settings = useAlbertStore.getState().settings
   const provider = options?.provider || settings.ttsProvider || 'system'
-  const chunks =
-    provider === 'system' ? chunkForSystemTts(text) : chunkForApiTts(text)
-  if (!chunks.length) {
-    return { play: async () => undefined }
-  }
-
   const generation = speakGeneration
 
   if (provider === 'elevenlabs' || provider === 'kokoro') {
     const started = synthesizeNeuralParts(text, provider, options)
     return {
       play: async (playOpts) => {
-        const { parts, mime } = await started
-        return playBase64Chunks(parts, mime, provider === 'elevenlabs' ? 'ElevenLabs' : 'Kokoro', {
+        const { clips, mime } = await started
+        if (!clips.length) return
+        return playBase64Chunks(clips, mime, provider === 'elevenlabs' ? 'ElevenLabs' : 'Kokoro', {
           ...options,
           append: playOpts?.append ?? options?.append,
           generation
         })
       }
     }
+  }
+
+  const chunks = systemTtsChunks(text)
+  if (!chunks.length) {
+    return { play: async () => undefined }
   }
 
   return {
@@ -815,7 +779,7 @@ export function stopSpeaking(): void {
 }
 
 type NeuralPartResult =
-  | { ok: true; base64: string }
+  | { ok: true; base64: string; pauseAfter: SpeechPause }
   | { ok: false; error: unknown }
 
 type NeuralPartsResult =
@@ -882,8 +846,7 @@ export class StreamingTtsQueue {
   }
 
   enqueue(text: string): void {
-    const piece = stripMarkdownForSpeech(text).replace(/\s+/g, ' ').trim()
-    if (!piece) return
+    if (!stripMarkdownForSpeech(text).replace(/\s+/g, ' ').trim()) return
     if (this.shouldCancel()) return
 
     const gen = this.generation
@@ -893,7 +856,7 @@ export class StreamingTtsQueue {
     const append = this.enqueued > 0
     const pieceIndex = this.queuedText.length
     this.enqueued += 1
-    this.queuedText.push(piece)
+    this.queuedText.push(text)
 
     const announce = (): void => {
       if (gen !== this.generation || gen !== speakGeneration) return
@@ -908,7 +871,7 @@ export class StreamingTtsQueue {
         .then(async () => {
           if (cancelled()) return
           if (this.failedPieceIndex != null && pieceIndex > this.failedPieceIndex) return
-          await speakSystem(chunkForSystemTts(piece), {
+          await speakSystem(systemTtsChunks(text), {
             shouldCancel: cancelled,
             onStart: announce,
             append
@@ -925,14 +888,14 @@ export class StreamingTtsQueue {
     // Neural: fire IPC synth NOW (overlaps prior sentence playback).
     // scheduleChain only orders decode/schedule — it must not await playback end.
     const audioParts: Promise<NeuralPartsResult> = synthesizeNeuralParts(
-      piece,
+      text,
       provider === 'elevenlabs' ? 'elevenlabs' : 'kokoro'
     ).then(
-      ({ parts }) => ({
+      ({ clips }) => ({
         ok: true as const,
-        parts: parts.map((part) =>
-          part.then<NeuralPartResult, NeuralPartResult>(
-            (base64) => ({ ok: true, base64 }),
+        parts: clips.map((clip) =>
+          clip.audio.then<NeuralPartResult, NeuralPartResult>(
+            (base64) => ({ ok: true, base64, pauseAfter: clip.pauseAfter }),
             (error) => ({ ok: false, error })
           )
         )
@@ -972,6 +935,7 @@ export class StreamingTtsQueue {
             const { ended } = await scheduleGaplessBase64(partResult.base64, {
               shouldCancel: cancelled,
               generation: gen,
+              pauseAfter: partResult.pauseAfter,
               onStart: () => {
                 if (gen !== this.generation || gen !== speakGeneration) return
                 announce()
@@ -1028,7 +992,7 @@ export class StreamingTtsQueue {
       const failure = this.firstFailure || new Error('Neural voice returned no playable audio')
       this.fallbackUsed = true
       console.warn('[voice] Streamed neural TTS failed; using the system voice', failure)
-      await speakSystem(chunkForSystemTts(fallbackText), {
+      await speakSystem(systemTtsChunks(fallbackText), {
         shouldCancel: this.shouldCancel,
         onStart: () => {
           if (gen !== this.generation || gen !== speakGeneration) return
@@ -1056,7 +1020,7 @@ export class StreamingTtsQueue {
       if (unsaidTail) {
         const failure = this.firstFailure
         this.fallbackUsed = true
-        await speakSystem(chunkForSystemTts(unsaidTail), {
+        await speakSystem(systemTtsChunks(unsaidTail), {
           shouldCancel: this.shouldCancel,
           onStart: () => {
             if (gen !== this.generation || gen !== speakGeneration) return

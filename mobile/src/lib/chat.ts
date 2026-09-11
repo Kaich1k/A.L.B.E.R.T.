@@ -37,10 +37,11 @@ const GROQ_MODEL_LABELS: Record<string, string> = {
 }
 
 const GEMINI_MODEL_LABELS: Record<string, string> = {
-  'gemini-2.5-flash': '2.5 Flash (recommended free tier)',
-  'gemini-2.5-flash-lite': '2.5 Flash-Lite (fastest)',
-  'gemini-3.5-flash-lite': '3.5 Flash-Lite',
-  'gemini-2.5-pro': '2.5 Pro (tighter free quotas)'
+  'gemini-3.5-flash': '3.5 Flash (recommended)',
+  'gemini-3.5-flash-lite': '3.5 Flash-Lite (fastest)',
+  'gemini-2.5-flash': '2.5 Flash (legacy)',
+  'gemini-2.5-flash-lite': '2.5 Flash-Lite (legacy)',
+  'gemini-2.5-pro': '2.5 Pro (legacy; tighter quotas)'
 }
 
 export function groqModelsForDate(nowMs = Date.now()): ReadonlyArray<{ value: string; label: string }> {

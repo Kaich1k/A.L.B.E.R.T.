@@ -164,6 +164,12 @@ test('speech orb work hints follow the tool, not random screen edges', async () 
   assert.ok(otherDesk.x >= 1920, 'orb can fly onto a second display')
   const beside = hud.orbBesideWindow({ x: 2100, y: 80, width: 800, height: 600 }, 196, second)
   assert.ok(beside.x >= 1920)
+  const berth = { x: 1000, y: 200, width: 236, height: 236 }
+  const overBerth = { x: 1024, y: 174, width: 288, height: 288 }
+  assert.equal(hud.orbShouldSnapToDock(overBerth, berth), true)
+  const farFromBerth = { x: 40, y: 40, width: 288, height: 288 }
+  assert.equal(hud.orbShouldSnapToDock(farFromBerth, berth), false)
+  assert.equal(hud.orbShouldSnapToDock(overBerth, { ...berth, width: 20, height: 20 }), false)
 })
 
 test('self-update commands must not run as a child shell', async () => {

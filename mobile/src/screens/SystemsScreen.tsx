@@ -128,8 +128,10 @@ const FALLBACK_MODELS: Record<LlmProvider, ReadonlyArray<ModelOption>> = {
     { value: 'openai/gpt-oss-20b', label: 'Groq · GPT-OSS 20B', note: 'Fastest available configured brain' },
     { value: 'openai/gpt-oss-120b', label: 'Groq · GPT-OSS 120B', note: 'Higher-capability free-cloud route' },
     { value: 'qwen/qwen3.6-27b', label: 'Groq · Qwen 27B', note: 'Preview route' },
-    { value: 'gemini-2.5-flash', label: 'Gemini · 2.5 Flash', note: 'Google AI Studio free tier' },
-    { value: 'gemini-2.5-flash-lite', label: 'Gemini · 2.5 Flash-Lite', note: 'Lightest Gemini free route' },
+    { value: 'gemini-3.5-flash', label: 'Gemini · 3.5 Flash', note: 'Current Google AI Studio Flash route' },
+    { value: 'gemini-3.5-flash-lite', label: 'Gemini · 3.5 Flash-Lite', note: 'Fastest current Gemini free route' },
+    { value: 'gemini-2.5-flash', label: 'Gemini · 2.5 Flash', note: 'Legacy; missing from many current plans' },
+    { value: 'gemini-2.5-flash-lite', label: 'Gemini · 2.5 Flash-Lite', note: 'Legacy lite route' },
     { value: 'claude-haiku-4-5', label: 'Anthropic · Haiku', note: 'Fast, concise voice and chat' },
     { value: 'claude-sonnet-4-6', label: 'Anthropic · Sonnet', note: 'Balanced reasoning' },
     { value: 'claude-opus-4-8', label: 'Anthropic · Opus', note: 'Deep work' }
@@ -145,10 +147,11 @@ const FALLBACK_MODELS: Record<LlmProvider, ReadonlyArray<ModelOption>> = {
     { value: 'qwen/qwen3.6-27b', label: 'Qwen 27B', note: 'Preview route' }
   ],
   gemini: [
-    { value: 'gemini-2.5-flash', label: '2.5 Flash', note: 'Recommended free tier' },
-    { value: 'gemini-2.5-flash-lite', label: '2.5 Flash-Lite', note: 'Fastest / lightest' },
-    { value: 'gemini-3.5-flash-lite', label: '3.5 Flash-Lite', note: 'Newer lite route' },
-    { value: 'gemini-2.5-pro', label: '2.5 Pro', note: 'Stronger; tighter free quotas' }
+    { value: 'gemini-3.5-flash', label: '3.5 Flash', note: 'Recommended current plan route' },
+    { value: 'gemini-3.5-flash-lite', label: '3.5 Flash-Lite', note: 'Fastest / lightest' },
+    { value: 'gemini-2.5-flash', label: '2.5 Flash', note: 'Legacy; missing from many current plans' },
+    { value: 'gemini-2.5-flash-lite', label: '2.5 Flash-Lite', note: 'Legacy lite route' },
+    { value: 'gemini-2.5-pro', label: '2.5 Pro', note: 'Legacy; tighter quotas' }
   ],
   mac: [
     { value: 'codex', label: 'ChatGPT / Codex (paired Mac)', note: 'Uses the active brain on the paired Mac' }

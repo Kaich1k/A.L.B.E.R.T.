@@ -31,6 +31,11 @@ export const HISTORY_FACT_LIMIT = 400
 const MIN_FACT_CHARS = 12
 const MAX_FACT_CHARS = 320
 
+/** Current exports may split history into conversations-000.json, etc. */
+export function isConversationExportFile(name: string): boolean {
+  return /^conversations(?:[-_]\d+)?\.json$/i.test(name.trim())
+}
+
 /** Content hash for dedupe: case, punctuation and spacing insensitive. */
 export function normalizeFactKey(text: string): string {
   return text
@@ -232,6 +237,26 @@ export function parseConversationsJson(raw: unknown): {
     conversationsSeen: conversations.length,
     messagesScanned
   }
+}
+
+/** Parse one legacy conversation file or any number of current split files. */
+export function parseConversationExports(rawFiles: unknown[]): {
+  history: ImportCandidate[]
+  conversationsSeen: number
+  messagesScanned: number
+} {
+  const conversations: unknown[] = []
+
+  for (const raw of rawFiles) {
+    if (Array.isArray(raw)) {
+      conversations.push(...raw)
+      continue
+    }
+    if (!raw || typeof raw !== 'object') continue
+    conversations.push(...asArray((raw as Record<string, unknown>).conversations ?? []))
+  }
+
+  return parseConversationsJson(conversations)
 }
 
 /**

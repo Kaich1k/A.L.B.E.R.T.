@@ -105,6 +105,24 @@ export function overlaps(a: HudRect, b: HudRect, pad = 0): boolean {
   )
 }
 
+/** Extra slack around the Comm berth before a dragged orb docks. */
+export const DOCK_SNAP_REACH = 108
+
+/** True when the orb center is close enough to the circular berth to magnet-dock. */
+export function orbShouldSnapToDock(
+  orb: HudRect,
+  berth: HudRect,
+  reach = DOCK_SNAP_REACH
+): boolean {
+  if (berth.width < 80 || berth.height < 80 || orb.width < 40 || orb.height < 40) return false
+  const ox = orb.x + orb.width / 2
+  const oy = orb.y + orb.height / 2
+  const bx = berth.x + berth.width / 2
+  const by = berth.y + berth.height / 2
+  const limit = Math.min(berth.width, berth.height) / 2 + Math.max(0, reach)
+  return Math.hypot(ox - bx, oy - by) <= limit
+}
+
 export function clampRectToArea(pos: HudPoint, size: number, area: HudRect): HudPoint {
   return {
     x: Math.min(area.x + area.width - size, Math.max(area.x, Math.round(pos.x))),

@@ -342,6 +342,11 @@ test('fileChange and command approval payloads extract absolute paths', () => {
 })
 
 test('ChatGPT export import parses memories and distills durable history', () => {
+  assert.equal(parse.isConversationExportFile('conversations.json'), true)
+  assert.equal(parse.isConversationExportFile('conversations-002.json'), true)
+  assert.equal(parse.isConversationExportFile('conversations_12.JSON'), true)
+  assert.equal(parse.isConversationExportFile('conversation_asset_file_names.json'), false)
+
   const { memories, disabled } = parse.parseMemoryJson({
     memories: [
       { content: 'Kai is building A.L.B.E.R.T. on a Mac.', enabled: true },
@@ -385,6 +390,12 @@ test('ChatGPT export import parses memories and distills durable history', () =>
 
   const leftover = parse.dedupeAgainstExisting(history, ['I prefer local Whisper over cloud speech.'])
   assert.equal(leftover.length, 0)
+
+  const split = parse.parseConversationExports([
+    [{ title: 'Part one', mapping: {} }],
+    [{ title: 'Part two', mapping: {} }]
+  ])
+  assert.equal(split.conversationsSeen, 2)
 })
 
 test('auto-remember keeps durable facts and drops tasks and secrets', () => {
