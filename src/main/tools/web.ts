@@ -205,14 +205,14 @@ export const webTools: ToolDefinition[] = [
   {
     name: 'web_search',
     description:
-      'Search the live public web across multiple sources (general web, Reddit, Wikipedia, YouTube). Use for current facts, opinions, how-tos, news, or anything that can go stale. Synthesize across sources; follow with web_fetch on the best links.',
+      'Search the live web (general, Reddit, Wikipedia, YouTube). Use before stale or current facts. Then web_fetch the best link.',
     parameters: {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Search query' },
         limit: {
           type: 'number',
-          description: 'Max results per source lane (1–6, default 4)'
+          description: 'Results per lane (1–6, default 4)'
         }
       },
       required: ['query']
@@ -301,14 +301,14 @@ export const webTools: ToolDefinition[] = [
   {
     name: 'web_fetch',
     description:
-      'Fetch a public URL and return readable text (HTML stripped). Use after web_search to deep-read Reddit threads, docs, news, or Wikipedia. Prefer https URLs.',
+      'Fetch a public https URL and return readable text. Use after web_search.',
     parameters: {
       type: 'object',
       properties: {
         url: { type: 'string', description: 'https URL to fetch' },
         max_chars: {
           type: 'number',
-          description: 'Max characters to return (default 6000, max 12000)'
+          description: 'Max chars (default 6000, max 12000)'
         }
       },
       required: ['url']

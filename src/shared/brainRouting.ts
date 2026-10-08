@@ -25,14 +25,14 @@ export function settingsForBrain(choice: BrainChoice): Partial<AlbertSettings> {
 
 export function brainDisplayName(choice: BrainChoice): string {
   if (choice === 'gemini') return 'Gemini'
-  if (choice === 'opus') return 'Opus'
+  if (choice === 'opus') return 'Claude'
   return 'ChatGPT'
 }
 
 export function brainLockHint(choice: BrainChoice): string {
   if (choice === 'chatgpt') return 'ChatGPT answers every turn'
-  if (choice === 'gemini') return 'Locked to Gemini — free fallback'
-  return 'Locked to Opus — paid Anthropic'
+  if (choice === 'gemini') return 'Gemini answers every turn'
+  return 'Claude answers every turn'
 }
 
 /** Enough configured to start a turn. ChatGPT is the default path. */
@@ -58,11 +58,11 @@ export function routeHudLabel(tier: string | undefined, model?: string, reason?:
   const name =
     tier === 'codex'
       ? 'ChatGPT'
-      : tier === 'power'
-        ? 'Opus'
+      : tier === 'power' || tier === 'fast'
+        ? 'Claude'
         : tier === 'local'
           ? 'Gemini'
-          : 'Fallback'
+          : 'Brain'
   const modelBit = model && model !== 'codex' ? ` · ${model}` : ''
   const why = reason ? ` — ${reason}` : ''
   return `${name}${modelBit}${why}`
@@ -70,4 +70,56 @@ export function routeHudLabel(tier: string | undefined, model?: string, reason?:
 
 export function isChatgptRouting(mode: RoutingMode | undefined): boolean {
   return mode !== 'local' && mode !== 'fast' && mode !== 'power'
+}
+
+/** Provider the router will actually use, not the three-brain UI lock. */
+export type ConfiguredProvider = 'chatgpt' | 'gemini' | 'groq' | 'ollama' | 'opus'
+
+export function configuredProvider(settings: {
+  routingMode?: string | null
+  localProvider?: string | null
+}): ConfiguredProvider {
+  const mode = settings.routingMode || 'codex'
+  if (mode === 'power' || mode === 'fast') return 'opus'
+  if (mode === 'local') {
+    if (settings.localProvider === 'groq') return 'groq'
+    if (settings.localProvider === 'ollama') return 'ollama'
+    return 'gemini'
+  }
+  return 'chatgpt'
+}
+
+export function configuredProviderName(provider: ConfiguredProvider): string {
+  if (provider === 'opus') return 'Claude'
+  if (provider === 'groq') return 'Groq'
+  if (provider === 'ollama') return 'Ollama'
+  if (provider === 'gemini') return 'Gemini'
+  return 'ChatGPT'
+}
+
+export function workshopLink(
+  settings: {
+    routingMode?: string | null
+    localProvider?: string | null
+    geminiApiKey?: string
+    anthropicApiKey?: string
+    groqApiKey?: string
+    ollamaApiKey?: string
+  },
+  signedIn: boolean
+): { ok: boolean; text: string; name: string } {
+  const provider = configuredProvider(settings)
+  const name = configuredProviderName(provider)
+  if (provider === 'chatgpt') {
+    return { ok: signedIn, text: signedIn ? 'Connected' : 'Offline', name }
+  }
+  const configured =
+    provider === 'opus'
+      ? Boolean(settings.anthropicApiKey?.trim())
+      : provider === 'groq'
+        ? Boolean(settings.groqApiKey?.trim())
+        : provider === 'ollama'
+          ? Boolean(settings.ollamaApiKey?.trim() || settings.localProvider === 'ollama')
+          : Boolean(settings.geminiApiKey?.trim())
+  return { ok: false, text: configured ? 'Configured' : 'Offline', name }
 }

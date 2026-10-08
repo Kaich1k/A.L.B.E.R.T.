@@ -82,7 +82,7 @@ export function HomePanel({ onTalk }: Props): React.JSX.Element {
         </div>
         <div className="jarvis-top-status">
           <span className={`jarvis-uplink ${codexStatus?.signedIn || hasBrain ? 'ok' : 'off'}`}>
-            {codexStatus?.signedIn ? 'CHATGPT_ONLINE' : hasBrain ? 'FALLBACK_READY' : 'CHATGPT_OFFLINE'}
+            {hasBrain ? 'BRAIN_READY' : 'BRAIN_OFFLINE'}
           </span>
           <span className="jarvis-clock">{clock}</span>
         </div>
@@ -118,11 +118,9 @@ export function HomePanel({ onTalk }: Props): React.JSX.Element {
         <p className="hero-expansion">{APP_EXPANSION}</p>
         <p className="jarvis-greeting">
           {greeting}{' '}
-          {codexStatus?.signedIn
-            ? 'ChatGPT is the brain and standing by.'
-            : hasBrain
-              ? 'ChatGPT is not signed in — Gemini or Opus can cover until you sign in.'
-              : 'Sign in to ChatGPT under Systems to come online.'}
+          {hasBrain
+            ? `${brainDisplayName(brainChoice(settings))} is the brain and standing by.`
+            : 'Choose a brain under Systems to come online.'}
         </p>
         {routeInfo ? <p className="jarvis-route-chip">{routeInfo}</p> : null}
       </div>

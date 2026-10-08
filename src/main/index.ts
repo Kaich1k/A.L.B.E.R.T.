@@ -11,7 +11,8 @@ import { getSettings } from './config'
 import { applyCompanionSettings, stopCompanionServer } from './companion/server'
 import { startOperationsScheduler, stopOperationsScheduler } from './operations/scheduler'
 import { connectCodex, shutdownCodex } from './codex/service'
-import { syncAmbientHudFromSettings } from './hud/miniHud'
+import { stopCurrentWork } from './agent/stopWork'
+import { nudgeHudOffMainWindow, syncAmbientHudFromSettings } from './hud/miniHud'
 import { resumeLiveHmr } from './cursor/hmrPause'
 
 // Load OPENAI_API_KEY from env if present
@@ -57,6 +58,7 @@ function createWindow(): void {
 
   mainWindow.on('ready-to-show', () => {
     mainWindow?.show()
+    setTimeout(() => nudgeHudOffMainWindow(), 500)
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -129,6 +131,9 @@ app.whenReady().then(() => {
 
   globalShortcut.register('CommandOrControl+Shift+A', () => {
     toggleWindow()
+  })
+  globalShortcut.register('CommandOrControl+Shift+.', () => {
+    stopCurrentWork()
   })
 
   // Warm settings read + optional phone companion LAN server

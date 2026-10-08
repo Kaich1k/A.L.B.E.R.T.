@@ -1,4 +1,5 @@
 import { getSettings, setSettings } from '../config'
+import { DEFAULT_CLAUDE_MODEL } from '../../shared/modelCatalog'
 import {
   DEFAULT_GEMINI_MODEL,
   DEFAULT_GROQ_MODEL,
@@ -118,8 +119,8 @@ export function selectModelTier(
   const locked = applyExplicitRoutingLock(userText)
   const settings = getSettings()
   const mode: RoutingMode = settings.routingMode || 'codex'
-  const fastModel = settings.fastModel || 'claude-haiku-4-5'
-  const powerModel = settings.powerModel || settings.model || 'claude-opus-5'
+  const fastModel = settings.fastModel || 'claude-haiku-5-5'
+  const powerModel = settings.powerModel || settings.model || DEFAULT_CLAUDE_MODEL
   const text = userText.trim()
   const codexOn = settings.codexEnabled !== false
 
@@ -136,7 +137,7 @@ export function selectModelTier(
       tier: 'power',
       model: powerModel,
       provider: 'anthropic',
-      reason: locked === 'power' ? 'Locked to Opus' : 'Routing locked to Opus'
+      reason: locked === 'power' ? 'Locked to Claude' : 'Routing locked to Claude'
     }
   }
   if (mode === 'fast') {
@@ -151,32 +152,8 @@ export function selectModelTier(
     return resolveLocalRoute(locked === 'local')
   }
 
-  // Default and "auto": ChatGPT every turn. Gemini/Opus only via lock or failure fallback.
-  if (codexOn) {
-    const escalate = POWER_HINTS.test(text) && text.length > 280
-    return chatgptRoute(
-      locked === 'codex' ? 'ChatGPT' : 'ChatGPT — default brain',
-      escalate
-    )
-  }
-
-  if (settings.geminiApiKey?.trim()) {
-    return {
-      tier: 'local',
-      model: settings.geminiModel || DEFAULT_GEMINI_MODEL,
-      provider: 'gemini',
-      reason: 'ChatGPT off → Gemini fallback'
-    }
-  }
-
-  if (settings.paidFallbackEnabled && settings.anthropicApiKey?.trim()) {
-    return {
-      tier: 'power',
-      model: powerModel,
-      provider: 'anthropic',
-      reason: 'ChatGPT off → Opus fallback'
-    }
-  }
-
-  return chatgptRoute('ChatGPT — default brain')
+  // ChatGPT is the chosen brain. A different brain runs only when Kai picks it,
+  // or when Systems names one backup and this turn fails.
+  const escalate = codexOn && POWER_HINTS.test(text) && text.length > 280
+  return chatgptRoute(locked === 'codex' ? 'ChatGPT' : 'ChatGPT', escalate)
 }

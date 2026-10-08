@@ -149,6 +149,14 @@ function migrate(database: Database.Database): void {
     database.exec(`ALTER TABLE approvals ADD COLUMN kind TEXT NOT NULL DEFAULT 'other'`)
   }
 
+  const activityCols = database.prepare(`PRAGMA table_info(activity)`).all() as Array<{ name: string }>
+  if (!activityCols.some((c) => c.name === 'app_name')) {
+    database.exec(`ALTER TABLE activity ADD COLUMN app_name TEXT`)
+  }
+  if (!activityCols.some((c) => c.name === 'approval_required')) {
+    database.exec(`ALTER TABLE activity ADD COLUMN approval_required INTEGER NOT NULL DEFAULT 0`)
+  }
+
   const captureCols = database.prepare(`PRAGMA table_info(captures)`).all() as Array<{ name: string }>
   if (!captureCols.some((c) => c.name === 'updated_at')) {
     database.exec(`ALTER TABLE captures ADD COLUMN updated_at INTEGER`)

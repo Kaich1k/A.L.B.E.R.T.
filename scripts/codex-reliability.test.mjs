@@ -7,6 +7,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 const protocol = await import('../src/main/codex/protocol.ts')
 const auth = await import('../src/main/codex/auth.ts')
 const models = await import('../src/main/codex/models.ts')
+const sharedModels = await import('../src/shared/codexModels.ts')
 const events = await import('../src/main/codex/events.ts')
 const approvals = await import('../src/main/codex/approvals.ts')
 const appServer = await import('../src/main/codex/appServer.ts')
@@ -85,19 +86,84 @@ test('model list accepts data[] and object effort entries', () => {
         ],
         isDefault: false
       },
+      {
+        id: 'gpt-6.1-sol',
+        displayName: 'GPT-6.1 Sol',
+        hidden: false,
+        supportedReasoningEfforts: [
+          { reasoningEffort: 'low' },
+          { reasoningEffort: 'medium' },
+          { reasoningEffort: 'high' },
+          { reasoningEffort: 'xhigh' },
+          { reasoningEffort: 'max' }
+        ],
+        isDefault: false
+      },
       { id: 'gpt-6-astra', hidden: false, isDefault: true, supportedReasoningEfforts: ['medium'] },
       { id: 'secret-preview', hidden: true }
     ]
   })
   assert.deepEqual(
     listed.map((m) => m.id),
-    ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-astra']
+    ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6.1-sol', 'gpt-6-astra']
   )
   assert.deepEqual(listed[0].efforts, ['low', 'medium', 'high'])
-  assert.equal(models.pickModel(listed, models.CODEX_MODEL_PREFERENCE, ''), 'gpt-5.6-terra')
+  assert.equal(models.CHATGPT_SOL_61_MODEL, 'gpt-6.1-sol')
+  assert.equal(models.codexModelListed(listed, 'gpt-6.1-sol'), true)
+  assert.equal(
+    models.codexModelListed(
+      listed.filter((m) => m.id !== 'gpt-6.1-sol'),
+      'gpt-6.1-sol'
+    ),
+    false
+  )
+  assert.equal(models.pickModel(listed, models.CODEX_MODEL_PREFERENCE, ''), 'gpt-6-astra')
+  assert.equal(models.resolveEverydayCodexModel(listed, 'gpt-6-astra', 'gpt-5.6-sol').id, 'gpt-6-astra')
+  assert.equal(models.resolveEverydayCodexModel(listed, 'gpt-6.1-sol', 'gpt-6-astra').id, 'gpt-6.1-sol')
+  assert.equal(models.resolveEverydayCodexModel(listed, 'gpt-5.6-terra', 'gpt-6-astra').id, 'gpt-5.6-terra')
+  assert.equal(models.resolveEverydayCodexModel(listed, 'gpt-5.6-sol', 'gpt-6-astra').id, 'gpt-5.6-sol')
+  const withoutAstra = listed.filter((model) => model.id !== 'gpt-6-astra')
+  assert.equal(models.resolveEverydayCodexModel(withoutAstra, 'gpt-6-astra', 'gpt-5.6-sol').id, 'gpt-5.6-sol')
+  assert.equal(models.resolveEverydayCodexModel(withoutAstra, 'gpt-6-astra', '').id, 'gpt-6.1-sol')
+  assert.match(
+    models.resolveEverydayCodexModel(
+      withoutAstra.filter((model) => model.id !== 'gpt-6.1-sol'),
+      'gpt-6-astra',
+      'gpt-5.6-sol'
+    ).notice || '',
+    /not available/
+  )
+  assert.equal(
+    models.resolveEverydayCodexModel(listed.filter((m) => m.id !== 'gpt-6.1-sol'), 'gpt-6.1-sol', 'gpt-6-astra')
+      .id,
+    'gpt-6-astra'
+  )
+  assert.match(
+    models.resolveEverydayCodexModel(listed.filter((m) => m.id !== 'gpt-6.1-sol'), 'gpt-6.1-sol', 'gpt-6-astra')
+      .notice || '',
+    /gpt-6\.1-sol is not available/
+  )
   assert.equal(models.pickModel(listed, models.CODEX_ESCALATION_PREFERENCE, ''), 'gpt-6-astra')
   assert.equal(models.normalizeEffort(listed, 'gpt-5.6-terra', 'ludicrous'), 'medium')
   assert.equal(models.normalizeEffort(listed, 'gpt-5.6-terra', 'high'), 'high')
+  assert.equal(models.normalizeEffort(listed, 'gpt-6.1-sol', 'none'), 'low')
+  assert.equal(models.normalizeEffort(listed, 'gpt-6.1-sol', 'minimal'), 'low')
+  assert.equal(models.normalizeEffort(listed, 'gpt-6.1-sol', 'xhigh'), 'xhigh')
+  assert.equal(models.normalizeEffort(listed, 'gpt-6.1-sol', 'max'), 'max')
+  assert.deepEqual(models.supportedEfforts([], 'gpt-6.1-sol'), [
+    'low',
+    'medium',
+    'high',
+    'xhigh',
+    'max'
+  ])
+})
+
+test('GPT-6.1 Sol reports an outdated Codex client accurately', () => {
+  assert.equal(sharedModels.codexVersionAtLeast('0.153.4', '0.159.1'), false)
+  assert.equal(sharedModels.codexVersionAtLeast('0.159.3', '0.159.1'), true)
+  assert.match(sharedModels.sol61UnavailableReason('0.153.4'), /too old/)
+  assert.match(sharedModels.sol61UnavailableReason('0.159.3'), /Not reported/)
 })
 
 test('classifies Codex faults from protocol error info', () => {

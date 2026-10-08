@@ -74,6 +74,15 @@ test('strips markdown, citations, and links into speakable prose', () => {
   assert.match(out, /a link/)
 })
 
+test('translates arrows and UI descriptors instead of reading them literally', () => {
+  assert.match(spoken('Go Home → Settings → Audio.'), /Home to Settings to Audio/)
+  assert.doesNotMatch(spoken('Go Home → Settings → Audio.'), /arrow/i)
+  assert.doesNotMatch(spoken('Press the ↓ control next.'), /\b(down|arrow)\b/i)
+  assert.doesNotMatch(spoken('Use the down arrow then continue.'), /\b(down|arrow)\b/i)
+  assert.doesNotMatch(spoken('Click ▶ to play.'), /▶|black|triangle|arrow/i)
+  assert.match(spoken('A ← B.'), /A from B/)
+})
+
 test('does not read code fences or punctuation noise', () => {
   const out = spoken('Intro.\n```\nconst x = 1;\n```\nDone.')
   assert.doesNotMatch(out, /const x/)

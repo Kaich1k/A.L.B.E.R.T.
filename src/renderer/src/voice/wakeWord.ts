@@ -8,6 +8,27 @@ const TRAILING_WAKE_FILLER = /^(please|now|thanks|thank|you|already|man|dude|sir
 
 const WAKE_WHISPER_PROMPT = 'Albert wake up. Wake up Albert. Hey Albert.'
 
+export function shouldFinishWakeSegment(input: {
+  elapsedMs: number
+  spokeMs: number
+  silenceMs: number
+  minSpeechMs?: number
+  silenceToEndMs?: number
+  softMaxMs?: number
+  hardMaxMs?: number
+}): boolean {
+  const minSpeechMs = input.minSpeechMs ?? 220
+  const silenceToEndMs = input.silenceToEndMs ?? 700
+  const softMaxMs = input.softMaxMs ?? 3_200
+  const hardMaxMs = input.hardMaxMs ?? 12_000
+  const speechThenSilence =
+    input.spokeMs >= minSpeechMs && input.silenceMs >= silenceToEndMs
+  const safeRollover =
+    input.elapsedMs >= softMaxMs &&
+    (input.spokeMs < minSpeechMs || input.silenceMs >= 150)
+  return speechThenSilence || safeRollover || input.elapsedMs >= hardMaxMs
+}
+
 /** Normalize STT quirks before matching wake phrases. */
 export function normalizeWakeText(text: string): string {
   return repairAlbertMentions(text, { aggressive: true })
@@ -83,6 +104,15 @@ export function isWakePhrase(text: string): boolean {
   return false
 }
 
+export function isMicrophoneTrackHealthy(track: {
+  readyState?: string
+  enabled?: boolean
+  muted?: boolean
+} | null | undefined): boolean {
+  if (!track) return false
+  return track.readyState === 'live' && track.enabled !== false && track.muted !== true
+}
+
 export function isWakeWordSupported(): boolean {
   return Boolean(navigator.mediaDevices?.getUserMedia)
 }
@@ -139,11 +169,13 @@ export class WakeWordListener {
 
   private readonly cooldownMs = 1200
   /** Slightly lower so quiet “Albert, wake up” still counts as speech */
-  private readonly speechRms = 0.014
+  private readonly speechRms = 0.008
+  private noiseFloor = 0.006
   private readonly minSpeechMs = 220
   private readonly silenceToEndMs = 700
   /** Hard cut even if VAD never marks speech */
   private readonly maxSegmentMs = 3200
+  private readonly hardMaxSegmentMs = 12_000
   private readonly minSegmentMs = 700
   /** Long-running apps: mic tracks die after sleep; timers stall in background */
   private readonly healthEveryMs = 20_000
@@ -243,7 +275,8 @@ export class WakeWordListener {
   }
 
   private micLive(): boolean {
-    return Boolean(this.stream?.getTracks().some((t) => t.readyState === 'live'))
+    const tracks = this.stream?.getAudioTracks() ?? []
+    return tracks.some((track) => isMicrophoneTrackHealthy(track))
   }
 
   private attachTrackGuards(stream: MediaStream): void {
@@ -274,7 +307,7 @@ export class WakeWordListener {
     const micOk = this.micLive()
     const pollOk = this.pollTimer > 0 && now - this.lastPollAt < this.pollStaleMs
     const segmentOk =
-      (this.recording && now - this.segmentStartedAt < this.maxSegmentMs * 3) ||
+      (this.recording && now - this.segmentStartedAt < this.hardMaxSegmentMs + 2_000) ||
       (!this.recording &&
         (this.lastSegmentStopAt === 0 || now - this.lastSegmentStopAt < this.segmentStaleMs))
     const ctxOk = !this.audioContext || this.audioContext.state !== 'closed'
@@ -517,7 +550,10 @@ export class WakeWordListener {
       sum += v * v
     }
     const rms = Math.sqrt(sum / this.levelBuffer.length)
-    const speaking = rms > this.speechRms
+    if (rms < this.speechRms) {
+      this.noiseFloor = this.noiseFloor * 0.92 + rms * 0.08
+    }
+    const speaking = rms > Math.max(this.speechRms, this.noiseFloor * 2.4)
     const tickMs = 50
     const elapsed = Date.now() - this.segmentStartedAt
 
@@ -529,12 +565,19 @@ export class WakeWordListener {
         this.silenceMs += tickMs
       }
 
-      const speechThenSilence =
-        this.spokeMs >= this.minSpeechMs && this.silenceMs >= this.silenceToEndMs
-      // Wall-clock cut — never depend on spokeMs growing (VAD can be stuck)
-      const timedOut = elapsed >= this.maxSegmentMs && elapsed >= this.minSegmentMs
+      const shouldFinish =
+        elapsed >= this.minSegmentMs &&
+        shouldFinishWakeSegment({
+          elapsedMs: elapsed,
+          spokeMs: this.spokeMs,
+          silenceMs: this.silenceMs,
+          minSpeechMs: this.minSpeechMs,
+          silenceToEndMs: this.silenceToEndMs,
+          softMaxMs: this.maxSegmentMs,
+          hardMaxMs: this.hardMaxSegmentMs
+        })
 
-      if (speechThenSilence || timedOut) {
+      if (shouldFinish) {
         this.finishSegment()
       }
     } else if (this.wanted && !this.paused) {
@@ -573,9 +616,9 @@ export class WakeWordListener {
     this.busySince = Date.now()
     try {
       const audio = await decodeBlobToMono16k(blob)
-      const trimmed = trimSilence(audio, 16_000, 0.006)
+      const trimmed = trimSilence(audio, 16_000, 0.0035, 420)
       // Reject near-silent room noise before Whisper invents "you"/"the"
-      if (peakAbs(trimmed) < 0.009) return
+      if (peakAbs(trimmed) < 0.0042) return
       if (trimmed.length < 2000) return
 
       let capped =

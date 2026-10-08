@@ -20,7 +20,9 @@ export function ActivityPanel(): React.JSX.Element {
   return (
     <section className="panel">
       <h2 className="section-title">Activity</h2>
-      <p className="section-sub">Tool calls {APP_NAME} made on your behalf.</p>
+      <p className="section-sub">
+        Tool calls {APP_NAME} made on your behalf. Stop an automation with ⌘⇧.
+      </p>
       <JarvisTelemetry compact refreshIntervalMs={0} className="activity-telemetry" />
       <div className="toolbar">
         <button className="btn ghost" onClick={() => void refresh()}>
@@ -43,6 +45,8 @@ export function ActivityPanel(): React.JSX.Element {
                 <strong>{a.toolName}</strong>
                 <span className="meta">
                   <span className="meta-status">{a.ok ? 'ok' : 'failed'}</span>
+                  {a.appName ? ` · ${a.appName}` : ''}
+                  {a.approvalRequired ? ' · approval required' : ''}
                   {' · '}
                   {new Date(a.createdAt).toLocaleString()}
                 </span>

@@ -1,0 +1,19 @@
+{
+  "date": "2026-09-27T17:25:39.641612",
+  "source_files": [
+    "src/shared/voiceGate.ts",
+    "src/shared/voiceCommands.ts",
+    "src/main/voice/kokoro.ts",
+    "src/renderer/src/voice/audio.ts",
+    "src/renderer/src/voice/tts.ts",
+    "src/renderer/src/voice/claudeVoiceSession.ts",
+    "package.json"
+  ],
+  "new_files": [
+    "src/shared/ttsAudio.ts",
+    "scripts/tts-quality.test.mjs",
+    "scripts/stt-quality.test.mjs"
+  ],
+  "app_asar_sha256": "f9eea9446e6253aca832101bdab094f9eed97d6625e7aea6300726e022f96b36",
+  "purpose": "Preserve UI refinement and pre-voice-fix sources; targeted rollback only, preserve unrelated changes."
+}

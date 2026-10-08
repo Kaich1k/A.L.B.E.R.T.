@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Sidebar } from './components/Sidebar'
+import { WorkshopBar, WorkshopHome } from './components/WorkshopHome'
 import { HomePanel } from './components/HomePanel'
 import { ConversationPanel } from './components/ConversationPanel'
 import { MissionsPanel } from './components/MissionsPanel'
 import { MemoryPanel } from './components/MemoryPanel'
 import { ActivityPanel } from './components/ActivityPanel'
 import { CommandPalette } from './components/CommandPalette'
-import { StartupSequence } from './components/StartupSequence'
+import { StartupSequence, useStartupSequence } from './components/StartupSequence'
 import { SystemStatusRail } from './components/SystemStatusRail'
 import { SettingsPanel } from './components/SettingsPanel'
 import { MissionDock } from './components/MissionDock'
 import { PanelErrorBoundary } from './components/PanelErrorBoundary'
 import { ClaudeVoiceSession } from './voice/claudeVoiceSession'
 import { isWakeWordSupported, WakeWordListener } from './voice/wakeWord'
+import { ALBERT_BUILD_MARKER } from '../../shared/buildMarker'
 import { useAlbertStore } from './store'
 
 type ActiveVoice = ClaudeVoiceSession
@@ -47,6 +49,21 @@ export default function App(): React.JSX.Element {
   const [systemEvent, setSystemEvent] = useState<{ text: string; tone: 'normal' | 'ok' | 'warn' } | null>(null)
   const [settingsReady, setSettingsReady] = useState(false)
   const systemEventTimer = useRef(0)
+  const startup = useStartupSequence({
+    enabled: settingsReady && settings.startupAnimationEnabled !== false && settings.interfaceStyle !== 'classic',
+    performanceMode: settings.performanceMode !== false,
+    onStart: () => {
+      setPanel('home')
+      void window.albert.returnHudToDock().catch((err) => {
+        setError(err instanceof Error ? err.message : 'Couldn’t return Albert to the Hub.')
+      })
+    }
+  })
+
+  useEffect(() => {
+    // Navigation and real work take priority over the visual introduction.
+    if (startup.active && (panel !== 'home' || busy || voiceState !== 'idle')) startup.finish()
+  }, [busy, panel, startup.active, startup.finish, voiceState])
 
   function flashSystemEvent(text: string, tone: 'normal' | 'ok' | 'warn' = 'normal'): void {
     window.clearTimeout(systemEventTimer.current)
@@ -57,7 +74,8 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     document.body.classList.toggle('perf-mode', settings.performanceMode !== false)
     document.body.dataset.hudDensity = settings.hudDensity || 'cinematic'
-  }, [settings.performanceMode, settings.hudDensity])
+    document.body.dataset.interface = settings.interfaceStyle || 'workshop'
+  }, [settings.performanceMode, settings.hudDensity, settings.interfaceStyle])
 
   useEffect(() => {
     void window.albert.reportHudRuntime({ voiceState, busy })
@@ -72,6 +90,7 @@ export default function App(): React.JSX.Element {
         if (idle && useAlbertStore.getState().settings.wakeWordEnabled !== false) {
           wakeRef.current?.kick()
         }
+        window.dispatchEvent(new Event('albert-permissions-refresh'))
       }
     }
     onVis()
@@ -238,7 +257,24 @@ export default function App(): React.JSX.Element {
       }
     })()
 
+    void ALBERT_BUILD_MARKER
+    const chatGeneration = { current: 0 }
     const off = window.albert.onChatEvent((event) => {
+      const streamed =
+        event.type === 'token' ||
+        event.type === 'message' ||
+        event.type === 'done' ||
+        event.type === 'error' ||
+        event.type === 'codex_progress' ||
+        event.type === 'codex_plan' ||
+        event.type === 'codex_diff'
+      if (streamed && typeof event.generation === 'number') {
+        if (event.generation < chatGeneration.current) return
+        if (event.generation > chatGeneration.current) {
+          chatGeneration.current = event.generation
+          setStreamingText('')
+        }
+      }
       if (event.type === 'settings' && event.settings) {
         setSettings(event.settings)
       } else if (event.type === 'route') {
@@ -305,6 +341,8 @@ export default function App(): React.JSX.Element {
         setBusy(false)
         setStreamingText('')
         clearCodexTurn()
+      } else if (event.type === 'open_panel' && event.panel) {
+        setPanel(event.panel)
       } else if (event.type === 'error') {
         setError(event.error || 'Unknown error')
         setBusy(false)
@@ -397,19 +435,9 @@ export default function App(): React.JSX.Element {
   }, [])
 
   return (
-    <div className={`app-shell system-${voiceState} ${busy ? 'system-busy' : ''} ${settingsReady ? 'app-ready' : 'app-hydrating'}`}>
-      {settingsReady && settings.startupAnimationEnabled !== false ? (
-        <StartupSequence
-          performanceMode={settings.performanceMode !== false}
-          operatorName="sir"
-          brainConfigured={Boolean(
-            settings.anthropicApiKey?.trim() ||
-            settings.ollamaApiKey?.trim() ||
-            settings.groqApiKey?.trim() ||
-            settings.geminiApiKey?.trim() ||
-            settings.localProvider === 'ollama'
-          )}
-        />
+    <div className={`app-shell ${settings.interfaceStyle === 'classic' ? '' : 'interface-workshop'} system-${voiceState} ${busy ? 'system-busy' : ''} ${settingsReady ? 'app-ready' : 'app-hydrating'} ${startup.active ? 'startup-active' : ''}`}>
+      {settingsReady && settings.interfaceStyle === 'classic' && settings.startupAnimationEnabled !== false ? (
+        <StartupSequence performanceMode={settings.performanceMode !== false} />
       ) : null}
       <div className="hud-atmosphere" aria-hidden="true">
         <div className="hud-grid-plane" />
@@ -430,9 +458,16 @@ export default function App(): React.JSX.Element {
         </PanelErrorBoundary>
       ) : null}
       <main className="main">
+        {settings.interfaceStyle === 'classic' ? null : (
+          <WorkshopBar panel={panel} onHome={() => setPanel('home')} />
+        )}
         {panel === 'home' ? (
           <PanelErrorBoundary name="Home">
-            <HomePanel onTalk={() => void toggleVoice()} />
+            {settings.interfaceStyle === 'classic' ? (
+              <HomePanel onTalk={() => void toggleVoice()} />
+            ) : (
+              <WorkshopHome onTalk={() => void toggleVoice()} startup={startup} />
+            )}
           </PanelErrorBoundary>
         ) : null}
         {panel === 'conversation' ? (

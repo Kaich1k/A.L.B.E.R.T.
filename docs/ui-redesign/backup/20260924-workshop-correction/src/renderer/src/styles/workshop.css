@@ -1,0 +1,489 @@
+.interface-workshop {
+  --line: rgba(70, 170, 230, 0.42);
+  --ink: #eef8ff;
+  --ink-muted: #9fc0d6;
+  --ink-faint: #6e93ab;
+  --accent: #5ec8ff;
+  --accent-strong: #d4f1ff;
+  --accent-glow: rgba(40, 140, 230, 0.35);
+  background:
+    radial-gradient(circle at 50% 40%, rgba(20, 90, 200, 0.28), transparent 20%),
+    radial-gradient(circle at 50% 70%, rgba(6, 24, 70, 0.45), transparent 46%),
+    #02060c;
+}
+.interface-workshop .hud-grid-plane {
+  opacity: 0.32;
+  inset: 50% -8% -10%;
+  background-size: 72px 46px;
+  background-image:
+    linear-gradient(rgba(90, 170, 230, 0.22) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(90, 170, 230, 0.22) 1px, transparent 1px);
+  transform: perspective(520px) rotateX(62deg) scale(1.28);
+}
+.interface-workshop .hud-vignette {
+  background: radial-gradient(circle at 50% 40%, transparent 16%, rgba(0, 0, 0, 0.58) 80%);
+}
+.interface-workshop .sidebar,
+.interface-workshop .mission-dock,
+.interface-workshop .system-status-rail,
+.interface-workshop .orb-dock {
+  display: none;
+}
+.interface-workshop.app-shell { grid-template-columns: 1fr; }
+.interface-workshop .main { padding-top: 0; }
+.interface-workshop .hud-corner,
+.interface-workshop .hud-scan-beam { opacity: 0.28; }
+.interface-workshop .hud-corner.top-left,
+.interface-workshop .hud-corner.bottom-left { left: 12px; }
+.interface-workshop .panel {
+  padding: 10px 18px 22px;
+  background: transparent;
+}
+.interface-workshop .panel-comm { display: flex; flex-direction: column; min-height: 0; }
+.interface-workshop .comm-stage { grid-template-columns: 1fr; }
+.interface-workshop .section-title,
+.interface-workshop .settings-section-title {
+  color: #e7f6ff;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.interface-workshop .btn,
+.interface-workshop input,
+.interface-workshop select,
+.interface-workshop textarea {
+  border-color: rgba(110, 196, 255, 0.45);
+  background: rgba(4, 16, 32, 0.82);
+  color: #e7f6ff;
+}
+
+.workshop-bar {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  margin: 46px 18px 0;
+}
+.workshop-brand,
+.workshop-search,
+.workshop-hub-back,
+.workshop-link-state {
+  height: 34px;
+  border: 1px solid rgba(70, 160, 220, 0.38);
+  background: rgba(4, 14, 28, 0.88);
+  color: #e7f6ff;
+  box-shadow: inset 0 0 12px rgba(40, 120, 200, 0.08);
+  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+}
+.workshop-brand {
+  padding: 0 16px;
+  letter-spacing: 0.2em;
+  font: 0.78rem var(--font-display);
+}
+.workshop-brand span { margin-left: 8px; color: #8ecbff; letter-spacing: 0.22em; }
+.workshop-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  color: #8ea4b8;
+  text-align: left;
+}
+.workshop-search i {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  position: relative;
+}
+.workshop-search i::after {
+  content: '';
+  position: absolute;
+  width: 6px;
+  height: 1.5px;
+  background: currentColor;
+  right: -5px;
+  bottom: -2px;
+  transform: rotate(40deg);
+}
+.workshop-link-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  color: #ffb4ae;
+  font: 0.68rem var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.workshop-link-state.ok { color: #b8ffd2; }
+.workshop-link-state::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+}
+.workshop-hub-back { padding: 0 12px; }
+
+.workshop-home {
+  height: calc(100vh - 118px);
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(240px, 290px) minmax(460px, 1fr) minmax(250px, 310px);
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 10px 14px;
+  padding: 10px 18px 8px;
+  overflow: hidden;
+}
+.workshop-column,
+.workshop-hub { min-width: 0; min-height: 0; }
+.workshop-column { display: grid; grid-template-rows: minmax(0, 1fr) minmax(168px, 0.78fr); gap: 10px; }
+.workshop-panel {
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid rgba(62, 150, 210, 0.55);
+  background: linear-gradient(180deg, rgba(6, 22, 42, 0.72), rgba(2, 8, 18, 0.94));
+  box-shadow: inset 0 0 24px rgba(30, 110, 190, 0.08);
+  clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
+}
+.workshop-panel h2 {
+  margin: 0;
+  color: #e5f4ff;
+  font: 0.74rem var(--font-display);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.workshop-panel header span,
+.workshop-empty { color: #7f97ab; font: 0.68rem var(--font-mono); }
+.workshop-thread { overflow: auto; display: grid; gap: 8px; align-content: start; }
+.bubble {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(110, 196, 255, 0.38);
+  background: rgba(6, 18, 36, 0.78);
+  color: #d8eefc;
+  line-height: 1.35;
+}
+.bubble strong {
+  display: block;
+  margin-bottom: 3px;
+  color: #8ecbff;
+  font: 0.62rem var(--font-mono);
+  letter-spacing: 0.08em;
+}
+.workshop-link,
+.workshop-actions button,
+.workshop-composer button,
+.activity-chips button,
+.workshop-detach,
+.voice-row button {
+  border: 1px solid rgba(110, 196, 255, 0.5);
+  background: rgba(6, 20, 40, 0.88);
+  color: #e7f6ff;
+}
+.workshop-link { justify-self: start; padding: 7px 12px; }
+.workshop-actions { display: flex; gap: 8px; }
+.workshop-actions button { flex: 1; padding: 8px 10px; }
+.workshop-actions .danger {
+  border-color: #ff4d67;
+  background: linear-gradient(180deg, #8a2434, #4a1020);
+}
+.icon-pause,
+.icon-stop { display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px; }
+.icon-pause { box-shadow: 3px 0 0 #d7ecff, -3px 0 0 #d7ecff; background: transparent; }
+.icon-stop { background: #ffd0d6; }
+
+.workshop-hub { display: grid; justify-items: center; align-content: start; gap: 6px; }
+.workshop-ring {
+  position: relative;
+  width: min(100%, 58vh, 560px);
+  aspect-ratio: 1;
+  height: auto;
+}
+.filament-orb { width: 100%; height: 100%; }
+.filament-orb canvas { width: 100%; height: 100%; display: block; }
+.ring-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.ring-guide { fill: none; stroke: rgba(80, 170, 255, 0.16); }
+.ring-segment {
+  fill: rgba(6, 24, 52, 0.72);
+  stroke: rgba(110, 196, 240, 0.78);
+  stroke-width: 1.35;
+}
+.mission-segment { fill: rgba(8, 28, 70, 0.82); stroke: rgba(150, 220, 255, 0.7); }
+.mission-segment.active,
+.mission-segment.complete { fill: rgba(28, 110, 210, 0.92); stroke: #f2fbff; }
+.workshop-detach {
+  padding: 4px 14px;
+  border-radius: 999px;
+  color: #c8ecff;
+  font: 0.62rem var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.workshop-orb-dock {
+  position: absolute;
+  left: 50%;
+  top: 47%;
+  width: 60%;
+  height: 60%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.workshop-orb-dock::before {
+  content: '';
+  position: absolute;
+  inset: -18%;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(190, 236, 255, 0.58) 0%,
+    rgba(40, 140, 255, 0.32) 26%,
+    rgba(10, 40, 120, 0.06) 58%,
+    transparent 74%
+  );
+  filter: blur(10px);
+  pointer-events: none;
+}
+.workshop-orb-dock.is-empty::before { opacity: 0.28; }
+.workshop-orb-dock.is-empty {
+  border: 1px dashed rgba(120, 200, 255, 0.35);
+  box-shadow: inset 0 0 40px rgba(40, 140, 255, 0.12);
+  pointer-events: auto;
+}
+.workshop-orb-dock .filament-orb {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  transform: none;
+  filter: none;
+}
+.orb-dock-snap {
+  position: absolute;
+  z-index: 2;
+  bottom: 8%;
+  border: 0;
+  background: transparent;
+  color: #b7e4ff;
+  font: 0.62rem var(--font-mono);
+  pointer-events: auto;
+}
+.ring-svg text { fill: #e7f6ff; font: 12px var(--font-display); letter-spacing: 0.04em; pointer-events: none; }
+.ring-svg text tspan:last-child { fill: #9ec4de; font: 8px var(--font-mono); }
+.ring-glyph { color: #c8ecff; pointer-events: none; }
+.mission-arc-label { fill: #d7ecff; font: 10px var(--font-mono); }
+.ring-hit { cursor: pointer; }
+.ring-hit:focus { outline: none; }
+.ring-hit:focus .ring-segment,
+.ring-hit:hover .ring-segment {
+  fill: rgba(24, 88, 168, 0.9);
+  stroke: #e7f6ff;
+}
+.compare-card,
+.voice-row,
+.activity-chips button {
+  border: 1px solid rgba(70, 160, 220, 0.42);
+  background: rgba(4, 12, 24, 0.9);
+}
+.compare-card {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: 10%;
+  width: min(280px, 58%);
+  transform: translateX(-50%);
+  display: grid;
+  padding: 8px 12px;
+  clip-path: polygon(14px 0, 100% 0, 100% 100%, 0 100%, 0 14px);
+}
+.compare-card strong {
+  color: #fff;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font: 0.78rem var(--font-display);
+}
+.compare-card span { color: #8ecbff; font: 0.68rem var(--font-mono); }
+.voice-row {
+  width: min(460px, 100%);
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  color: #9eb6c8;
+  font: 0.68rem var(--font-mono);
+}
+.voice-row i {
+  height: 2px;
+  background: repeating-linear-gradient(90deg, rgba(142, 203, 255, 0.22) 0 8px, transparent 8px 14px);
+}
+.voice-row i.live {
+  height: 8px;
+  background: repeating-linear-gradient(90deg, #9ad8ff 0 3px, transparent 3px 7px);
+}
+.voice-row button { width: 36px; height: 36px; border-radius: 50%; }
+.activity-chips { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: min(460px, 100%); }
+.activity-chips button { display: grid; text-align: left; padding: 8px 10px; }
+.activity-chips small { color: #7f97ab; }
+
+.workshop-steps { list-style: none; margin: 0; padding: 0; overflow: auto; display: grid; gap: 6px; }
+.workshop-steps button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: #d5e8f6;
+}
+.workshop-steps em { width: 10px; height: 10px; border-radius: 50%; border: 2px solid #7ec8ff; }
+.workshop-steps .complete em { background: #3dcf7a; border-color: #3dcf7a; }
+.workshop-steps .active em { background: #7ec8ff; }
+.workshop-steps small { color: #7f97ab; font: 0.62rem var(--font-mono); }
+.source-card { border: 1px solid rgba(110, 196, 255, 0.28); padding: 8px; min-height: 0; overflow: auto; }
+.source-card strong { display: block; margin-bottom: 4px; }
+.source-card p,
+.workshop-panel p { margin: 0; color: #c5d7e6; }
+.memory-sketch { width: 100%; height: 150px; }
+.memory-sketch line { stroke: rgba(126, 200, 255, 0.45); }
+.memory-sketch text { fill: #d7ecff; font: 9px var(--font-mono); }
+
+.workshop-composer {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid rgba(110, 196, 255, 0.58);
+  background: rgba(4, 12, 24, 0.94);
+  box-shadow: 0 0 20px rgba(40, 140, 255, 0.2);
+  clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
+}
+.workshop-composer input {
+  border: 0;
+  background: transparent;
+  color: #e7f6ff;
+  padding: 8px 10px;
+}
+.workshop-composer .send { background: #1d6dff; border-color: #9ad8ff; }
+
+html.hud-window .hud-root,
+body.hud-window .hud-root,
+html.hud-window .workshop-float,
+html.hud-window .filament-orb,
+html.hud-window canvas {
+  width: 100%;
+  height: 100%;
+  background: transparent !important;
+  box-shadow: none !important;
+  filter: none !important;
+}
+.workshop-float {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  gap: 0;
+  padding: 0;
+  background: transparent;
+}
+.workshop-float .filament-orb {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  filter: none;
+}
+.workshop-float.is-expanded {
+  align-content: start;
+  padding: 10px 10px 12px;
+  gap: 6px;
+}
+.workshop-float.is-expanded .filament-orb {
+  width: 188px;
+  height: 188px;
+}
+.speech-orb__status {
+  margin: 0;
+  color: #d7f3ff;
+  font: 0.7rem var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.float-sats {
+  position: absolute;
+  inset: 8px 18px 42%;
+  pointer-events: none;
+}
+.float-sats button {
+  position: absolute;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  pointer-events: auto;
+  border: 1px solid rgba(120, 210, 255, 0.7);
+  background: radial-gradient(circle at 40% 32%, rgba(24, 70, 130, 0.95), rgba(4, 14, 30, 0.95));
+  color: #e7f6ff;
+  font: 0.52rem var(--font-mono);
+  letter-spacing: 0.04em;
+  box-shadow: 0 0 16px rgba(40, 150, 255, 0.35);
+}
+.float-sats .sat-talk { left: 0; top: 8%; }
+.float-sats .sat-open { right: 0; top: 8%; }
+.float-sats .sat-memory { left: 0; bottom: 8%; }
+.float-sats .sat-pin { right: 0; bottom: 8%; }
+.speech-orb__panel {
+  width: min(100%, 360px);
+  display: grid;
+  gap: 8px;
+}
+.float-task {
+  padding: 10px 12px;
+  border: 1px solid rgba(110, 196, 255, 0.5);
+  background: rgba(4, 14, 30, 0.92);
+  color: #d7ecff;
+  clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
+}
+.float-task strong { display: block; font: 0.72rem var(--font-display); letter-spacing: 0.08em; text-transform: uppercase; }
+.float-task span { color: #8ecbff; font: 0.62rem var(--font-mono); }
+.speech-orb__panel button,
+.speech-orb__expand,
+.float-composer button {
+  border: 1px solid rgba(90, 180, 255, 0.45);
+  background: rgba(4, 16, 32, 0.9);
+  color: #e7f4ff;
+  padding: 6px 8px;
+}
+.float-actions { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+.float-actions .danger { border-color: #ff4d67; color: #ffd0d6; }
+.float-composer { display: grid; grid-template-columns: 1fr auto; gap: 6px; }
+.float-composer input {
+  border: 1px solid rgba(90, 180, 255, 0.35);
+  background: rgba(4, 12, 22, 0.9);
+  color: #e7f6ff;
+  padding: 7px 8px;
+}
+
+body[data-interface='workshop'] .startup-sequence {
+  --startup-cyan: #8ad6ff;
+  --startup-blue: #3d9dff;
+  background:
+    radial-gradient(circle at 50% 46%, rgba(40, 140, 255, 0.28), transparent 30%),
+    linear-gradient(135deg, #010308 0%, #061428 48%, #010205 100%);
+}
+
+@media (max-width: 1100px) {
+  .workshop-home { height: auto; overflow: auto; grid-template-columns: 1fr; }
+  .workshop-composer { grid-column: auto; }
+}

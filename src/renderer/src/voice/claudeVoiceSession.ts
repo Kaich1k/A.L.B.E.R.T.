@@ -1,26 +1,30 @@
 import type { AgentStreamEvent, VoiceState } from '../../../shared/types'
-import {
-  applyPersonalityAdjust,
-  normalizePersonality,
-  parsePersonalityVoiceCommand,
-  personalityAdjustReply
-} from '../../../shared/personality'
 import { drainSpeakableUnits, takeSpeakableUnits } from '../../../shared/speechText'
 import { useAlbertStore } from '../store'
-import { decodeBlobToMono16k, trimSilence } from './audio'
+import { decodeBlobToMono16k, speechWindow, trimSilence } from './audio'
 import { LiveKeywordMonitor } from './liveKeywords'
 import {
   commandConfident,
   contentWordCount,
   createNoiseFloor,
-  endOfUtteranceSilenceMs,
+  hasConfidentShortReplyAudio,
+  isSustainedSpeech,
+  isStillInPhrase,
+  nextSpeechHoldMs,
+  POST_TTS_ECHO_GUARD_MS,
+  shouldEndpointUtterance,
+  shouldResetShortUtterance,
   shouldTranscribe,
   speechThresholds,
+  SPEECH_HOLD_MS,
+  SHORT_REPLY_MIN_SPEECH_MS,
+  transcriptTrimThreshold,
   updateNoiseFloor
 } from '../../../shared/voiceGate'
 import { speakText, stopSpeaking, StreamingTtsQueue } from './tts'
 import {
   correctTranscript,
+  isBareStandbyReply,
   isEndVoiceCommand,
   isHideCommand,
   isLikelyHallucination,
@@ -36,7 +40,10 @@ type StatusListener = (msg: string) => void
 
 /**
  * Local voice path:
- * mic (renderer) → Whisper worker (child process) → Claude/Groq/Ollama → TTS
+ * microphone (echo cancellation on) → adaptive VAD → Whisper → ChatGPT stream →
+ * first speakable clause → Kokoro, with later clauses prefetched while one plays.
+ * speechSynthesis is the macOS fallback. AVSpeechSynthesizer is not available here.
+ * A new utterance bumps speakEpoch so cancelled synthesis cannot resume.
  */
 export class ClaudeVoiceSession {
   private onState: VoiceListener
@@ -55,6 +62,14 @@ export class ClaudeVoiceSession {
   private spokeMs = 0
   /** Wall-clock: last time mic was clearly above speech threshold */
   private lastSpeechAt = 0
+  private firstSpeechAt = 0
+  private lastVoicedAt = 0
+  private lastLevelAt = 0
+  private captureWasHotMic = false
+  private captureMinSpeechMs = 320
+  private speechHoldMs = 0
+  private captureStartedAt = 0
+  private echoGuardUntil = 0
   private recording = false
   private speaking = false
   private bargeIn = false
@@ -70,6 +85,8 @@ export class ClaudeVoiceSession {
   private bargeHoldMs = 0
   private voiceTurnNote: string | null = null
   private lifecycleGen = 0
+  /** Bumped when a new utterance should supersede speech and the in-flight reply. */
+  private speakEpoch = 0
   private standbyInFlight = false
   private readonly ttsQueue = new StreamingTtsQueue()
   private readonly pollQuietMs = 80
@@ -119,6 +136,7 @@ export class ClaudeVoiceSession {
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
+          autoGainControl: true,
           channelCount: 1
         }
       })
@@ -190,6 +208,14 @@ export class ClaudeVoiceSession {
 
   /** Immediate cut — no goodbye speech. */
   muteNow(): void {
+    const interruptedTurn = this.busy
+    // Invalidate the old reply immediately. Its pending sendChat/finally may
+    // complete later, but must not block or dismantle the next spoken turn.
+    this.speakEpoch += 1
+    this.busy = false
+    if (interruptedTurn) {
+      void window.albert.stopCurrentWork().catch(() => undefined)
+    }
     this.muted = true
     this.bargeIn = true
     stopSpeaking()
@@ -395,23 +421,25 @@ export class ClaudeVoiceSession {
   /** Speak a short local command and expose Speaking only when playback really starts. */
   private async speakDirect(text: string, opts?: { allowMuted?: boolean }): Promise<void> {
     const generation = this.lifecycleGen
+    const epoch = this.speakEpoch
     this.speaking = false
     try {
       const result = await speakText(text, {
         shouldCancel: () =>
           generation !== this.lifecycleGen ||
+          epoch !== this.speakEpoch ||
           !this.running ||
           this.bargeIn ||
           (!opts?.allowMuted && this.muted),
         onStart: () => {
-          if (generation === this.lifecycleGen && this.running) this.markSpeaking()
+          if (generation === this.lifecycleGen && epoch === this.speakEpoch && this.running) this.markSpeaking()
         }
       })
       if (result.fallbackFrom) {
         this.voiceTurnNote = `${result.fallbackFrom} recovered through the system voice`
       }
     } finally {
-      if (generation === this.lifecycleGen) {
+      if (generation === this.lifecycleGen && epoch === this.speakEpoch) {
         this.stopMuteWatch()
         this.stopLiveKeywords()
         this.speaking = false
@@ -450,11 +478,7 @@ export class ClaudeVoiceSession {
   }
 
   private userLikelyWantedStandby(userText: string): boolean {
-    if (isEndVoiceCommand(userText)) return true
-    // Do NOT treat bare “sleep” in normal chat (“sleep schedule”, etc.) as standby
-    return /\b(standby|stand\s*by|take\s*(a\s*)?(5|five)|end\s+voice|go\s+to\s+sleep)\b/i.test(
-      userText
-    )
+    return isEndVoiceCommand(userText)
   }
 
   /**
@@ -463,12 +487,13 @@ export class ClaudeVoiceSession {
    */
   private async sendChatAndSpeak(
     userText: string,
-    lifecycleGeneration = this.lifecycleGen
+    lifecycleGeneration = this.lifecycleGen,
+    speakEpoch = this.speakEpoch
   ): Promise<void> {
     let buffer = ''
     let fedAny = false
     const current = (): boolean =>
-      this.running && lifecycleGeneration === this.lifecycleGen
+      this.running && lifecycleGeneration === this.lifecycleGen && speakEpoch === this.speakEpoch
 
     this.ttsQueue.reset({
       shouldCancel: () => !current() || this.bargeIn || this.muted,
@@ -515,17 +540,21 @@ export class ClaudeVoiceSession {
       if (this.muted || this.bargeIn) return
 
       // Safety: brain roleplayed standby instead of the app-layer matcher catching it
-      if (
-        this.looksLikeFakeStandbyReply(reply.content) &&
-        this.userLikelyWantedStandby(userText)
-      ) {
-        // Main safety-net already said “Standing by, sir.” — just stop
-        if (/^standing by/i.test(reply.content.trim())) {
-          await this.stop()
+      if (this.looksLikeFakeStandbyReply(reply.content) || isBareStandbyReply(reply.content)) {
+        if (this.userLikelyWantedStandby(userText)) {
+          // Main safety-net already said “Standing by, sir.” — just stop
+          if (isBareStandbyReply(reply.content)) {
+            await this.stop()
+            return
+          }
+          await this.engageStandbyFromLive()
           return
         }
-        await this.engageStandbyFromLive()
-        return
+        // Roleplay on a normal ask — do not speak a fake shutdown.
+        if (isBareStandbyReply(reply.content)) {
+          this.onStatus('Listening')
+          return
+        }
       }
 
       if (buffer.trim()) {
@@ -543,7 +572,7 @@ export class ClaudeVoiceSession {
       await this.ttsQueue.flush()
     } finally {
       off()
-      if (lifecycleGeneration === this.lifecycleGen) {
+      if (lifecycleGeneration === this.lifecycleGen && speakEpoch === this.speakEpoch) {
         this.stopMuteWatch()
         this.stopLiveKeywords()
         this.speaking = false
@@ -567,6 +596,13 @@ export class ClaudeVoiceSession {
     this.silenceMs = 0
     this.spokeMs = 0
     this.lastSpeechAt = 0
+    this.firstSpeechAt = 0
+    this.lastVoicedAt = 0
+    this.lastLevelAt = 0
+    this.captureWasHotMic = Boolean(opts?.force)
+    this.captureMinSpeechMs = this.captureWasHotMic ? this.minSpeechMs : SHORT_REPLY_MIN_SPEECH_MS
+    this.speechHoldMs = 0
+    this.captureStartedAt = 0
     this.recording = true
     // Hot-mic during TTS must not cancel playback or clear barge state mid-turn.
     if (!opts?.force) {
@@ -616,6 +652,7 @@ export class ClaudeVoiceSession {
       void this.audioContext.resume().catch(() => undefined)
     }
 
+    this.captureStartedAt = Date.now()
     this.mediaRecorder.start(50)
     if (!this.speaking) this.onState('listening')
     this.monitorLevels()
@@ -623,6 +660,11 @@ export class ClaudeVoiceSession {
 
   private monitorLevels(): void {
     if (!this.running || !this.analyser) return
+    const now = Date.now()
+    // Count observed time, not the next scheduled polling interval. The first
+    // immediate poll represents zero elapsed audio, not an 80 ms speech burst.
+    const elapsedMs = this.lastLevelAt ? Math.min(160, Math.max(0, now - this.lastLevelAt)) : 0
+    this.lastLevelAt = now
 
     if (this.audioContext?.state === 'suspended') {
       void this.audioContext.resume().catch(() => undefined)
@@ -654,17 +696,33 @@ export class ClaudeVoiceSession {
     }
 
     const thresholds = speechThresholds(this.noiseFloor, settings.micSensitivity)
-    const speakingNow = this.speaking ? rms > thresholds.barge : rms > thresholds.speech
-    const silentNow = rms < thresholds.silence
-    const bargeNow = rms > thresholds.barge
-    const tickMs =
-      speakingNow || this.speaking ? this.pollActiveMs : this.pollQuietMs
-
+    const inEchoGuard = now < this.echoGuardUntil
     const allowBargeIn = settings.allowBargeIn !== false
+    const energyIsSpeech = this.speaking
+      ? allowBargeIn && rms > thresholds.barge
+      : !inEchoGuard && rms > thresholds.speech
+    this.speechHoldMs = nextSpeechHoldMs(this.speechHoldMs, energyIsSpeech, elapsedMs)
+    const loudNow = this.speaking
+      ? allowBargeIn && rms > thresholds.barge
+      : isSustainedSpeech(this.speechHoldMs, SPEECH_HOLD_MS)
+    const aboveSilence = (!this.speaking || allowBargeIn) && rms >= thresholds.silence
+    const msSinceLoudSpeech = this.lastSpeechAt
+      ? now - this.lastSpeechAt
+      : Number.POSITIVE_INFINITY
+    const inPhrase = isStillInPhrase({
+      loudNow,
+      aboveSilence,
+      msSinceLoudSpeech,
+      hasSpoken: this.spokeMs > this.minSpeechMs * 0.45
+    })
+    const speakingNow = loudNow || inPhrase
+    const bargeNow = rms > thresholds.barge
+    const tickMs = speakingNow || this.speaking ? this.pollActiveMs : this.pollQuietMs
+
     // Barge-in only while Albert is actually playing audio — NOT during Thinking.
     if (this.speaking && allowBargeIn && !this.muted) {
       if (bargeNow) {
-        this.bargeHoldMs += tickMs
+        this.bargeHoldMs += elapsedMs
         if (this.bargeHoldMs >= this.bargeHoldNeedMs) {
           this.muteNow()
           this.onStatus('Interrupted — listening')
@@ -678,28 +736,51 @@ export class ClaudeVoiceSession {
     }
 
     if (this.recording) {
-      if (speakingNow) {
-        this.spokeMs += tickMs
+      if (inEchoGuard) {
+        // Freeze the hangover so TTS bleed neither looks like speech nor like a pause.
+      } else if (loudNow) {
+        if (!this.firstSpeechAt) {
+          this.firstSpeechAt = Math.max(this.captureStartedAt, now - this.speechHoldMs)
+          this.spokeMs += now - this.firstSpeechAt
+        } else {
+          this.spokeMs += elapsedMs
+        }
         this.silenceMs = 0
-        this.lastSpeechAt = Date.now()
-      } else if (silentNow && this.spokeMs > this.minSpeechMs * 0.55) {
-        this.silenceMs += tickMs
+        this.lastSpeechAt = now
+        this.lastVoicedAt = now
+      } else if (inPhrase) {
+        this.silenceMs = 0
+        this.lastVoicedAt = now
+      } else if (this.firstSpeechAt) {
+        this.silenceMs += elapsedMs
       }
 
-      const quietLongEnough =
-        this.lastSpeechAt > 0 &&
-        Date.now() - this.lastSpeechAt >= endOfUtteranceSilenceMs(this.spokeMs)
-
-      // Never cut while the previous turn is still busy/speaking — processRecording
-      // early-returns when busy and would drop the blob on the floor.
       const canEndpoint = !this.speaking && !this.busy
-
-      if (canEndpoint && this.spokeMs > this.minSpeechMs && quietLongEnough) {
+      if (shouldResetShortUtterance({
+        spokeMs: this.spokeMs,
+        silenceMs: this.silenceMs,
+        minSpeechMs: this.captureMinSpeechMs,
+        speakingNow,
+        canEndpoint
+      })) {
+        this.discardHotCapture()
+        this.beginUtteranceCapture()
+        return
+      }
+      if (
+        shouldEndpointUtterance({
+          spokeMs: this.spokeMs,
+          silenceMs: this.silenceMs,
+          minSpeechMs: this.captureMinSpeechMs,
+          speakingNow,
+          canEndpoint,
+          recordingMs: this.captureStartedAt ? Date.now() - this.captureStartedAt : 0
+        })
+      ) {
         this.hotMic = false
         this.finishUtterance()
         return
       }
-
     }
 
     this.timerId = window.setTimeout(() => this.monitorLevels(), tickMs)
@@ -718,22 +799,28 @@ export class ClaudeVoiceSession {
   }
 
   private async processRecording(lifecycleGeneration = this.lifecycleGen): Promise<void> {
-    if (
-      !this.running ||
-      this.busy ||
-      lifecycleGeneration !== this.lifecycleGen
-    ) return
-    const current = (): boolean =>
-      this.running && lifecycleGeneration === this.lifecycleGen
+    if (!this.running || lifecycleGeneration !== this.lifecycleGen) return
     const blob = new Blob(this.chunks, {
       type: this.mediaRecorder?.mimeType || 'audio/webm'
     })
     this.chunks = []
 
-    if (blob.size < 2800 || this.spokeMs < this.minSpeechMs) {
+    const capturedSpeechMs = this.spokeMs
+    const capturedHotMic = this.captureWasHotMic
+    const minimumSpeechMs = this.captureMinSpeechMs
+    const firstSpeechMs = this.firstSpeechAt - this.captureStartedAt
+    const lastSpeechMs = this.lastVoicedAt - this.captureStartedAt
+    const capturedFloor = { ...this.noiseFloor }
+    // Compressed byte size varies with codec/silence; qualify speech using PCM below.
+    if (!blob.size || capturedSpeechMs < minimumSpeechMs) {
       if (this.running) this.beginUtteranceCapture()
       return
     }
+
+    const epoch = ++this.speakEpoch
+    stopSpeaking()
+    const current = (): boolean =>
+      this.running && lifecycleGeneration === this.lifecycleGen && epoch === this.speakEpoch
 
     this.busy = true
     this.voiceTurnNote = null
@@ -741,16 +828,28 @@ export class ClaudeVoiceSession {
     this.onStatus('Transcribing…')
 
     try {
-      // Softer trim + longer pad — aggressive silence trim was eating leading words.
-      const audio = trimSilence(await decodeBlobToMono16k(blob), 16_000, 0.006, 320)
+      const decoded = await decodeBlobToMono16k(blob)
+      if (!current()) return
+      // Room tone can be louder than a gentle phoneme-trimming threshold. Use
+      // observed speech timestamps to exclude an arbitrarily long idle prefix.
+      const evidence = speechWindow(decoded, firstSpeechMs, lastSpeechMs)
+      // Preserve quiet word boundaries for ASR, but do not count this padding
+      // (or the VAD hangover) against the utterance's voiced-frame ratio.
+      const audio = trimSilence(
+        speechWindow(decoded, firstSpeechMs, lastSpeechMs, 420),
+        16_000,
+        transcriptTrimThreshold(capturedFloor),
+        420
+      )
       if (!current()) return
       // Room tone, HVAC and keyboard clicks used to reach Whisper, which turns
       // them into "you" / "the" / "thank you". Require the buffer to be loud
       // relative to this room AND mostly voiced before spending a pass on it.
       const gate = shouldTranscribe({
-        samples: audio,
-        floor: this.noiseFloor,
-        sensitivity: useAlbertStore.getState().settings.micSensitivity
+        samples: evidence,
+        floor: capturedFloor,
+        sensitivity: useAlbertStore.getState().settings.micSensitivity,
+        minSamples: Math.ceil(minimumSpeechMs * 16)
       })
       if (!gate.ok) {
         this.onStatus('Listening — mute / hide / show / standby work anytime')
@@ -759,8 +858,12 @@ export class ClaudeVoiceSession {
       const raw = (await window.albert.transcribeAudio(audio)).trim()
       if (!current()) return
       const text = correctTranscript(raw)
-
-      if (!text || isLikelyHallucination(text) || isLikelyHallucination(raw)) {
+      const allowShortReply = hasConfidentShortReplyAudio({
+        voicedRatio: gate.voicedRatio,
+        spokeMs: capturedSpeechMs,
+        hotMic: capturedHotMic
+      })
+      if (!text || isLikelyHallucination(text, { allowShortReply }) || isLikelyHallucination(raw, { allowShortReply })) {
         this.onStatus('Listening — mute / hide / show / standby work anytime')
         return
       }
@@ -772,6 +875,9 @@ export class ClaudeVoiceSession {
         return
       }
 
+      // This is a newly accepted utterance, not the interrupted output.
+      this.bargeIn = false
+      this.muted = false
       this.onTranscript('user', text)
 
       // Session-changing commands need a confidently voiced utterance behind
@@ -804,28 +910,8 @@ export class ClaudeVoiceSession {
         return
       }
 
-      const personalityAdj = parsePersonalityVoiceCommand(text)
-      if (personalityAdj) {
-        // Prefer sendChat so main-process orchestrator owns persistence + UI sync.
-        // Keep a local fallback path if chat is unavailable.
-        try {
-          await this.sendChatAndSpeak(text, lifecycleGeneration)
-          return
-        } catch {
-          const currentPersonality = normalizePersonality(
-            useAlbertStore.getState().settings.personality
-          )
-          const next = applyPersonalityAdjust(currentPersonality, personalityAdj)
-          const updated = await window.albert.setSettings({ personality: next })
-          if (!current()) return
-          useAlbertStore.getState().setSettings(updated)
-          const reply = personalityAdjustReply(personalityAdj, next, currentPersonality)
-          this.onTranscript('assistant', reply)
-          await this.speakDirect(reply)
-          return
-        }
-      }
-
+      // Chat owns personality commands too. Retrying a relative adjustment here
+      // after a speech/transport failure could apply it twice and lose the remaining ask.
       this.onStatus(`Heard: “${text}”`)
       this.bargeIn = false
       await this.sendChatAndSpeak(text, lifecycleGeneration)
@@ -844,10 +930,11 @@ export class ClaudeVoiceSession {
         }
       }
     } finally {
-      if (lifecycleGeneration !== this.lifecycleGen) return
+      if (lifecycleGeneration !== this.lifecycleGen || epoch !== this.speakEpoch) return
       this.busy = false
       this.speaking = false
       this.hotMic = false
+      this.echoGuardUntil = Date.now() + POST_TTS_ECHO_GUARD_MS
       this.stopMuteWatch()
       if (current()) {
         this.onStatus(
@@ -863,15 +950,9 @@ export class ClaudeVoiceSession {
             this.beginUtteranceCapture()
           } else {
             this.onState('listening')
-            // User may have finished during TTS — endpoint now that busy cleared.
-            const quietLongEnough =
-              this.lastSpeechAt > 0 &&
-              Date.now() - this.lastSpeechAt >= endOfUtteranceSilenceMs(this.spokeMs)
-            if (this.spokeMs > this.minSpeechMs && quietLongEnough) {
-              this.finishUtterance()
-            } else if (!this.timerId) {
-              this.monitorLevels()
-            }
+            // Do not force-end here. The hangover may have grown while Albert
+            // was talking, and speakingNow is unknown without a fresh RMS tick.
+            if (!this.timerId) this.monitorLevels()
           }
         } else {
           this.beginUtteranceCapture()
@@ -889,6 +970,10 @@ export class ClaudeVoiceSession {
     this.spokeMs = 0
     this.silenceMs = 0
     this.lastSpeechAt = 0
+    this.firstSpeechAt = 0
+    this.lastVoicedAt = 0
+    this.lastLevelAt = 0
+    this.speechHoldMs = 0
     if (this.timerId) window.clearTimeout(this.timerId)
     this.timerId = 0
     const rec = this.mediaRecorder

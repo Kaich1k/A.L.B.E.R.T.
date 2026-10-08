@@ -14,6 +14,9 @@ const api: AlbertApi = {
   sendChat: (payload) => ipcRenderer.invoke(IpcChannels.chatSend, payload),
   getChatImageDataUrl: (fileName) =>
     ipcRenderer.invoke(IpcChannels.chatImageData, fileName),
+  getArtifactImageDataUrl: (filePath) =>
+    ipcRenderer.invoke(IpcChannels.chatArtifactImageData, filePath),
+  openArtifact: (filePath) => ipcRenderer.invoke(IpcChannels.chatArtifactOpen, filePath),
   readClipboardImage: () => ipcRenderer.invoke(IpcChannels.clipboardImage),
   onChatEvent: (handler) => {
     const listener = (_: Electron.IpcRendererEvent, event: AgentStreamEvent): void =>
@@ -56,6 +59,7 @@ const api: AlbertApi = {
     ipcRenderer.invoke(IpcChannels.ttsSpeak, { text, ...overrides }),
   speakKokoro: (text, overrides) =>
     ipcRenderer.invoke(IpcChannels.ttsKokoro, { text, ...overrides }),
+  cancelKokoro: () => ipcRenderer.invoke(IpcChannels.ttsKokoroCancel),
   warmKokoro: () => ipcRenderer.invoke(IpcChannels.ttsKokoroWarm),
   onKokoroProgress: (handler) => {
     const listener = (
@@ -95,9 +99,13 @@ const api: AlbertApi = {
   },
 
   hideWindow: () => ipcRenderer.invoke(IpcChannels.windowHide),
-  showWindow: () => ipcRenderer.invoke(IpcChannels.windowShow),
+  showWindow: (panel) => ipcRenderer.invoke(IpcChannels.windowShow, panel),
   toggleWindow: () => ipcRenderer.invoke(IpcChannels.windowToggle),
   openPrivacyPane: (pane) => ipcRenderer.invoke(IpcChannels.openPrivacyPane, pane),
+  permissionStatus: () => ipcRenderer.invoke(IpcChannels.permissionStatus),
+  requestPermission: (kind) => ipcRenderer.invoke(IpcChannels.requestPermission, kind),
+  beginOutlookGraph: () => ipcRenderer.invoke(IpcChannels.outlookGraphBegin),
+  finishOutlookGraph: () => ipcRenderer.invoke(IpcChannels.outlookGraphFinish),
   probeOllama: () => ipcRenderer.invoke(IpcChannels.ollamaProbe),
   pullOllamaModel: (model) => ipcRenderer.invoke(IpcChannels.ollamaPull, model),
   probeGroq: () => ipcRenderer.invoke(IpcChannels.groqProbe),
@@ -127,6 +135,7 @@ const api: AlbertApi = {
   logoutCodex: () => ipcRenderer.invoke(IpcChannels.codexLogout),
   refreshCodexAllowance: () => ipcRenderer.invoke(IpcChannels.codexRateLimits),
   interruptCodex: () => ipcRenderer.invoke(IpcChannels.codexInterrupt),
+  stopCurrentWork: () => ipcRenderer.invoke(IpcChannels.workStop),
   newCodexThread: () => ipcRenderer.invoke(IpcChannels.codexNewThread),
 
   pickChatGptExport: () => ipcRenderer.invoke(IpcChannels.chatgptImportPick),
@@ -164,6 +173,8 @@ const api: AlbertApi = {
   setAmbientHud: (enabled) => ipcRenderer.invoke(IpcChannels.ambientHudSet, enabled),
   hudDrag: (payload) => ipcRenderer.invoke(IpcChannels.hudDrag, payload),
   setHudRoam: (enabled) => ipcRenderer.invoke(IpcChannels.hudRoamSet, enabled),
+  setHudExpanded: (expanded) => ipcRenderer.invoke(IpcChannels.hudExpand, expanded),
+  returnHudToDock: () => ipcRenderer.invoke(IpcChannels.hudReturn),
   dockHud: (slot) => ipcRenderer.invoke(IpcChannels.hudDock, slot),
   undockHud: () => ipcRenderer.invoke(IpcChannels.hudUndock),
   reportHudRuntime: (state) => ipcRenderer.invoke(IpcChannels.hudRuntime, state),

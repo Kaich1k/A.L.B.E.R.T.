@@ -6,8 +6,13 @@
  * opening the browser for OAuth) lives here so the rest of `src/main/codex` can
  * stay pure and testable.
  */
-import { BrowserWindow, dialog, shell } from 'electron'
+import { app, BrowserWindow, dialog, shell } from 'electron'
 import { homedir } from 'os'
+import { join } from 'node:path'
+import { currentTurnScope, enterChatTurn, chatTurnStale } from '../agent/turnControl'
+import { codexDynamicTools, dynamicToolsFingerprint, dispatchCodexDynamicTool, notificationMatchesTurn, CodexTurnNotificationGate, type DynamicCallCache } from './dynamicTools'
+import { resolveToolEnabledThread } from './toolThreads'
+import { codexTurnContext } from './turnContext'
 import { CodexAppServer } from './appServer'
 import {
   commandApprovalPaths,
@@ -34,8 +39,8 @@ import {
   listCodexModels,
   normalizeEffort,
   pickModel,
+  resolveEverydayCodexModel,
   CODEX_ESCALATION_PREFERENCE,
-  CODEX_MODEL_PREFERENCE,
   type CodexModel
 } from './models'
 import {
@@ -69,6 +74,9 @@ interface ActiveTurn {
   streamedText: string
   interrupted: boolean
   liveSourceTouched: boolean
+  scope: ReturnType<typeof currentTurnScope>
+  toolCalls: DynamicCallCache
+  notificationGate: CodexTurnNotificationGate
 }
 
 export interface CodexTurnResult {
@@ -91,6 +99,66 @@ export interface CodexTurnOptions {
 
 let server: CodexAppServer | null = null
 let models: CodexModel[] = []
+let lastWorkingCodexModel: string | null = null
+let modelChoiceNotice: string | null = null
+
+function everydayModel(requested?: string | null): { id: string | null; notice: string | null } {
+  const settings = getSettings()
+  const resolved = resolveEverydayCodexModel(
+    models,
+    requested ?? settings.codexModel,
+    lastWorkingCodexModel
+  )
+  if (resolved.id && !resolved.notice) lastWorkingCodexModel = resolved.id
+  return resolved
+}
+
+/** Push the saved model onto the live Codex thread and report it to the HUD. */
+export async function applySelectedCodexModel(
+  requested: string,
+  previousSaved = ''
+): Promise<CodexStatus> {
+  if (!models.length && server?.running) {
+    try {
+      models = await listCodexModels(server)
+    } catch {
+      models = []
+    }
+  }
+  const previous = previousSaved || lastWorkingCodexModel || ''
+  const resolved = resolveEverydayCodexModel(models, requested, previous)
+  if (resolved.notice) {
+    modelChoiceNotice = resolved.notice
+    setSettings({ codexModel: previous })
+    notifyStatus()
+    return getCodexStatus()
+  }
+  const id = resolved.id || requested.trim()
+  modelChoiceNotice = null
+  if (id) {
+    setSettings({ codexModel: id })
+    lastWorkingCodexModel = id
+    await pushModelToLiveThread(id)
+  }
+  notifyStatus()
+  return getCodexStatus()
+}
+
+async function pushModelToLiveThread(modelId: string): Promise<void> {
+  if (!server?.running || !modelId) return
+  const threadId = liveThreadId || getSettings().codexThreadId?.trim()
+  if (!threadId) return
+  const effort = normalizeEffort(models, modelId, getSettings().codexEffort)
+  try {
+    await server.request('thread/settings/update', {
+      threadId,
+      model: modelId,
+      effort
+    })
+  } catch {
+    // turn/start still sends this model. A loaded thread ignores resume overrides.
+  }
+}
 let auth: CodexAuthState = SIGNED_OUT
 let allowance: CodexAllowance | null = null
 let activeTurn: ActiveTurn | null = null
@@ -162,6 +230,7 @@ function rebuildIfLiveSourceTouched(turn: ActiveTurn): void {
 function settleTurn(turn: ActiveTurn, error?: Error): void {
   if (turn.settled) return
   turn.settled = true
+  turn.notificationGate.close()
   if (activeTurn === turn) activeTurn = null
   // Source edits already landed on disk — rebuild even if Codex was interrupted
   // or never reached `npm run update:app`.
@@ -183,7 +252,12 @@ function handleNotification(method: string, params: unknown): void {
   const events = mapCodexNotification(method, params)
   const turn = activeTurn
 
+  if (turn && events.some((event) => !['rateLimits', 'accountUpdated', 'loginCompleted', 'ignored'].includes(event.kind))) {
+    if (!turn.notificationGate.receive(method, params).length) return
+  }
+
   for (const event of events) {
+    if (turn && !notificationMatchesTurn(params, turn) && !['rateLimits', 'accountUpdated', 'loginCompleted'].includes(event.kind)) continue
     switch (event.kind) {
       case 'rateLimits':
         setAllowance(event.snapshot)
@@ -198,7 +272,7 @@ function handleNotification(method: string, params: unknown): void {
         void refreshAccount()
         break
       case 'turnStarted':
-        if (turn && !turn.turnId) turn.turnId = event.turnId
+        // Only the response to our own turn/start request can bind the id.
         break
       case 'delta':
         if (turn) turn.streamedText += event.text
@@ -308,6 +382,32 @@ async function handleServerRequest(method: string, rawParams: unknown): Promise<
   const params = (rawParams && typeof rawParams === 'object'
     ? rawParams
     : {}) as Record<string, unknown>
+
+  if (method === 'item/tool/call') {
+    const turn = activeTurn
+    // A tool callback may arrive before the correlated start response. Wait
+    // for that id, then perform the normal stale-turn and namespace checks.
+    if (turn) await turn.notificationGate.ready
+    return dispatchCodexDynamicTool(params, turn ? {
+      threadId: turn.threadId,
+      turnId: turn.turnId,
+      calls: turn.toolCalls,
+      isCurrent: () => activeTurn === turn && !turn.settled && !turn.interrupted &&
+        !turn.scope?.signal.aborted && !chatTurnStale(turn.scope?.generation),
+      loadExecutor: async () => {
+        // Registry -> control tools -> Codex service is a cycle. Import only
+        // after initialization, and restore this turn's async-local context:
+        // app-server callbacks themselves belong to a long-lived transport.
+        const registry = await import('../tools/registry')
+        return {
+          hasTool: (name) => Boolean(registry.getTool(name)),
+          execute: (name, args) => turn.scope
+            ? enterChatTurn(turn.scope, () => registry.executeTool(name, args))
+            : registry.executeTool(name, args)
+        }
+      }
+    } : null)
+  }
 
   if (method === 'item/permissions/requestApproval') {
     const settings = getSettings()
@@ -457,7 +557,9 @@ export async function connectCodex(): Promise<CodexStatus> {
     await instance.start()
     lastError = null
     auth = await readAccount(instance)
-    if (!models.length) models = await listCodexModels(instance)
+    // Always re-list so Systems can surface newly allowed models (e.g. gpt-6.1-sol)
+    // without requiring an app restart.
+    models = await listCodexModels(instance)
     if (auth.signedIn) setAllowance(await readRateLimits(instance))
   } catch (err) {
     lastError = err instanceof Error ? err.message : String(err)
@@ -471,7 +573,8 @@ export function getCodexStatus(): CodexStatus {
   const bin = findCodexBinary()
   if (versionCache === undefined) versionCache = bin ? codexVersion(bin) : null
 
-  const model = pickModel(models, CODEX_MODEL_PREFERENCE, settings.codexModel)
+  const resolved = everydayModel()
+  const model = resolved.id
   const escalationModel = pickModel(
     models,
     CODEX_ESCALATION_PREFERENCE,
@@ -497,7 +600,8 @@ export function getCodexStatus(): CodexStatus {
     threadId: settings.codexThreadId || null,
     allowance,
     lastError,
-    installHint: bin ? null : CODEX_INSTALL_HINT
+    installHint: bin ? null : CODEX_INSTALL_HINT,
+    modelNotice: modelChoiceNotice || resolved.notice
   }
 }
 
@@ -552,56 +656,43 @@ export async function logoutCodexAccount(): Promise<CodexStatus> {
 
 /** Forget the persisted thread so the next turn starts clean. */
 export function newCodexThread(): void {
-  setSettings({ codexThreadId: '' })
+  setSettings({ codexThreadId: '', codexContextStartAt: Date.now() })
   liveThreadId = null
   notifyStatus()
 }
 
-async function startThread(instance: CodexAppServer, developerInstructions?: string): Promise<string> {
-  const settings = getSettings()
-  const model = pickModel(models, CODEX_MODEL_PREFERENCE, settings.codexModel)
-  const response = await instance.request<CodexThreadStartResponse>('thread/start', {
-    cwd: codexCwd(),
-    model: model || undefined,
-    approvalPolicy: 'on-request',
-    sandbox: 'workspace-write',
-    developerInstructions
+/** Bind the current registry lazily, preserving older conversations during migration. */
+async function resolveThread(
+  instance: CodexAppServer,
+  developerInstructions: string | undefined,
+  assertCurrent: () => void
+): Promise<string> {
+  const registry = await import('../tools/registry')
+  assertCurrent()
+  const tools = registry.getTools()
+  const threadId = await resolveToolEnabledThread(instance, {
+    existingThreadId: getSettings().codexThreadId?.trim() || '',
+    liveThreadId,
+    fingerprint: dynamicToolsFingerprint(tools),
+    directory: join(app.getPath('userData'), 'codex-tools'),
+    dynamicTools: codexDynamicTools(tools),
+    threadParams: {
+      cwd: codexCwd(),
+      model: everydayModel().id || undefined,
+      approvalPolicy: 'on-request',
+      sandbox: 'workspace-write',
+      developerInstructions
+    },
+    assertCurrent,
+    onMigration: () => notifyRenderer({
+      type: 'codex_progress',
+      content: 'Computer controls are connected. I have kept the previous conversation and carried its recent context forward.'
+    })
   })
-  const threadId = response?.thread?.id
-  if (!threadId) throw new CodexFault('transport', 'Codex did not return a thread id, sir.')
+  assertCurrent()
   setSettings({ codexThreadId: threadId })
   liveThreadId = threadId
   return threadId
-}
-
-/**
- * Reuse the persisted thread so Codex keeps project context across restarts,
- * falling back to a fresh thread when the old one is gone or unusable.
- */
-async function resolveThread(
-  instance: CodexAppServer,
-  developerInstructions?: string
-): Promise<string> {
-  const existing = getSettings().codexThreadId?.trim()
-  if (existing) {
-    if (liveThreadId === existing) return existing
-    try {
-      await instance.request('thread/resume', {
-        threadId: existing,
-        cwd: codexCwd(),
-        approvalPolicy: 'on-request',
-        sandbox: 'workspace-write',
-        developerInstructions,
-        excludeTurns: true
-      })
-      liveThreadId = existing
-      return existing
-    } catch {
-      // Deleted, archived, or written by an incompatible version.
-      setSettings({ codexThreadId: '' })
-    }
-  }
-  return startThread(instance, developerInstructions)
 }
 
 export function codexTurnActive(): boolean {
@@ -650,12 +741,20 @@ export async function steerCodexTurn(text: string): Promise<boolean> {
 }
 
 export async function runCodexTurn(options: CodexTurnOptions): Promise<CodexTurnResult> {
+  const scope = currentTurnScope()
+  const assertCurrent = (): void => {
+    if (scope?.signal.aborted || (scope && chatTurnStale(scope.generation))) {
+      throw new CodexFault('interrupted', 'This request was interrupted before the next action, sir.')
+    }
+  }
+  assertCurrent()
   if (activeTurn && !activeTurn.settled) {
     throw new CodexFault('transport', 'A Codex turn is already running, sir.')
   }
 
   const instance = ensureServer()
   await instance.start()
+  assertCurrent()
 
   // Account state is pushed through notifications and refreshed on connect.
   // Avoid another account/read round trip before every ordinary turn.
@@ -669,12 +768,13 @@ export async function runCodexTurn(options: CodexTurnOptions): Promise<CodexTurn
   if (!models.length) models = await listCodexModels(instance)
 
   const settings = getSettings()
-  const model = options.model || pickModel(models, CODEX_MODEL_PREFERENCE, settings.codexModel)
+  const model = options.model || everydayModel().id
+  if (!model) throw new CodexFault('transport', 'Codex did not report an available model; the existing conversation was kept.')
   const effort = normalizeEffort(models, model, options.effort || settings.codexEffort)
   pauseLiveHmr()
   let threadId: string
   try {
-    threadId = await resolveThread(instance, options.developerInstructions)
+    threadId = await resolveThread(instance, options.developerInstructions, assertCurrent)
   } catch (err) {
     resumeLiveHmr()
     throw err
@@ -692,7 +792,10 @@ export async function runCodexTurn(options: CodexTurnOptions): Promise<CodexTurn
       finalText: '',
       streamedText: '',
       interrupted: false,
-      liveSourceTouched: false
+      liveSourceTouched: false,
+      scope,
+      toolCalls: new Map(),
+      notificationGate: new CodexTurnNotificationGate(threadId)
     }
     activeTurn = turn
 
@@ -719,8 +822,7 @@ export async function runCodexTurn(options: CodexTurnOptions): Promise<CodexTurn
       .request<CodexTurnStartResponse>('turn/start', {
         threadId,
         input: options.input,
-        model: model || undefined,
-        effort,
+        ...codexTurnContext(model, effort, options.developerInstructions),
         approvalPolicy: 'on-request',
         sandboxPolicy: {
           type: 'workspaceWrite',
@@ -729,7 +831,13 @@ export async function runCodexTurn(options: CodexTurnOptions): Promise<CodexTurn
         }
       })
       .then((response) => {
-        if (response?.turn?.id && !turn.turnId) turn.turnId = response.turn.id
+        if (activeTurn !== turn || turn.settled) return
+        if (!response?.turn?.id) throw new CodexFault('transport', 'Codex did not identify the started turn.')
+        turn.turnId = response.turn.id
+        for (const notification of turn.notificationGate.bind(turn.turnId)) {
+          if (activeTurn !== turn || turn.settled) break
+          handleNotification(notification.method, notification.params)
+        }
       })
       .catch((err) => {
         const fault =

@@ -54,6 +54,7 @@ interface HudBounds {
   x: number
   y: number
   roam: boolean
+  docked?: boolean
 }
 
 function boundsPath(): string {
@@ -66,7 +67,7 @@ function loadBounds(): HudBounds | null {
   try {
     const raw = JSON.parse(readFileSync(boundsPath(), 'utf8')) as Partial<HudBounds>
     if (typeof raw.x !== 'number' || typeof raw.y !== 'number') return null
-    return { x: raw.x, y: raw.y, roam: raw.roam !== false }
+    return { x: raw.x, y: raw.y, roam: raw.roam !== false, docked: raw.docked === true }
   } catch {
     return null
   }
@@ -75,7 +76,7 @@ function loadBounds(): HudBounds | null {
 function saveBounds(): void {
   if (!hudWindow || hudWindow.isDestroyed()) return
   const [x, y] = hudWindow.getPosition()
-  writeFileSync(boundsPath(), JSON.stringify({ x, y, roam: roamEnabled }))
+  writeFileSync(boundsPath(), JSON.stringify({ x, y, roam: roamEnabled, docked: dockedToMain }))
 }
 
 function appWindow(): BrowserWindow | null {
@@ -274,9 +275,10 @@ function parkHudInDock(): void {
   dockedToMain = true
   hideHudInDock()
   broadcastHudDocked(true)
+  saveBounds()
 }
 
-function snapHudIntoDock(): void {
+export function returnHudToDock(): void {
   const origin = lastDockOrigin
   dragOrigin = null
   if (!origin || !hudWindow || hudWindow.isDestroyed()) {
@@ -307,6 +309,7 @@ function revealHudFromDock(): void {
     showHudWindow()
   }
   if (!hudWindow || hudWindow.isDestroyed()) return
+  dockedToMain = false
   if (lastDockOrigin) {
     try {
       hudWindow.setPosition(lastDockOrigin.x, lastDockOrigin.y)
@@ -449,10 +452,24 @@ export function dockHud(
 }
 
 export function releaseHudDock(): void {
-  if (!dockedToMain) return
+  if (!dockedToMain && hudWindow && !hudWindow.isDestroyed() && hudWindow.isVisible()) {
+    return
+  }
   dockedToMain = false
   revealHudFromDock()
   broadcastHudDocked(false)
+  saveBounds()
+  if (!hudWindow || hudWindow.isDestroyed()) return
+  const main = appWindow()
+  const { width, height } = hudWindow.getBounds()
+  const dest =
+    main && !main.isDestroyed() && main.isVisible()
+      ? parkBesideWindow(main.getBounds(), width, height)
+      : defaultPosition(width, height)
+  const here = hudWindow.getBounds()
+  if (Math.hypot(dest.x - here.x, dest.y - here.y) < 36) return
+  suppressRoamUntil = Date.now() + 5_000
+  void animateHudTo(dest, 16)
 }
 
 export function isHudDocked(): boolean {
@@ -500,6 +517,29 @@ export function suspendHudForDialog(): () => void {
       /* ignore */
     }
   }
+}
+
+export function nudgeHudOffMainWindow(): void {
+  if (!hudWindow || hudWindow.isDestroyed() || dragOrigin || dockedToMain) return
+  const main = appWindow()
+  if (!main || main.isDestroyed() || !main.isVisible()) return
+  const bounds = hudWindow.getBounds()
+  const host = main.getBounds()
+  if (!overlaps(bounds, host, 24)) return
+  const destination = parkBesideWindow(host, bounds.width, bounds.height)
+  hudWindow.setBounds({ ...hudWindow.getBounds(), x: destination.x, y: destination.y })
+}
+
+export function setHudExpanded(expanded: boolean): boolean {
+  if (!hudWindow || hudWindow.isDestroyed() || dockedToMain) return false
+  const current = hudWindow.getBounds()
+  const width = expanded ? 440 : ORB_SIZE
+  const height = expanded ? 620 : ORB_SIZE
+  hudWindow.setMinimumSize(ORB_SIZE, ORB_SIZE)
+  hudWindow.setMaximumSize(width, height)
+  const clamped = clampToWorkArea(current.x + current.width - width, current.y + current.height - height, width, height)
+  hudWindow.setBounds({ x: clamped.x, y: clamped.y, width, height })
+  return expanded
 }
 
 export function setHudRoam(enabled: boolean): boolean {
@@ -558,7 +598,7 @@ export function dragAmbientHud(payload: {
     const shouldSnap = dockSnapArmed && hudNearDock()
     dragOrigin = null
     if (shouldSnap) {
-      snapHudIntoDock()
+      returnHudToDock()
       return
     }
     saveBounds()
@@ -578,7 +618,11 @@ export function showHudWindow(): BrowserWindow {
     return hudWindow
   }
   const stored = loadBounds()
-  roamEnabled = stored ? stored.roam : getSettings().ambientHudRoam !== false
+  const settings = getSettings()
+  roamEnabled = stored ? stored.roam : settings.ambientHudRoam !== false
+  if (stored?.docked || (!stored && settings.interfaceStyle !== 'classic')) {
+    dockedToMain = true
+  }
   const width = ORB_SIZE
   const height = ORB_SIZE
   const fallback = defaultPosition(width, height)
@@ -591,8 +635,8 @@ export function showHudWindow(): BrowserWindow {
     y: pos.y,
     minWidth: ORB_SIZE,
     minHeight: ORB_SIZE,
-    maxWidth: ORB_SIZE,
-    maxHeight: ORB_SIZE,
+    maxWidth: 440,
+    maxHeight: 620,
     title: `${APP_NAME} Orb`,
     frame: false,
     transparent: true,
@@ -606,6 +650,7 @@ export function showHudWindow(): BrowserWindow {
     focusable: true,
     acceptFirstMouse: true,
     show: false,
+    ...(process.platform === 'darwin' ? { type: 'panel' as const } : {}),
     ...(iconPath ? { icon: iconPath } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

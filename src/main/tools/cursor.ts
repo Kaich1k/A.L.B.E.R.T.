@@ -7,7 +7,7 @@ export const cursorTools: ToolDefinition[] = [
   {
     name: 'cursor_agent',
     description:
-      'Run the Cursor agent CLI (same agent as the IDE) against the project. This is how ALBERT is allowed to code — including editing ALBERT himself. Live reload is paused for the run so the Mac UI does not crash. Use this for coding, refactors, and file edits. Does not inject into an already-open Composer tab.',
+      'Run the Cursor agent on the project, including ALBERT source. Live reload pauses for the run. Does not inject into an open Composer tab.',
     parameters: {
       type: 'object',
       properties: {

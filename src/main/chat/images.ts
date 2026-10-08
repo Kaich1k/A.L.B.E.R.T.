@@ -1,11 +1,13 @@
-import { mkdir, readFile, writeFile } from 'fs/promises'
-import { join } from 'path'
+import { mkdir, readFile, realpath, stat, writeFile } from 'fs/promises'
+import { homedir, tmpdir } from 'os'
+import { extname, isAbsolute, join, relative } from 'path'
 import { v4 as uuid } from 'uuid'
-import { getDataDir } from '../config'
+import { getDataDir, getSettings } from '../config'
 import type { ChatImageMediaType, ChatImagePayload, ChatImageRef } from '../../shared/types'
 
 const MAX_IMAGES = 4
 const MAX_BYTES = 4_500_000
+const MAX_ARTIFACT_BYTES = 25_000_000
 
 const EXT: Record<ChatImageMediaType, string> = {
   'image/png': 'png',
@@ -75,6 +77,69 @@ export async function loadChatImageData(
     if (buf.length > MAX_BYTES) return null
     const data = buf.toString('base64')
     return { mediaType, data, dataUrl: `data:${mediaType};base64,${data}` }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Resolve an assistant-linked local artifact without giving rendered model text
+ * arbitrary filesystem access. Symlinks are resolved before the allowlist
+ * check, and only ordinary files under user-facing/project roots are admitted.
+ */
+export async function resolveAllowedLocalArtifactPath(rawPath: string): Promise<string | null> {
+  const requested = String(rawPath || '').trim()
+  if (!requested || !isAbsolute(requested)) return null
+
+  let actual: string
+  try {
+    actual = await realpath(requested)
+    if (!(await stat(actual)).isFile()) return null
+  } catch {
+    return null
+  }
+
+  const configuredProject = getSettings().projectFolder?.trim()
+  const roots = [
+    configuredProject,
+    getDataDir(),
+    join(homedir(), 'Documents'),
+    join(homedir(), 'Desktop'),
+    join(homedir(), 'Downloads'),
+    tmpdir()
+  ].filter((value): value is string => Boolean(value))
+
+  for (const root of roots) {
+    try {
+      const allowedRoot = await realpath(root)
+      const fromRoot = relative(allowedRoot, actual)
+      if (fromRoot === '' || (!fromRoot.startsWith('..') && !isAbsolute(fromRoot))) return actual
+    } catch {
+      // Missing optional roots are harmless.
+    }
+  }
+  return null
+}
+
+/** Load a safe local PNG/JPEG/GIF/WebP artifact for inline Comm Link display. */
+export async function loadLocalArtifactImageData(filePath: string): Promise<string | null> {
+  const actual = await resolveAllowedLocalArtifactPath(filePath)
+  if (!actual) return null
+  const mediaType: ChatImageMediaType | null =
+    extname(actual).toLowerCase() === '.png'
+      ? 'image/png'
+      : /\.jpe?g$/i.test(actual)
+        ? 'image/jpeg'
+        : extname(actual).toLowerCase() === '.gif'
+          ? 'image/gif'
+          : extname(actual).toLowerCase() === '.webp'
+            ? 'image/webp'
+            : null
+  if (!mediaType) return null
+  try {
+    const bytes = await readFile(actual)
+    if (!bytes.length || bytes.length > MAX_ARTIFACT_BYTES) return null
+    return `data:${mediaType};base64,${bytes.toString('base64')}`
   } catch {
     return null
   }

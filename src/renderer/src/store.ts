@@ -32,7 +32,11 @@ interface AlbertState {
   codexProgress: string
   /** Unified diff Codex has produced so far this turn. */
   codexDiff: string
+  selectedMemoryId: string | null
+  memoryEditRequested: boolean
   setPanel: (panel: PanelId) => void
+  setSelectedMemoryId: (id: string | null) => void
+  setMemoryEditRequested: (edit: boolean) => void
   setSettings: (settings: AlbertSettings) => void
   setMessages: (messages: ChatMessage[]) => void
   appendMessage: (message: ChatMessage) => void
@@ -71,7 +75,11 @@ export const useAlbertStore = create<AlbertState>((set) => ({
   codexPlan: [],
   codexProgress: '',
   codexDiff: '',
+  selectedMemoryId: null,
+  memoryEditRequested: false,
   setPanel: (panel) => set({ panel }),
+  setSelectedMemoryId: (selectedMemoryId) => set({ selectedMemoryId }),
+  setMemoryEditRequested: (memoryEditRequested) => set({ memoryEditRequested }),
   setSettings: (settings) => set({ settings }),
   setMessages: (messages) => set({ messages }),
   appendMessage: (message) =>

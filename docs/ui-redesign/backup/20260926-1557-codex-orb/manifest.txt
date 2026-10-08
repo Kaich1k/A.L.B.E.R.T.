@@ -1,0 +1,74 @@
+Prepared orb/layout corrections; preserve Classic archive.
+New files: src/renderer/src/chat/sourceNotes.ts, scripts/source-notes.test.mjs, docs/ui-redesign/references/
+ M mobile/src/lib/voiceCommands.ts
+ M mobile/src/lib/voiceReliability.ts
+ M package.json
+ M scripts/archive-app.sh
+ M scripts/codex-reliability.test.mjs
+ M scripts/interface-reliability.test.mjs
+ M scripts/speech-text.test.mjs
+ M scripts/voice-reliability.test.mjs
+ M src/main/agent/orchestrator.ts
+ M src/main/agent/prompt.ts
+ M src/main/codex/models.ts
+ M src/main/codex/service.ts
+ M src/main/computer/tabs.ts
+ M src/main/config.ts
+ M src/main/hud/miniHud.ts
+ M src/main/index.ts
+ M src/main/ipc/handlers.ts
+ M src/main/memory/db.ts
+ M src/main/memory/service.ts
+ M src/main/tools/desktop.ts
+ M src/main/tools/registry.ts
+ M src/main/voice/kokoro.ts
+ M src/main/voice/whisper-worker.cjs
+ M src/preload/index.ts
+ M src/renderer/src/App.tsx
+ M src/renderer/src/HudApp.tsx
+ M src/renderer/src/components/ActivityPanel.tsx
+ M src/renderer/src/components/AmbientHud.tsx
+ M src/renderer/src/components/ConversationPanel.tsx
+ M src/renderer/src/components/MemoryPanel.tsx
+ M src/renderer/src/components/SettingsPanel.tsx
+ M src/renderer/src/components/Sidebar.tsx
+ M src/renderer/src/components/StartupSequence.tsx
+ M src/renderer/src/main.tsx
+ M src/renderer/src/store.ts
+ M src/renderer/src/styles/global.css
+ M src/renderer/src/styles/startup-sequence.css
+ M src/renderer/src/voice/claudeVoiceSession.ts
+ M src/renderer/src/voice/tts.ts
+ M src/renderer/src/voice/voiceCommands.ts
+ M src/renderer/src/voice/wakeWord.ts
+ M src/shared/api.ts
+ M src/shared/brainRouting.ts
+ M src/shared/hudWork.ts
+ M src/shared/ipc.ts
+ M src/shared/memoryGraph.ts
+ M src/shared/speechText.ts
+ M src/shared/types.ts
+ M src/shared/voiceCommands.ts
+ M src/shared/voiceGate.ts
+?? docs/ui-redesign/
+?? scripts/computer-control.test.mjs
+?? scripts/draft-images.test.mjs
+?? scripts/source-notes.test.mjs
+?? scripts/turn-interrupt.test.mjs
+?? src/main/agent/stopWork.ts
+?? src/main/agent/turnControl.ts
+?? src/main/computer/automation.ts
+?? src/main/computer/graph.ts
+?? src/main/computer/outlook.ts
+?? src/main/computer/runIntent.ts
+?? src/main/system/
+?? src/main/tools/control.ts
+?? src/main/tools/outlook.ts
+?? src/renderer/src/chat/
+?? src/renderer/src/components/FilamentOrb.tsx
+?? src/renderer/src/components/WorkshopHome.tsx
+?? src/renderer/src/styles/workshop.css
+?? src/shared/buildMarker.ts
+?? src/shared/codexModels.ts
+?? src/shared/computerIntent.ts
+?? src/shared/redact.ts

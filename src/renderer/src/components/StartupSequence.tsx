@@ -1,63 +1,22 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { FilamentOrb } from './FilamentOrb'
 import '../styles/startup-sequence.css'
 
 const DEFAULT_STORAGE_KEY = 'albert.startup-sequence.seen.v1'
 
-interface StartupStage {
-  code: string
-  label: string
-  detail: string
-  progress: number
+interface StartupOptions {
+  enabled: boolean
+  performanceMode?: boolean
+  oncePerSession?: boolean
+  storageKey?: string
+  force?: boolean
+  onStart?: () => void
+  onComplete?: () => void
 }
 
-const STARTUP_STAGES: readonly StartupStage[] = [
-  {
-    code: 'SYS.01',
-    label: 'Interface shell',
-    detail: 'Local renderer initialized',
-    progress: 16
-  },
-  {
-    code: 'CORE.02',
-    label: 'Cognitive core',
-    detail: 'Routing matrix inspected',
-    progress: 38
-  },
-  {
-    code: 'MEM.03',
-    label: 'Memory matrix',
-    detail: 'Local context index mounted',
-    progress: 62
-  },
-  {
-    code: 'OPS.04',
-    label: 'Voice & operations',
-    detail: 'Interfaces standing by',
-    progress: 84
-  },
-  {
-    code: 'READY',
-    label: 'Interface ready',
-    detail: 'Standing by',
-    progress: 100
-  }
-]
-
-export interface StartupSequenceProps {
-  /** Called after the overlay has fully handed control to the application. */
-  onComplete?: () => void
-  /** Replays the sequence even if it has already run in this renderer session. */
-  force?: boolean
-  /** Defaults to once per session. Set false when previewing the sequence. */
-  oncePerSession?: boolean
-  /** Override the sessionStorage key when embedding more than one sequence. */
-  storageKey?: string
-  /** Uses a shorter, lower-GPU sequence. Defaults to the body `perf-mode` class. */
-  performanceMode?: boolean
-  /** Optional name used in the final time-aware greeting. */
-  operatorName?: string
-  /** Whether at least one cognitive provider route is configured. */
-  brainConfigured?: boolean
+export interface StartupPlayback {
+  active: boolean
+  finish: () => void
 }
 
 function hasPlayed(storageKey: string): boolean {
@@ -72,246 +31,166 @@ function markPlayed(storageKey: string): void {
   try {
     window.sessionStorage.setItem(storageKey, '1')
   } catch {
-    // Storage can be disabled without preventing startup.
+    // A blocked storage area must not block the interface.
   }
-}
-
-function getGreeting(operatorName?: string): string {
-  const hour = new Date().getHours()
-  const salutation = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
-  return operatorName?.trim() ? `${salutation}, ${operatorName.trim()}.` : `${salutation}.`
 }
 
 function useReducedMotion(): boolean {
   const [reduced, setReduced] = useState(() =>
     window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
   )
-
   useEffect(() => {
-    const query = window.matchMedia?.('(prefers-reduced-motion: reduce)')
-    if (!query) return
-
-    const update = (): void => setReduced(query.matches)
-    query.addEventListener('change', update)
-    return () => query.removeEventListener('change', update)
+    const media = window.matchMedia?.('(prefers-reduced-motion: reduce)')
+    if (!media) return
+    const update = (): void => setReduced(media.matches)
+    media.addEventListener('change', update)
+    return () => media.removeEventListener('change', update)
   }, [])
-
   return reduced
 }
 
-/**
- * Full-window, once-per-session startup presentation for A.L.B.E.R.T.
- *
- * The component owns no application state and can be mounted next to the app shell.
- * Escape or the visible Skip control immediately begins the handoff.
- */
-export function StartupSequence({
-  onComplete,
-  force = false,
-  oncePerSession = true,
-  storageKey = DEFAULT_STORAGE_KEY,
-  performanceMode,
-  operatorName,
-  brainConfigured = false
-}: StartupSequenceProps): React.JSX.Element | null {
-  const [visible, setVisible] = useState(
-    () => force || !oncePerSession || !hasPlayed(storageKey)
-  )
-  const [activeStage, setActiveStage] = useState(0)
-  const [leaving, setLeaving] = useState(false)
-  const leavingRef = useRef(false)
-  const skipRef = useRef<HTMLButtonElement>(null)
-  const previousFocusRef = useRef<HTMLElement | null>(null)
+/** Visual introduction only. Actual readiness and provider state come from the app. */
+export function useStartupSequence(options: StartupOptions): StartupPlayback {
+  const {
+    enabled,
+    performanceMode = false,
+    oncePerSession = true,
+    storageKey = DEFAULT_STORAGE_KEY,
+    force = false
+  } = options
+  const optionsRef = useRef(options)
+  optionsRef.current = options
+  const [active, setActive] = useState(false)
+  const [run, setRun] = useState(0)
+  const activeRef = useRef(false)
   const notifiedRef = useRef(false)
-  const onCompleteRef = useRef(onComplete)
+  const attemptedKeyRef = useRef<string | null>(null)
   const reducedMotion = useReducedMotion()
-
-  onCompleteRef.current = onComplete
-
-  useEffect(() => {
-    const replay = (): void => {
-      leavingRef.current = false
-      notifiedRef.current = false
-      setActiveStage(0)
-      setLeaving(false)
-      setVisible(true)
-    }
-    window.addEventListener('albert:replay-startup', replay)
-    return () => window.removeEventListener('albert:replay-startup', replay)
-  }, [])
-
-  const lowPower =
-    performanceMode ??
-    (typeof document !== 'undefined' && document.body.classList.contains('perf-mode'))
-  const greeting = useMemo(() => getGreeting(operatorName), [operatorName])
-  const stage = STARTUP_STAGES[activeStage]
 
   const notifyComplete = useCallback((): void => {
     if (notifiedRef.current) return
     notifiedRef.current = true
-    onCompleteRef.current?.()
+    optionsRef.current.onComplete?.()
   }, [])
 
   const finish = useCallback((): void => {
-    if (leavingRef.current) return
-    leavingRef.current = true
+    if (!activeRef.current) return
+    activeRef.current = false
     if (oncePerSession) markPlayed(storageKey)
-    setActiveStage(STARTUP_STAGES.length - 1)
-    setLeaving(true)
-  }, [oncePerSession, storageKey])
+    setActive(false)
+    notifyComplete()
+  }, [notifyComplete, oncePerSession, storageKey])
 
-  // A previously completed session should still notify consumers that startup is clear.
+  const begin = useCallback((): void => {
+    if (!optionsRef.current.enabled) return
+    notifiedRef.current = false
+    activeRef.current = true
+    setRun((value) => value + 1)
+    setActive(true)
+    optionsRef.current.onStart?.()
+  }, [])
+
   useEffect(() => {
-    if (!visible) notifyComplete()
-  }, [notifyComplete, visible])
-
-  useEffect(() => {
-    if (!visible) return
-
-    previousFocusRef.current =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const focusTimer = window.setTimeout(() => skipRef.current?.focus(), 40)
-
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        finish()
-        return
-      }
-
-      // The overlay is a modal with one control; keep keyboard focus inside it.
-      if (event.key === 'Tab') {
-        event.preventDefault()
-        skipRef.current?.focus()
-      }
+    if (!enabled) {
+      finish()
+      return
     }
+    // StrictMode's effect replay must not launch the same introduction twice.
+    if (attemptedKeyRef.current === storageKey) return
+    attemptedKeyRef.current = storageKey
+    if (force || !oncePerSession || !hasPlayed(storageKey)) begin()
+    else notifyComplete()
+  }, [begin, enabled, finish, force, notifyComplete, oncePerSession, storageKey])
 
-    document.addEventListener('keydown', handleKeyDown)
+  useEffect(() => {
+    const replay = (): void => begin()
+    window.addEventListener('albert:replay-startup', replay)
+    return () => window.removeEventListener('albert:replay-startup', replay)
+  }, [begin])
+
+  useEffect(() => {
+    if (!active) return
+    // No progress meter or simulated initialization stages: this is a brief animation.
+    const timer = window.setTimeout(finish, reducedMotion ? 250 : performanceMode ? 1180 : 2100)
+    const escape = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') finish()
+    }
+    document.addEventListener('keydown', escape)
     return () => {
-      window.clearTimeout(focusTimer)
-      document.removeEventListener('keydown', handleKeyDown)
+      window.clearTimeout(timer)
+      document.removeEventListener('keydown', escape)
     }
-  }, [finish, visible])
+  }, [active, finish, performanceMode, reducedMotion, run])
 
-  useEffect(() => {
-    if (!visible || leaving) return
+  return { active: enabled && active, finish }
+}
 
-    if (reducedMotion) {
-      setActiveStage(STARTUP_STAGES.length - 1)
-      const timer = window.setTimeout(finish, 650)
-      return () => window.clearTimeout(timer)
-    }
-
-    // Performance mode preserves the story beat while spending less time animating.
-    const marks = lowPower ? [0, 220, 440, 660, 880] : [0, 410, 830, 1260, 1700]
-    const timers = marks.map((delay, index) =>
-      window.setTimeout(() => setActiveStage(index), delay)
-    )
-    timers.push(window.setTimeout(finish, lowPower ? 1180 : 2100))
-
-    return () => timers.forEach((timer) => window.clearTimeout(timer))
-  }, [finish, leaving, lowPower, reducedMotion, visible])
-
-  useEffect(() => {
-    if (!visible || !leaving) return
-    const exitDelay = reducedMotion ? 80 : lowPower ? 220 : 420
-    const timer = window.setTimeout(() => {
-      setVisible(false)
-      previousFocusRef.current?.focus()
-      notifyComplete()
-    }, exitDelay)
-    return () => window.clearTimeout(timer)
-  }, [leaving, lowPower, notifyComplete, reducedMotion, visible])
-
-  if (!visible) return null
-
+/** Inline controls for the existing Hub orb; this component never creates an orb. */
+export function StartupDockControls({ playback }: { playback: StartupPlayback }): React.JSX.Element | null {
+  if (!playback.active) return null
   return (
-    <section
-      className={`startup-sequence${leaving ? ' startup-sequence--leaving' : ''}${lowPower ? ' startup-sequence--low-power' : ''}`}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="startup-title"
-      aria-describedby="startup-status"
-    >
-      <div className="startup-sequence__ambient" aria-hidden="true">
-        <span className="startup-sequence__beam startup-sequence__beam--one" />
-        <span className="startup-sequence__beam startup-sequence__beam--two" />
-        <span className="startup-sequence__horizon" />
-      </div>
+    <div className="startup-inline" role="group" aria-label="Startup animation">
+      <span role="status">Starting Albert</span>
+      <button type="button" className="startup-inline__skip" onClick={playback.finish}>
+        Skip
+      </button>
+    </div>
+  )
+}
 
-      <header className="startup-sequence__header">
-        <div className="startup-sequence__identity">
-          <span className="startup-sequence__eyebrow">Advanced intelligence interface</span>
-          <strong>A.L.B.E.R.T.</strong>
-        </div>
-        <div className="startup-sequence__sequence-id" aria-hidden="true">
-          <span>BOOT SEQUENCE</span>
-          <b>{String(activeStage + 1).padStart(2, '0')} / 05</b>
-        </div>
-      </header>
+export interface StartupSequenceProps {
+  onComplete?: () => void
+  force?: boolean
+  oncePerSession?: boolean
+  storageKey?: string
+  performanceMode?: boolean
+}
 
-      <div className="startup-sequence__workspace">
-        <aside className="startup-sequence__telemetry startup-sequence__telemetry--left" aria-hidden="true">
-          <span>PROCESS</span>
-          <b>DEVICE</b>
-          <span>SESSION</span>
-          <b>EPHEMERAL</b>
-          <span>RENDERER</span>
-          <b>INITIALIZED</b>
-        </aside>
+/** Classic retains its separate presentation. Workshop uses the real Hub and hook above. */
+export function StartupSequence(props: StartupSequenceProps): React.JSX.Element | null {
+  const playback = useStartupSequence({ ...props, enabled: true })
+  const skipRef = useRef<HTMLButtonElement>(null)
+  const previousFocusRef = useRef<HTMLElement | null>(null)
 
-        <div className="startup-sequence__core-wrap" aria-hidden="true">
-          <div className="startup-sequence__reticle startup-sequence__reticle--outer" />
-          <div className="startup-sequence__reticle startup-sequence__reticle--middle" />
-          <div className="startup-sequence__reticle startup-sequence__reticle--inner" />
-          <div className="startup-sequence__orbit startup-sequence__orbit--one">
-            <i />
+  useEffect(() => {
+    if (!playback.active) return
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const timer = window.setTimeout(() => skipRef.current?.focus(), 40)
+    const trapTab = (event: KeyboardEvent): void => {
+      if (event.key !== 'Tab') return
+      event.preventDefault()
+      skipRef.current?.focus()
+    }
+    document.addEventListener('keydown', trapTab)
+    return () => {
+      window.clearTimeout(timer)
+      document.removeEventListener('keydown', trapTab)
+      const previous = previousFocusRef.current
+      if (previous?.isConnected) previous.focus()
+    }
+  }, [playback.active])
+
+  if (!playback.active) return null
+  return (
+    <section className="startup-sequence" role="dialog" aria-modal="true" aria-label="Albert startup animation">
+      <div className="startup-dock" aria-hidden="true">
+        <div className="workshop-home startup-home">
+          <div />
+          <div className="workshop-hub">
+            <div className="workshop-ring">
+              <div className="workshop-orb-dock">
+                <FilamentOrb variant="hub" mood="connecting" label="Albert startup animation" />
+              </div>
+            </div>
+            <div className="startup-voice-spacer" />
+            <div className="startup-chip-spacer" />
           </div>
-          <div className="startup-sequence__orbit startup-sequence__orbit--two">
-            <i />
-          </div>
-          <div className="startup-sequence__core">
-            <span className="startup-sequence__core-pulse" />
-          </div>
-          <span className="startup-sequence__crosshair startup-sequence__crosshair--x" />
-          <span className="startup-sequence__crosshair startup-sequence__crosshair--y" />
-        </div>
-
-        <aside className="startup-sequence__telemetry startup-sequence__telemetry--right" aria-hidden="true">
-          <span>SEQUENCE</span>
-          <b>{stage.progress}%</b>
-          <span>MEMORY</span>
-          <b>{activeStage >= 2 ? 'SYNCED' : 'INDEXING'}</b>
-          <span>VOICE MATRIX</span>
-          <b>{activeStage >= 3 ? 'READY' : 'STANDBY'}</b>
-        </aside>
-      </div>
-
-      <div className="startup-sequence__readout">
-        <div className="startup-sequence__stage-code" aria-hidden="true">{stage.code}</div>
-        <div className="startup-sequence__copy" id="startup-status" aria-live="polite" aria-atomic="true">
-          <h1 id="startup-title">{activeStage === STARTUP_STAGES.length - 1 && !brainConfigured ? 'Core awaiting provider' : stage.label}</h1>
-          <p>{activeStage === STARTUP_STAGES.length - 1 ? `${greeting} ${brainConfigured ? 'Standing by.' : 'Systems access is available for configuration.'}` : stage.detail}</p>
-        </div>
-        <div className="startup-sequence__progress" aria-hidden="true">
-          <span style={{ width: `${stage.progress}%` }} />
-        </div>
-        <div className="startup-sequence__stage-dots" aria-hidden="true">
-          {STARTUP_STAGES.map((item, index) => (
-            <span
-              key={item.code}
-              className={index <= activeStage ? 'is-active' : undefined}
-            />
-          ))}
+          <div />
         </div>
       </div>
-
-      <footer className="startup-sequence__footer">
-        <span aria-hidden="true">PERSONAL OPERATING SYSTEM // PRIVATE BY DESIGN</span>
-        <button ref={skipRef} type="button" onClick={finish} aria-label="Skip startup sequence">
-          Skip intro <kbd>Esc</kbd>
-        </button>
-      </footer>
+      <button ref={skipRef} type="button" className="startup-skip" onClick={playback.finish}>
+        Skip
+      </button>
     </section>
   )
 }

@@ -3,7 +3,11 @@ import { IpcChannels } from '../../shared/ipc'
 import type { ChatSendPayload } from '../../shared/types'
 import { getSettings, setSettings } from '../config'
 import { runChatTurn } from '../agent/orchestrator'
-import { loadChatImageData } from '../chat/images'
+import {
+  loadChatImageData,
+  loadLocalArtifactImageData,
+  resolveAllowedLocalArtifactPath
+} from '../chat/images'
 import {
   addMessage,
   clearActivity,
@@ -24,7 +28,12 @@ import {
   startCompanionServer
 } from '../companion/server'
 import { registerComputerIpc } from '../computer/tabs'
+import { describeOutlookAccess } from '../computer/outlook'
+import { beginOutlookGraphLogin, finishOutlookGraphLogin } from '../computer/graph'
+import { readPermissionSnapshot } from '../system/permissions'
+import { desktopHelperPath, requestDesktopPermission } from '../computer/nativeDesktop'
 import {
+  applySelectedCodexModel,
   cancelCodexLogin,
   connectCodex,
   getCodexStatus,
@@ -37,7 +46,8 @@ import {
 } from '../codex/service'
 import { importChatGptExport, scanChatGptExport } from '../chatgptImport'
 import { synthesizeElevenLabs } from '../voice/elevenlabs'
-import { synthesizeKokoro, warmKokoro } from '../voice/kokoro'
+import { cancelKokoroSynthesis, synthesizeKokoro, warmKokoro } from '../voice/kokoro'
+import { stopCurrentWork } from '../agent/stopWork'
 import { probeOllama, pullOllamaModel } from '../ollama/client'
 import { probeGroq } from '../groq/client'
 import { probeGemini } from '../gemini/client'
@@ -77,6 +87,8 @@ import {
 import {
   setAmbientHud,
   setHudRoam,
+  setHudExpanded,
+  returnHudToDock,
   dockHud,
   releaseHudDock,
   isHudDocked,
@@ -166,6 +178,11 @@ export function registerIpcHandlers(
     dragAmbientHud(payload)
   })
   ipcMain.handle(IpcChannels.hudRoamSet, (_e, enabled: boolean) => setHudRoam(Boolean(enabled)))
+  ipcMain.handle(IpcChannels.hudExpand, (_e, expanded: boolean) => setHudExpanded(Boolean(expanded)))
+  ipcMain.handle(IpcChannels.hudReturn, () => {
+    returnHudToDock()
+    return true
+  })
   ipcMain.handle(
     IpcChannels.hudDock,
     (
@@ -201,7 +218,7 @@ export function registerIpcHandlers(
     return true
   })
 
-  ipcMain.handle(IpcChannels.windowShow, () => {
+  ipcMain.handle(IpcChannels.windowShow, (_e, panel?: string) => {
     const win = ensureWindow?.() ?? getWindow()
     if (!win || win.isDestroyed()) return false
     if (win.isMinimized()) win.restore()
@@ -212,6 +229,10 @@ export function registerIpcHandlers(
       app.focus({ steal: true })
     }
     win.moveTop()
+    const allowed = new Set(['home', 'conversation', 'missions', 'memory', 'activity', 'settings'])
+    if (panel && allowed.has(panel)) {
+      win.webContents.send('albert:chat:event', { type: 'open_panel', panel })
+    }
     return true
   })
 
@@ -236,7 +257,11 @@ export function registerIpcHandlers(
   /** Open the relevant macOS Privacy & Security pane for desktop automation. */
   ipcMain.handle(
     IpcChannels.openPrivacyPane,
-    async (_e, pane: 'accessibility' | 'screen' | 'automation' | 'microphone') => {
+    async (_e, pane: 'accessibility' | 'screen' | 'automation' | 'microphone' | 'desktop-controller') => {
+      if (pane === 'desktop-controller') {
+        shell.showItemInFolder(desktopHelperPath())
+        return true
+      }
       const urls: Record<typeof pane, string[]> = {
         accessibility: [
           'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
@@ -272,6 +297,21 @@ export function registerIpcHandlers(
     }
   )
 
+  // Separate from status/open-pane reads: prompts require an explicit setup click.
+  ipcMain.handle(IpcChannels.requestPermission, async (_e, kind: unknown) => {
+    if (kind !== 'accessibility' && kind !== 'screen') throw new Error('Unsupported permission request.')
+    const result = await requestDesktopPermission(kind)
+    return { ok: !result.requestError, message: String(result.requestError || result.setup || 'Check macOS permission settings, then restart ALBERT.') }
+  })
+
+  ipcMain.handle(IpcChannels.permissionStatus, async () => {
+    const outlook = await describeOutlookAccess()
+    return readPermissionSnapshot(outlook)
+  })
+
+  ipcMain.handle(IpcChannels.outlookGraphBegin, () => beginOutlookGraphLogin())
+  ipcMain.handle(IpcChannels.outlookGraphFinish, () => finishOutlookGraphLogin())
+
   ipcMain.handle(IpcChannels.settingsGet, () => {
     const settings = getSettings()
     // Mask key slightly for UI display if desired — still return full for local settings edit
@@ -279,6 +319,7 @@ export function registerIpcHandlers(
   })
 
   ipcMain.handle(IpcChannels.settingsSet, async (_e, partial: Partial<AlbertSettings>) => {
+    const previousModel = getSettings().codexModel
     const next = setSettings(partial)
     if (
       partial.companionEnabled !== undefined ||
@@ -293,7 +334,14 @@ export function registerIpcHandlers(
     if (partial.ambientHudRoam !== undefined) {
       setHudRoam(next.ambientHudRoam !== false)
     }
-    return { ...next, ...getSettings() }
+    if (typeof partial.codexModel === 'string' && partial.codexModel !== previousModel) {
+      await applySelectedCodexModel(partial.codexModel, previousModel)
+    }
+    const saved = getSettings()
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send('albert:chat:event', { type: 'settings', settings: saved })
+    }
+    return saved
   })
 
   ipcMain.handle(IpcChannels.chatHistory, () => getRecentMessages(200))
@@ -333,6 +381,16 @@ export function registerIpcHandlers(
   ipcMain.handle(IpcChannels.chatImageData, async (_e, fileName: string) => {
     const loaded = await loadChatImageData(String(fileName || ''))
     return loaded?.dataUrl ?? null
+  })
+
+  ipcMain.handle(IpcChannels.chatArtifactImageData, async (_e, filePath: string) =>
+    loadLocalArtifactImageData(String(filePath || ''))
+  )
+
+  ipcMain.handle(IpcChannels.chatArtifactOpen, async (_e, filePath: string) => {
+    const allowed = await resolveAllowedLocalArtifactPath(String(filePath || ''))
+    if (!allowed) return false
+    return (await shell.openPath(allowed)) === ''
   })
 
   ipcMain.handle(IpcChannels.memoryList, () => listMemories())
@@ -433,14 +491,17 @@ export function registerIpcHandlers(
 
   ipcMain.handle(IpcChannels.ttsKokoroWarm, async () => {
     try {
-      warmKokoro()
-      // Force the load promise to settle (download + init)
-      await synthesizeKokoro('Ready.', {})
+      await warmKokoro()
       return true
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       throw new Error(message)
     }
+  })
+
+  ipcMain.handle(IpcChannels.ttsKokoroCancel, () => {
+    cancelKokoroSynthesis()
+    return true
   })
 
   // Push Codex status (sign-in, allowance, faults) so the HUD stays live
@@ -456,6 +517,7 @@ export function registerIpcHandlers(
   ipcMain.handle(IpcChannels.codexLogout, () => logoutCodexAccount())
   ipcMain.handle(IpcChannels.codexRateLimits, () => refreshCodexAllowance())
   ipcMain.handle(IpcChannels.codexInterrupt, () => interruptCodexTurn())
+  ipcMain.handle(IpcChannels.workStop, () => stopCurrentWork())
   ipcMain.handle(IpcChannels.codexNewThread, () => {
     newCodexThread()
     return getCodexStatus()

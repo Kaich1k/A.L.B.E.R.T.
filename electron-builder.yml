@@ -23,6 +23,9 @@ asarUnpack:
   - '**/@huggingface/transformers/**'
   - '**/kokoro-js/**'
   - '**/phonemizer/**'
+extraFiles:
+  - from: resources/albert-desktop-helper
+    to: MacOS/albert-desktop-helper
 extraResources:
   - from: resources/icon.png
     to: icon.png
@@ -39,7 +42,7 @@ mac:
     - target: dmg
       arch:
         - arm64
-  # Unsigned local builds (fine for personal use). First open: right-click → Open.
+  # Local signing is performed after packaging, including all native helpers.
   identity: null
   hardenedRuntime: false
   gatekeeperAssess: false
@@ -50,4 +53,5 @@ mac:
     NSAppleEventsUsageDescription: A.L.B.E.R.T. needs Automation access to control apps and browser tabs.
     CFBundleDisplayName: A.L.B.E.R.T.
     CFBundleName: ALBERT
+afterPack: scripts/sign-local-mac.cjs
 npmRebuild: true

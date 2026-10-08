@@ -5,6 +5,7 @@ import App from './App'
 import ComputerApp from './ComputerApp'
 import HudApp from './HudApp'
 import './styles/global.css'
+import './styles/workshop.css'
 
 const hash = window.location.hash.replace(/^#/, '')
 const isComputer = hash === 'computer' || hash.startsWith('computer/')

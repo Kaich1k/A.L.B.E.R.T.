@@ -1,0 +1,9 @@
+Snapshot before 27 September orb, startup and panel refinement.
+src/renderer/src/components/WorkshopHome.tsx
+src/renderer/src/components/FilamentOrb.tsx
+src/renderer/src/components/StartupSequence.tsx
+src/renderer/src/components/SettingsPanel.tsx
+src/renderer/src/App.tsx
+src/renderer/src/styles/workshop.css
+src/renderer/src/components/WorkshopConnections.tsx
+WorkshopConnections.tsx is new in this pass. Classic archive and earlier full app backup retained.

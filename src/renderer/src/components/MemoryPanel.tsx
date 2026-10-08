@@ -1,19 +1,29 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { APP_NAME } from '../../../shared/brand'
-import { buildMemoryGraph } from '../../../shared/memoryGraph'
+import { buildMemoryGraph, MEMORY_GRAPH_VIEW, memoryLabel } from '../../../shared/memoryGraph'
 import type { MemoryFact, MemoryGraphNode, MemoryKind } from '../../../shared/types'
 import { useAlbertStore } from '../store'
 
 type MemoryView = 'graph' | 'list'
 
+let memoryHandoff: { id: string; edit: boolean } | null = null
+/** One-shot: scroll/focus this editor after it mounts. Later refreshes must not reuse it. */
+let memoryRevealId: string | null = null
+
 export function MemoryPanel(): React.JSX.Element {
   const memories = useAlbertStore((s) => s.memories)
   const setMemories = useAlbertStore((s) => s.setMemories)
+  const requestedId = useAlbertStore((s) => s.selectedMemoryId)
+  const editRequested = useAlbertStore((s) => s.memoryEditRequested)
+  const setSelectedMemoryId = useAlbertStore((s) => s.setSelectedMemoryId)
+  const setMemoryEditRequested = useAlbertStore((s) => s.setMemoryEditRequested)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [view, setView] = useState<MemoryView>('graph')
   const [query, setQuery] = useState('')
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(requestedId)
+  const editorRowRef = useRef<HTMLElement | null>(null)
+  const editorRef = useRef<HTMLTextAreaElement | null>(null)
 
   async function refresh(): Promise<void> {
     setMemories(await window.albert.listMemories())
@@ -23,6 +33,37 @@ export function MemoryPanel(): React.JSX.Element {
     void refresh()
     return window.albert.onMemoryChanged(() => void refresh())
   }, [])
+
+  useEffect(() => {
+    if (!requestedId) return
+    memoryHandoff = { id: requestedId, edit: editRequested || Boolean(memoryHandoff?.edit) }
+    setSelectedId(requestedId)
+    setSelectedMemoryId(null)
+  }, [requestedId, editRequested, setSelectedMemoryId])
+
+  useEffect(() => {
+    if (!memoryHandoff?.edit) return
+    const match = memories.find((item) => item.id === memoryHandoff!.id)
+    if (!match) return
+    setSelectedId(match.id)
+    setEditingId(match.id)
+    setDraft(match.content)
+    setView('list')
+    memoryRevealId = match.id
+    memoryHandoff = { id: match.id, edit: false }
+    setMemoryEditRequested(false)
+  }, [memories, setMemoryEditRequested])
+
+  useLayoutEffect(() => {
+    if (view !== 'list' || !editingId || memoryRevealId !== editingId) return
+    memoryRevealId = null
+    const row =
+      editorRowRef.current ||
+      document.querySelector(`[data-memory-id="${CSS.escape(editingId)}"]`)
+    row?.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' })
+    const editor = editorRef.current || row?.querySelector('textarea')
+    editor?.focus({ preventScroll: true })
+  }, [editingId, view])
 
   async function onDelete(id: string): Promise<void> {
     await window.albert.deleteMemory(id)
@@ -89,7 +130,10 @@ export function MemoryPanel(): React.JSX.Element {
         <MemoryConstellation
           memories={visible}
           selected={selected}
-          select={(memory) => setSelectedId(memory.id)}
+          select={(memory) => {
+            setSelectedId(memory.id)
+            setSelectedMemoryId(memory.id)
+          }}
         />
       ) : (
         <div className="list">
@@ -99,7 +143,12 @@ export function MemoryPanel(): React.JSX.Element {
             </div>
           ) : (
             visible.map((m) => (
-              <article key={m.id} className={`list-item ${selected?.id === m.id ? 'selected' : ''}`}>
+              <article
+                key={m.id}
+                data-memory-id={m.id}
+                ref={m.id === editingId ? editorRowRef : undefined}
+                className={`list-item ${selected?.id === m.id ? 'selected' : ''}`}
+              >
                 <header>
                   <span className="meta">
                     {m.category} · {new Date(m.updatedAt).toLocaleString()}
@@ -111,6 +160,7 @@ export function MemoryPanel(): React.JSX.Element {
                         setEditingId(m.id)
                         setDraft(m.content)
                         setSelectedId(m.id)
+                        setSelectedMemoryId(m.id)
                       }}
                     >
                       Edit
@@ -128,6 +178,7 @@ export function MemoryPanel(): React.JSX.Element {
                 {editingId === m.id ? (
                   <div style={{ display: 'grid', gap: 8 }}>
                     <textarea
+                      ref={editorRef}
                       value={draft}
                       onChange={(e) => setDraft(e.target.value)}
                       rows={3}
@@ -192,7 +243,11 @@ function MemoryConstellation({
     <div className="memory-constellation">
       <div className="memory-map memory-graph-wrap" aria-label="Memory graph">
         {graph.nodes.length ? (
-          <svg className="memory-graph" viewBox="0 0 640 500" role="img">
+          <svg
+            className="memory-graph"
+            viewBox={`0 0 ${MEMORY_GRAPH_VIEW.width} ${MEMORY_GRAPH_VIEW.height}`}
+            role="img"
+          >
             {graph.edges.map((edge) => {
               const from = graph.nodes.find((node) => node.id === edge.from)
               const to = graph.nodes.find((node) => node.id === edge.to)
@@ -209,6 +264,11 @@ function MemoryConstellation({
                 />
               )
             })}
+            {columnHeaders(graph.nodes).map((header) => (
+              <text key={header.kind} className="memory-graph-kind" x={header.x} y={22} textAnchor="middle">
+                {header.kind}
+              </text>
+            ))}
             {graph.nodes.map((node) => (
               <MemoryGraphMark
                 key={node.id}
@@ -240,7 +300,7 @@ function MemoryConstellation({
             <div className="eyebrow">
               MEMORY INSPECTOR / {(selectedNode?.kind || selected.category || 'general').toUpperCase()}
             </div>
-            <h3>{(selected.content || 'Memory').split(/[.:\n]/)[0]}</h3>
+            <h3>{memoryLabel(selected.content || 'Memory', 80)}</h3>
             <p>{selected.content}</p>
             <dl>
               <div>
@@ -276,6 +336,14 @@ function MemoryConstellation({
   )
 }
 
+function columnHeaders(nodes: MemoryGraphNode[]): Array<{ kind: MemoryKind; x: number }> {
+  const seen = new Map<MemoryKind, number>()
+  for (const node of nodes) {
+    if (!seen.has(node.kind)) seen.set(node.kind, node.x)
+  }
+  return [...seen.entries()].map(([kind, x]) => ({ kind, x }))
+}
+
 function MemoryGraphMark({
   node,
   selected,
@@ -292,7 +360,7 @@ function MemoryGraphMark({
     <g className={`memory-node ${selected ? 'selected' : ''} ${linked ? 'linked' : ''}`} onClick={onSelect}>
       <circle cx={node.x} cy={node.y} r={radius + 6} fill="transparent" />
       <circle cx={node.x} cy={node.y} r={radius} fill={KIND_COLOR[node.kind]} />
-      <text x={node.x + 12} y={node.y + 4}>
+      <text x={node.x} y={node.y + 16} textAnchor="middle">
         {node.label}
       </text>
     </g>

@@ -1,0 +1,188 @@
+"""Build a native, editable MUSE base prototype; no assumed mounting holes.
+
+Run with FreeCAD's Python interpreter, or run this file as a FreeCAD macro.
+Only the BaseBody is exported to STEP/STL. Construction sketches are layout
+references, not manufactured features. Units are millimetres.
+"""
+
+import json
+import math
+import sys
+from pathlib import Path
+
+try:
+    import FreeCAD as App
+except ModuleNotFoundError:
+    sys.path.append('/Applications/FreeCAD.app/Contents/Resources/lib')
+    import FreeCAD as App
+
+import Part
+import Sketcher
+import MeshPart
+
+
+OUTPUT_DIR = Path(__file__).resolve().parent
+STEM = 'muse-bot-base-rev-a'
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+for suffix in ('.FCStd', '.step', '.stl', '-mesh.json', '-validation.json'):
+    if (OUTPUT_DIR / (STEM + suffix)).exists():
+        raise FileExistsError('Output already exists: ' + str(OUTPUT_DIR / (STEM + suffix)))
+
+doc = App.newDocument('MuseBaseRevA')
+doc.Label = 'MUSE base — Rev A — FIT PROTOTYPE'
+params = doc.addObject('App::FeaturePython', 'Parameters')
+params.Label = 'Base dimensions (mm) — edit these'
+for name, value, description in (
+    ('DeckLength', 250.0, 'Front-to-rear length; planning value, not hardware-verified.'),
+    ('DeckWidth', 220.0, 'Left-to-right width; planning value, not hardware-verified.'),
+    ('CornerRadius', 12.0, 'Equal corner radii in the base outline.'),
+    ('DeckThickness', 5.0, 'Thickness of the flat prototype plate.'),
+):
+    params.addProperty('App::PropertyLength', name, 'Base dimensions', description)
+    setattr(params, name, value)
+
+params.addProperty('App::PropertyStringList', 'DesignNotes', 'Read before printing')
+params.DesignNotes = [
+    'FIT PROTOTYPE only. No payload, stiffness, stability or print test has been performed.',
+    'Geometry follows the existing MB-BASE-001 Rev A planning sketch.',
+    'CAD origin is the virtual front-left bounding corner; +X is rearward, +Y is across the deck.',
+    'Z=0 is the bottom of the standalone plate; the drawing ground clearance is not part of this solid.',
+    'No mounting holes, caster/motor brackets, perimeter walls or display supports are manufactured here.',
+    'Reference envelopes are fixed Rev A layout sketches; they do not resize with the plate.',
+    'Measure actual brackets, caster, display bosses and printer bed before a production revision.',
+]
+
+body = doc.addObject('PartDesign::Body', 'BaseBody')
+body.Label = 'Printable base plate ONLY'
+sk = body.newObject('Sketcher::SketchObject', 'BaseOutline')
+sk.Label = 'Base outline — fully constrained'
+L, W, R = params.DeckLength.Value, params.DeckWidth.Value, params.CornerRadius.Value
+V = lambda x, y: App.Vector(x, y, 0)
+normal = App.Vector(0, 0, 1)
+sk.addGeometry([
+    Part.LineSegment(V(R, 0), V(L - R, 0)),
+    Part.ArcOfCircle(Part.Circle(V(L - R, R), normal, R), -math.pi / 2, 0),
+    Part.LineSegment(V(L, R), V(L, W - R)),
+    Part.ArcOfCircle(Part.Circle(V(L - R, W - R), normal, R), 0, math.pi / 2),
+    Part.LineSegment(V(L - R, W), V(R, W)),
+    Part.ArcOfCircle(Part.Circle(V(R, W - R), normal, R), math.pi / 2, math.pi),
+    Part.LineSegment(V(0, W - R), V(0, R)),
+    Part.ArcOfCircle(Part.Circle(V(R, R), normal, R), math.pi, 3 * math.pi / 2),
+], False)
+sk.addConstraint([Sketcher.Constraint('Tangent', i, 2, (i + 1) % 8, 1) for i in range(8)])
+sk.addConstraint([Sketcher.Constraint('Horizontal', i) for i in (0, 4)])
+sk.addConstraint([Sketcher.Constraint('Vertical', i) for i in (2, 6)])
+sk.addConstraint([Sketcher.Constraint('Equal', 1, i) for i in (3, 5, 7)])
+
+def dimension(name, constraint, expression):
+    index = sk.addConstraint(constraint)
+    sk.renameConstraint(index, name)
+    sk.setExpression('Constraints.' + name, expression)
+
+dimension('CornerRadius', Sketcher.Constraint('Radius', 1, R), 'Parameters.CornerRadius')
+dimension('FrontTangentX', Sketcher.Constraint('DistanceX', 0, 1, R), 'Parameters.CornerRadius')
+sk.addConstraint(Sketcher.Constraint('PointOnObject', 0, 1, -1))
+dimension('OverallLength', Sketcher.Constraint('DistanceX', 6, 1, 2, 1, L), 'Parameters.DeckLength')
+dimension('OverallWidth', Sketcher.Constraint('DistanceY', 0, 1, 4, 1, W), 'Parameters.DeckWidth')
+doc.recompute()
+assert sk.solve() == 0 and sk.FullyConstrained, 'Outline did not solve fully.'
+assert len(sk.Shape.Wires) == 1 and sk.Shape.Wires[0].isClosed(), 'Outline is not one closed wire.'
+
+pad = body.newObject('PartDesign::Pad', 'DeckPad')
+pad.Label = 'Deck thickness — 5 mm'
+pad.Profile = sk
+pad.setExpression('Length', 'Parameters.DeckThickness')
+body.Tip = pad
+doc.recompute()
+assert pad.Shape.isValid() and len(pad.Shape.Solids) == 1, 'Deck is not one valid solid.'
+
+refs = doc.addObject('App::DocumentObjectGroup', 'LayoutReferences')
+refs.Label = 'REFERENCE ONLY — open sketches to inspect'
+
+def reference(name, label, geometry, note):
+    item = doc.addObject('Sketcher::SketchObject', name)
+    item.Label = label
+    refs.addObject(item)
+    indices = item.addGeometry(geometry, True)
+    for index in indices:
+        item.addConstraint(Sketcher.Constraint('Block', index))
+    item.addProperty('App::PropertyString', 'PlanningNote', 'Reference only')
+    item.PlanningNote = note
+    item.Placement.Base.z = params.DeckThickness.Value
+    return item
+
+def rectangle(x, y, length, width):
+    points = [V(x, y), V(x + length, y), V(x + length, y + width), V(x, y + width)]
+    return [Part.LineSegment(points[i], points[(i + 1) % 4]) for i in range(4)]
+
+envelopes = [
+    ('UnoReserve', 'Uno R4 reserve — 75 × 60', 47, 18, 75, 60),
+    ('BatteryReserve', '4×AA holder reserve — 75 × 70', 72.5, 77, 75, 70),
+    ('DriverReserve', 'MDD3A reserve — 58 × 50', 60, 163, 58, 50),
+    ('PiReserve', 'Pi / cooler reserve — 95 × 65', 145, 77.5, 95, 65),
+    ('MotorLeftReserve', 'Left motor reserve — 25 × 69', 152.5, 0, 25, 69),
+    ('MotorRightReserve', 'Right motor reserve — 25 × 69', 152.5, 151, 25, 69),
+    ('FrontSensorReserve', 'Front sensor reserve — 18 × 13', 2, 103.5, 18, 13),
+    ('DisplayProjection', 'Display tilt projection — planning only', 195, 15.25, 41, 189.5),
+]
+for name, label, x, y, length, width in envelopes:
+    reference(name, label, rectangle(x, y, length, width),
+              'Fixed construction envelope from the Rev A planning drawing; NOT a mount-hole template.')
+
+reference('MechanicalDatums', 'Caster / axle / hinge / centreline — reference', [
+    Part.Circle(V(35, 110), normal, 16),
+    Part.LineSegment(V(165, -13), V(165, 233)),
+    Part.LineSegment(V(195, 15.25), V(195, 204.75)),
+    Part.LineSegment(V(0, 110), V(250, 110)),
+], 'Caster centre (35,110); axle X=165; hinge X=195. Heights and mounting patterns still require measurement.')
+doc.recompute()
+for item in refs.Group:
+    assert item.solve() == 0 and item.FullyConstrained, item.Name + ' is not constrained.'
+
+# Never initialise FreeCADGui from a standalone Python process. The preceding
+# probe crashed in the GUI/Python shutdown path; exports need no GUI at all.
+if App.GuiUp:
+    import FreeCADGui as Gui
+    sk.Visibility = False
+    for item in refs.Group:
+        item.Visibility = False
+    pad.ViewObject.ShapeColor = (0.16, 0.20, 0.24)
+    Gui.activeDocument().activeView().viewAxonometric()
+    Gui.activeDocument().activeView().fitAll()
+
+fcstd = OUTPUT_DIR / (STEM + '.FCStd')
+doc.saveAs(str(fcstd))
+Part.export([pad], str(OUTPUT_DIR / (STEM + '.step')))
+mesh = MeshPart.meshFromShape(Shape=pad.Shape, LinearDeflection=0.1,
+                              AngularDeflection=math.radians(5), Relative=False)
+assert mesh.isSolid(), 'Export mesh is not closed.'
+mesh.write(str(OUTPUT_DIR / (STEM + '.stl')))
+vertices, facets = mesh.Topology
+(OUTPUT_DIR / (STEM + '-mesh.json')).write_text(json.dumps({
+    'vertices': [[point.x, point.y, point.z] for point in vertices],
+    'facets': facets,
+    'envelopes': [list(item) for item in envelopes],
+}), encoding='utf-8')
+
+bounds = pad.Shape.BoundBox
+report = {
+    'status': 'prototype_not_production_release',
+    'freecad_version': App.Version(),
+    'outline_fully_constrained': bool(sk.FullyConstrained),
+    'outline_solver_result': sk.solve(),
+    'outline_closed': bool(sk.Shape.Wires[0].isClosed()),
+    'valid_solid': bool(pad.Shape.isValid()),
+    'solid_count': len(pad.Shape.Solids),
+    'bounds_mm': [bounds.XLength, bounds.YLength, bounds.ZLength],
+    'corner_radius_mm': R,
+    'volume_mm3': pad.Shape.Volume,
+    'mesh_watertight': bool(mesh.isSolid()),
+    'mesh_facets': mesh.CountFacets,
+    'mount_holes_included': False,
+    'perimeter_wall_included': False,
+    'source': 'MB-BASE-001 Rev A planning sketch; build-kit/docs/display.md starting envelope',
+}
+(OUTPUT_DIR / (STEM + '-validation.json')).write_text(json.dumps(report, indent=2), encoding='utf-8')
+print(json.dumps(report))
+if not App.GuiUp:
+    App.closeDocument(doc.Name)

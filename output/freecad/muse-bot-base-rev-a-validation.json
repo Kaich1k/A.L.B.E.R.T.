@@ -1,0 +1,30 @@
+{
+  "status": "prototype_not_production_release",
+  "freecad_version": [
+    "1",
+    "1",
+    "1",
+    "20260414 (Git shallow)",
+    "Unknown",
+    "2026/04/14 22:09:59",
+    "(HEAD detached at 0108fd4b4)",
+    "0108fd4b4850cc46e625b60e53cea7a7bbe69f8d"
+  ],
+  "outline_fully_constrained": true,
+  "outline_solver_result": 0,
+  "outline_closed": true,
+  "valid_solid": true,
+  "solid_count": 1,
+  "bounds_mm": [
+    250.0,
+    220.0,
+    5.0
+  ],
+  "corner_radius_mm": 12.0,
+  "volume_mm3": 274381.9467105847,
+  "mesh_watertight": true,
+  "mesh_facets": 588,
+  "mount_holes_included": false,
+  "perimeter_wall_included": false,
+  "source": "MB-BASE-001 Rev A planning sketch; build-kit/docs/display.md starting envelope"
+}

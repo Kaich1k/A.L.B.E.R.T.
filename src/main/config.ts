@@ -83,6 +83,9 @@ function migrateSettings(raw: Partial<AlbertSettings>): AlbertSettings {
   if (!['minimal', 'balanced', 'cinematic'].includes(settings.hudDensity)) {
     settings.hudDensity = DEFAULT_SETTINGS.hudDensity
   }
+  if (settings.interfaceStyle !== 'classic' && settings.interfaceStyle !== 'workshop') {
+    settings.interfaceStyle = 'workshop'
+  }
   if (
     settings.ttsProvider !== 'system' &&
     settings.ttsProvider !== 'elevenlabs' &&
@@ -186,7 +189,7 @@ function migrateSettings(raw: Partial<AlbertSettings>): AlbertSettings {
   if (typeof settings.codexEnabled !== 'boolean') {
     settings.codexEnabled = DEFAULT_SETTINGS.codexEnabled
   }
-  for (const key of ['codexModel', 'codexEscalationModel', 'codexThreadId'] as const) {
+  for (const key of ['codexModel', 'codexEscalationModel', 'codexThreadId', 'microsoftClientId'] as const) {
     if (typeof settings[key] !== 'string') settings[key] = ''
   }
   if (typeof settings.codexEffort !== 'string' || !settings.codexEffort.trim()) {
@@ -203,6 +206,14 @@ function migrateSettings(raw: Partial<AlbertSettings>): AlbertSettings {
   if (typeof settings.paidFallbackEnabled !== 'boolean') {
     settings.paidFallbackEnabled = DEFAULT_SETTINGS.paidFallbackEnabled
   }
+  if (
+    settings.fallbackBrain !== 'none' &&
+    settings.fallbackBrain !== 'gemini' &&
+    settings.fallbackBrain !== 'claude'
+  ) {
+    settings.fallbackBrain = settings.paidFallbackEnabled ? 'claude' : 'none'
+  }
+  settings.paidFallbackEnabled = settings.fallbackBrain === 'claude'
   if (typeof settings.autoRememberEnabled !== 'boolean') {
     settings.autoRememberEnabled = DEFAULT_SETTINGS.autoRememberEnabled
   }

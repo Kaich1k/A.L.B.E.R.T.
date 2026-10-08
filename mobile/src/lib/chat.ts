@@ -23,9 +23,15 @@ export type { ProviderReply } from './prompt'
 export { ProviderRequestError } from './prompt'
 
 export const ANTHROPIC_MODELS = [
-  { value: 'claude-haiku-4-5', label: 'Haiku (fast)' },
-  { value: 'claude-sonnet-4-6', label: 'Sonnet' },
-  { value: 'claude-opus-4-8', label: 'Opus' }
+  { value: 'claude-opus-5-5', label: 'Opus 5.5 (latest)' },
+  { value: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+  { value: 'claude-haiku-5-5', label: 'Haiku 5.5' },
+  { value: 'claude-fable-5-1', label: 'Fable 5.1' },
+  { value: 'claude-opus-5', label: 'Opus 5' },
+  { value: 'claude-sonnet-5', label: 'Sonnet 5' },
+  { value: 'claude-opus-4-8', label: 'Opus 4.8' },
+  { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+  { value: 'claude-haiku-4-5', label: 'Haiku 4.5 (fast)' }
 ] as const
 
 const GROQ_MODEL_LABELS: Record<string, string> = {
@@ -37,11 +43,15 @@ const GROQ_MODEL_LABELS: Record<string, string> = {
 }
 
 const GEMINI_MODEL_LABELS: Record<string, string> = {
-  'gemini-3.5-flash': '3.5 Flash (recommended)',
-  'gemini-3.5-flash-lite': '3.5 Flash-Lite (fastest)',
+  'gemini-3.8-flash': '3.8 Flash (latest)',
+  'gemini-3.7-flash': '3.7 Flash',
+  'gemini-3.6-flash': '3.6 Flash',
+  'gemini-3.5-flash': '3.5 Flash',
+  'gemini-3.5-flash-lite': '3.5 Flash-Lite (lightest)',
+  'gemini-3.1-pro-preview': '3.1 Pro (preview)',
   'gemini-2.5-flash': '2.5 Flash (legacy)',
   'gemini-2.5-flash-lite': '2.5 Flash-Lite (legacy)',
-  'gemini-2.5-pro': '2.5 Pro (legacy; tighter quotas)'
+  'gemini-2.5-pro': '2.5 Pro (legacy)'
 }
 
 export function groqModelsForDate(nowMs = Date.now()): ReadonlyArray<{ value: string; label: string }> {
@@ -75,7 +85,7 @@ function isGeminiModel(model: string): boolean {
 }
 
 export function defaultModelFor(provider: LlmProvider): string {
-  if (provider === 'anthropic') return ANTHROPIC_MODELS[0].value
+  if (provider === 'anthropic') return 'claude-haiku-4-5'
   if (provider === 'gemini') return DEFAULT_GEMINI_MODEL
   return GROQ_STABLE_MODELS[0]
 }
@@ -102,7 +112,7 @@ function modelForProvider(provider: StandaloneProvider, selected: string): strin
   const model = selected.trim()
   if (provider === 'anthropic') {
     if (ALL_KNOWN_GROQ_MODEL_IDS.has(model) || isGeminiModel(model) || !model) {
-      return ANTHROPIC_MODELS[0].value
+      return 'claude-haiku-4-5'
     }
     return model
   }

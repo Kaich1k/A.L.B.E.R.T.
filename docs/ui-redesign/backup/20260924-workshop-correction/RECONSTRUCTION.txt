@@ -1,0 +1,30 @@
+Pre-correction recoverables for main / preload / shared
+======================================================
+
+The 2026-09-24T06:27:31Z snapshot copied renderer files only. The correction
+later edited IPC and Computer broadcast files. Those later working-tree copies
+must not be filed as if they were taken before the edits.
+
+src/main/computer/tabs.ts
+  True pre-edit copy. This path was not modified by the Workshop correction
+  until the broadcast was changed to include the main window. The file in
+  this folder is the working-tree version immediately before that change,
+  including earlier uncommitted computer-control work.
+
+src/main/ipc/handlers.ts
+src/preload/index.ts
+src/shared/api.ts
+src/shared/types.ts
+  Reconstructed. No 06:27 copy of these files exists. The copies here were
+  produced by reversing only these correction-only edits:
+
+  - AgentStreamEvent type "open_panel" and panel?: PanelId
+  - showWindow(panel?: PanelId) on the API and preload
+  - windowShow handler sending albert:chat:event { type: 'open_panel' }
+
+  Everything else in those files is the uncommitted work that was already
+  present at backup time. These are not HEAD and not post-correction.
+
+To restore just the correction's IPC addition, copy the reconstructed files
+over the live paths. That will not restore later Computer broadcast work;
+use the tabs.ts copy in this folder for that.

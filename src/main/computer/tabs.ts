@@ -2,7 +2,7 @@ import { BrowserWindow, ipcMain } from 'electron'
 import { v4 as uuid } from 'uuid'
 import type { ComputerState, ComputerTab } from '../../shared/types'
 import { IpcChannels } from '../../shared/ipc'
-import { getComputerWindow, showComputerWindow } from './window'
+import { showComputerWindow } from './window'
 
 let state: ComputerState = { tabs: [], activeTabId: null }
 
@@ -17,8 +17,11 @@ function targetWindow(): BrowserWindow {
 }
 
 function broadcast(): void {
-  const win = getComputerWindow()
-  win?.webContents.send('albert:computer:changed', getComputerState())
+  const payload = getComputerState()
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) continue
+    win.webContents.send('albert:computer:changed', payload)
+  }
 }
 
 export function getComputerState(): ComputerState {

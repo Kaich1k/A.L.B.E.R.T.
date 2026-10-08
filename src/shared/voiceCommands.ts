@@ -95,6 +95,13 @@ const STANDBY_INTENT: RegExp[] = [
 const STANDBY_META =
   /\b(if\s+you\s+hear|that\s+means|from\s+now\s+on|internal\s+logic|update\s+(your|the|my)\s+(internal\s+)?(logic|code|matcher|memory)|keywords?|listen(?:ing)?\s+for|recognize|don'?t\s+just\s+think|in\s+your\s+memory|make\s+sure\s+you\s+(can|recognize|do)|how\s+standby\s+works|what\s+standby\s+means|think\s+about\s+listening)\b/i
 
+/**
+ * Complaints / fix-its about the listening UI itself. “It didn’t stop like the
+ * listening section” must not hard-stop the session.
+ */
+const LISTENING_FEATURE_TALK =
+  /\b(listen(?:ing)?\s+(section|gate|endpoint|vad|timeout|timer|thing|issue|bug|problem|accurate)|make\s+(the\s+)?listen(?:ing)?|(doesn'?t|didn'?t|did\s+not|won'?t|will\s+not|never)\s+stop|stop\s+at\s+the\s+correct|when\s+i\s+(finish|stop)\s+(talking|speaking)|natural(?:ly)?(?:\s+\w+){0,4}\s+(listening|pause)|correct\s+time)\b/i
+
 /** Explicit negation near a standby phrase. */
 const STANDBY_NEGATED =
   /\b(don'?t|do\s+not|never|not\s+yet|no\s+longer)\b[\s\S]{0,48}\b(standby|take\s+(a\s+)?(5|five)|end\s+voice)\b/i
@@ -159,6 +166,13 @@ export function correctTranscript(text: string): string {
 
   // Name first — wake + “hey Albert …” depend on this
   t = repairAlbertMentions(t, { aggressive: true })
+  // Observed base.en homophone: "the tabs you recommended" became
+  // "the tabs in the York Amendment". Scope the repair to referenced items so
+  // a real discussion of a New York amendment remains untouched.
+  t = t.replace(
+    /\b(tabs?|pages?|articles?|videos?|options?|products?|devices?|ones?)\s+(?:in\s+)?(?:the\s+)?york\s+amendment\b/gi,
+    '$1 you recommended'
+  )
   t = t.replace(/\bin\s+voice\b/gi, 'end voice')
   t = t.replace(/\band\s+voice\b/gi, 'end voice')
   t = t.replace(/\bend\s+boys\b/gi, 'end voice')
@@ -259,6 +273,11 @@ export function isEndVoiceCommand(text: string): boolean {
   if (parts.length === 0) return false
 
   const last = parts[parts.length - 1]!
+  // “Fix listening” / “it didn’t stop” is not “stop listening”.
+  if (LISTENING_FEATURE_TALK.test(corrected) && !matchesWhole(corrected, END_VOICE_WHOLE)) {
+    return false
+  }
+
   // Last sentence wins — “… with that said, now you can go and standby.”
   if (clauseIsEndVoice(last)) return true
 
@@ -295,9 +314,12 @@ export function voiceContentWords(text: string): string[] {
   return cleaned.filter((word) => word.length > 1 && !stop.test(word))
 }
 
-export function isLikelyHallucination(text: string): boolean {
+export function isLikelyHallucination(text: string, opts?: { allowShortReply?: boolean }): boolean {
   const t = text.trim()
   if (!t) return true
+  // Only conversation capture with strong audio evidence may admit these replies.
+  // Wake-word and interruption callers retain the original conservative defaults.
+  if (opts?.allowShortReply && /^(yes|no|okay|ok|yeah|yep|nope|thanks|thank you)[.!?,]*$/i.test(t)) return false
   if (t.length < 2) return true
   const words = t.split(/\s+/).filter(Boolean)
   if (words.length === 1 && t.length < 4) return true
@@ -308,6 +330,14 @@ export function isLikelyHallucination(text: string): boolean {
   // words Whisper strung together.
   if (words.length >= 3 && voiceContentWords(t).length === 0) return true
   return false
+}
+
+/** True when the model roleplayed a shutdown instead of answering. */
+export function isBareStandbyReply(reply: string): boolean {
+  const t = reply.replace(/\s+/g, ' ').trim()
+  return /^(standby engaged[.!]?|standing by[,.]?\s*(sir[.!]?)?|going (to |into )?(standby|sleep)[.!]?)$/i.test(
+    t
+  )
 }
 
 export function isMuteCommand(text: string): boolean {

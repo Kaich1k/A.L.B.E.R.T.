@@ -8,14 +8,14 @@
   "license": "MIT",
   "scripts": {
     "dev": "ELECTRON_RUN_AS_NODE= electron-vite dev",
-    "build": "electron-vite build",
+    "build": "npm run build:desktop && electron-vite build",
     "preview": "ELECTRON_RUN_AS_NODE= electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "test:voice": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --experimental-loader ./scripts/electron-test-loader.mjs --test scripts/voice-reliability.test.mjs scripts/speech-text.test.mjs",
+    "test:voice": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --experimental-loader ./scripts/electron-test-loader.mjs --test scripts/voice-reliability.test.mjs scripts/speech-text.test.mjs scripts/turn-interrupt.test.mjs scripts/computer-control.test.mjs scripts/tts-quality.test.mjs scripts/stt-quality.test.mjs scripts/voice-naturalness.test.mjs",
     "test:companion": "ELECTRON_RUN_AS_NODE=1 electron --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --experimental-loader ./scripts/electron-test-loader.mjs --test --test-concurrency=1 scripts/companion-v2.test.mjs",
     "test:providers": "node scripts/provider-smoke.mjs",
-    "test:codex": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --experimental-loader ./scripts/electron-test-loader.mjs --test scripts/codex-reliability.test.mjs",
-    "test:interface": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --experimental-loader ./scripts/electron-test-loader.mjs --test scripts/interface-reliability.test.mjs",
+    "test:codex": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --experimental-loader ./scripts/electron-test-loader.mjs --test scripts/codex-reliability.test.mjs scripts/prompt-budget.test.mjs",
+    "test:interface": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --experimental-loader ./scripts/electron-test-loader.mjs --test scripts/interface-reliability.test.mjs scripts/draft-images.test.mjs scripts/source-notes.test.mjs scripts/rich-message.test.mjs",
     "codex:doctor": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/codex-doctor.mjs",
     "archive:app": "bash scripts/archive-app.sh",
     "postinstall": "electron-builder install-app-deps",
@@ -28,7 +28,10 @@
     "companion:install": "npm --prefix companion install",
     "mobile:start": "npm --prefix mobile run start",
     "mobile:ios": "npm --prefix mobile run ios",
-    "mobile:build:ios": "npm --prefix mobile exec eas-cli -- build --platform ios --profile production"
+    "mobile:build:ios": "npm --prefix mobile exec eas-cli -- build --platform ios --profile production",
+    "build:desktop": "node scripts/build-desktop-helper.mjs",
+    "predev": "npm run build:desktop",
+    "test:desktop": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --experimental-loader ./scripts/electron-test-loader.mjs --test scripts/desktop-native.test.mjs scripts/codex-dynamic-tools.test.mjs scripts/desktop-permissions.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",

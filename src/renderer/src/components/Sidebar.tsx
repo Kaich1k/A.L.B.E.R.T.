@@ -8,7 +8,28 @@ import {
   type BrainChoice
 } from '../../../shared/brainRouting'
 import type { PanelId } from '../../../shared/types'
+import {
+  CHATGPT_ASTRA_MODEL,
+  CHATGPT_SOL_61_MODEL,
+  codexModelLabel,
+  codexModelListed,
+  sol61UnavailableReason
+} from '../../../shared/codexModels'
+import {
+  CLAUDE_MODEL_OPTIONS,
+  GEMINI_MODEL_OPTIONS,
+  withSavedModel
+} from '../../../shared/modelCatalog'
 import { useAlbertStore } from '../store'
+
+function shownModelLabel(
+  id: string,
+  codexStatus: { signedIn?: boolean; availableModels?: Array<{ id: string; displayName: string }> } | null
+): string {
+  if (!id) return codexStatus?.signedIn ? 'Astra' : 'Sign in · Systems'
+  const known = codexStatus?.availableModels?.find((model) => model.id === id)
+  return codexModelLabel(id, known?.displayName)
+}
 
 const items: { id: PanelId; label: string }[] = [
   { id: 'home', label: 'Home' },
@@ -29,6 +50,7 @@ export function Sidebar(): React.JSX.Element {
   const codexStatus = useAlbertStore((s) => s.codexStatus)
   const hasBrain = hasTalkableBrain(settings)
   const active = brainChoice(settings)
+  const sol61Available = codexModelListed(codexStatus?.availableModels, CHATGPT_SOL_61_MODEL)
 
   async function setBrain(next: BrainChoice): Promise<void> {
     try {
@@ -77,28 +99,117 @@ export function Sidebar(): React.JSX.Element {
         >
           <span className="brain-primary-name">ChatGPT</span>
           <span className="brain-primary-meta">
-            {codexStatus?.signedIn
-              ? codexStatus.allowance?.label || 'Signed in'
-              : 'Sign in · Systems'}
+            {shownModelLabel(settings.codexModel || codexStatus?.model || '', codexStatus)}
           </span>
         </button>
-        <span className="hud-label faint">Fallback — only if you lock it, or ChatGPT fails</span>
+        {active === 'chatgpt' ? (
+          <label className="brain-model-select">
+            <span className="hud-label">Model</span>
+            <select
+              aria-label="ChatGPT model"
+              value={settings.codexModel || CHATGPT_ASTRA_MODEL}
+              onChange={(event) => {
+                const next = event.target.value
+                const previous = settings.codexModel
+                setSettings({ ...settings, codexModel: next })
+                void window.albert.setSettings({ codexModel: next }).then(async (updated) => {
+                  setSettings(updated)
+                  const status = await window.albert.getCodexStatus()
+                  useAlbertStore.getState().setCodexStatus(status)
+                  if (updated.codexModel !== next) {
+                    useAlbertStore.getState().setError(
+                      status.modelNotice ||
+                        'That ChatGPT model is not available. Kept the previous model.'
+                    )
+                    if (!updated.codexModel) setSettings({ ...updated, codexModel: previous })
+                  } else {
+                    useAlbertStore.getState().setError(null)
+                  }
+                }).catch(() => {
+                  setSettings({ ...useAlbertStore.getState().settings, codexModel: previous })
+                })
+              }}
+            >
+              <option value={CHATGPT_ASTRA_MODEL}>Astra</option>
+              <option value={CHATGPT_SOL_61_MODEL} disabled={!sol61Available}>
+                {sol61Available ? '6.1 Sol' : `6.1 Sol — ${sol61UnavailableReason(codexStatus?.version)}`}
+              </option>
+              {(codexStatus?.availableModels || [])
+                .filter(
+                  (model) =>
+                    model.id !== CHATGPT_ASTRA_MODEL &&
+                    model.id !== CHATGPT_SOL_61_MODEL &&
+                    !model.id.startsWith(`${CHATGPT_SOL_61_MODEL}-`)
+                )
+                .map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {codexModelLabel(model.id, model.displayName)}
+                  </option>
+                ))}
+            </select>
+          </label>
+        ) : null}
+        {codexStatus?.modelNotice ? <span className="mode-auto-hint">{codexStatus.modelNotice}</span> : null}
         <div className="mode-toggle-row">
           <button
             type="button"
             className={active === 'gemini' ? 'active' : ''}
-            onClick={() => void setBrain(active === 'gemini' ? 'chatgpt' : 'gemini')}
+            onClick={() => void setBrain('gemini')}
           >
             Gemini
           </button>
           <button
             type="button"
             className={active === 'opus' ? 'active' : ''}
-            onClick={() => void setBrain(active === 'opus' ? 'chatgpt' : 'opus')}
+            onClick={() => void setBrain('opus')}
           >
-            Opus
+            Claude
           </button>
         </div>
+        {active === 'gemini' ? (
+          <label className="brain-model-select">
+            <span className="hud-label">Model</span>
+            <select
+              aria-label="Gemini model"
+              value={settings.geminiModel}
+              onChange={(event) => {
+                const geminiModel = event.target.value
+                setSettings({ ...settings, geminiModel, routingMode: 'local', localProvider: 'gemini' })
+                void window.albert
+                  .setSettings({ geminiModel, routingMode: 'local', localProvider: 'gemini' })
+                  .then(setSettings)
+              }}
+            >
+              {withSavedModel(GEMINI_MODEL_OPTIONS, settings.geminiModel).map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        {active === 'opus' ? (
+          <label className="brain-model-select">
+            <span className="hud-label">Model</span>
+            <select
+              aria-label="Claude model"
+              value={settings.powerModel || settings.model}
+              onChange={(event) => {
+                const powerModel = event.target.value
+                setSettings({ ...settings, powerModel, model: powerModel, routingMode: 'power' })
+                void window.albert
+                  .setSettings({ powerModel, model: powerModel, routingMode: 'power' })
+                  .then(setSettings)
+              }}
+            >
+              {withSavedModel(CLAUDE_MODEL_OPTIONS, settings.powerModel || settings.model).map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
         <span className="mode-auto-hint">{brainLockHint(active)}</span>
       </div>
 

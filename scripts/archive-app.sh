@@ -8,8 +8,8 @@ DEST_DIR="${HOME}/Applications"
 APP_NAME="ALBERT.app"
 SRC="${DEST_DIR}/${APP_NAME}"
 BACKUP_DIR="${DEST_DIR}/.albert-backups"
-# Keep this many historical bundles; older ones are pruned.
-KEEP="${ALBERT_BACKUP_KEEP:-5}"
+# Keep this many historical bundles in the hidden folder; older ones are pruned.
+KEEP="${ALBERT_BACKUP_KEEP:-2}"
 
 if [[ ! -d "${SRC}" ]]; then
   echo "No installed app at ${SRC} — nothing to archive."
@@ -27,16 +27,6 @@ TARGET="${BACKUP_DIR}/${LABEL}"
 echo "==> Archiving ${SRC}"
 echo "    -> ${TARGET}"
 cp -R "${SRC}" "${TARGET}"
-
-# Dated sibling next to the live app so the pre-upgrade bundle is easy to find
-# without digging through .albert-backups.
-if [[ "${ALBERT_LEGACY_COPY:-1}" != "0" ]]; then
-  LEGACY="${DEST_DIR}/ALBERT-legacy-$(date +%Y-%m-%d).app"
-  if [[ ! -d "${LEGACY}" ]]; then
-    echo "==> Dated snapshot ${LEGACY}"
-    cp -R "${SRC}" "${LEGACY}"
-  fi
-fi
 
 # Prune oldest snapshots beyond KEEP.
 # shellcheck disable=SC2012

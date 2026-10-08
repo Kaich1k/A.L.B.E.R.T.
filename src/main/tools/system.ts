@@ -37,7 +37,7 @@ export const systemTools: ToolDefinition[] = [
   {
     name: 'run_applescript',
     description:
-      'Run a short AppleScript for macOS automation. Prefer dedicated tools when available — especially spotify_control for Spotify (do not hand-roll Spotify scripts). Prefer desktop_* / computer_* / file tools otherwise.',
+      'Run a short AppleScript. Prefer spotify_control, desktop_*, computer_*, or file tools when one exists.',
     parameters: {
       type: 'object',
       properties: {

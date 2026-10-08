@@ -6,7 +6,7 @@ export const contextTools: ToolDefinition[] = [
   {
     name: 'save_context_capsule',
     description:
-      'Seal the current operating position (mission, Computer tabs, front apps, project folder, and a note) so Kai can later say “resume <name>”.',
+      'Save mission, Computer tabs, front apps, and a note so Kai can resume it by name.',
     parameters: {
       type: 'object',
       properties: {
@@ -69,7 +69,7 @@ export const contextTools: ToolDefinition[] = [
   {
     name: 'project_pulse',
     description:
-      'Read live repo health for the configured project folder: branch, dirty files, recent commits, stale branches, TODOs, and recent test/build faults.',
+      'Repo health: branch, dirty files, commits, stale branches, TODOs, recent test or build faults.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     execute: async () => {
       const pulse = await getProjectPulse(true)

@@ -394,8 +394,10 @@ test('Gemini defaults to 3.5 Flash and skips 2.5 when it is off-plan', async () 
   assert.ok(modelsFor('auto').some((entry) => entry.value === 'gemini-3.5-flash'))
   assert.deepEqual(geminiModelCandidates('gemini-2.5-flash').slice(0, 2), [
     'gemini-2.5-flash',
-    'gemini-3.5-flash'
+    'gemini-3.8-flash'
   ])
+  assert.ok(modelsFor('gemini').some((entry) => entry.value === 'gemini-3.8-flash'))
+  assert.ok(modelsFor('anthropic').some((entry) => entry.value === 'claude-opus-5-5'))
 
   const attempted = []
   const result = await chatWithGemini({
@@ -413,14 +415,14 @@ test('Gemini defaults to 3.5 Flash and skips 2.5 when it is off-plan', async () 
         )
       }
       return jsonResponse({
-        model: 'gemini-3.5-flash',
+        model: 'gemini-3.8-flash',
         choices: [{ message: { content: 'Online, sir.' } }]
       })
     }
   })
   assert.equal(attempted[0], 'gemini-2.5-flash')
-  assert.ok(attempted.includes('gemini-3.5-flash'))
-  assert.equal(result.model, 'gemini-3.5-flash')
+  assert.equal(attempted[1], 'gemini-3.8-flash')
+  assert.equal(result.model, 'gemini-3.8-flash')
   assert.equal(result.reply, 'Online, sir.')
   assert.equal(result.provider, 'gemini')
 })

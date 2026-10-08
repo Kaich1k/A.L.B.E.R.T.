@@ -151,13 +151,97 @@ export type TranscribeGate =
 export const MIN_VOICED_RATIO = 0.18
 
 /**
- * End short commands quickly while leaving more room for a pause in a longer
- * thought. The old fixed 2.6 second tail made every voice turn feel stalled.
+ * Consecutive energy required before a burst counts as speech. HVAC ticks and
+ * keyboard clacks used to reset the end-of-turn timer every poll.
+ */
+export const SPEECH_HOLD_MS = 90
+
+/** Quiet-listening replies can be short; hot-mic/barge capture retains its stricter minimum. */
+export const SHORT_REPLY_MIN_SPEECH_MS = 180
+
+/** A short acknowledgement needs dense acoustic evidence, not just a plausible word. */
+export function hasConfidentShortReplyAudio(opts: {
+  voicedRatio: number
+  spokeMs: number
+  hotMic: boolean
+}): boolean {
+  return !opts.hotMic && opts.spokeMs >= SHORT_REPLY_MIN_SPEECH_MS && opts.voicedRatio >= 0.55
+}
+
+/** Ignore mic energy right after TTS so speaker bleed cannot hold Listening open. */
+export const POST_TTS_ECHO_GUARD_MS = 380
+
+/**
+ * After loud speech, quieter syllables still count as the same phrase until
+ * they drop under the silence bar. HVAC above silence is allowed to start the
+ * hangover only after this much time with no loud speech.
+ */
+export const PHRASE_HOLD_MS = 1_600
+
+/**
+ * Conversational hangover after true quiet. Short commands feel responsive;
+ * longer thoughts retain more room to breathe. PHRASE_HOLD_MS separately keeps
+ * quieter syllables alive before this clock starts.
  */
 export function endOfUtteranceSilenceMs(spokeMs: number): number {
-  if (spokeMs < 1_200) return 1_800
-  if (spokeMs < 5_000) return 2_200
-  return 2_600
+  if (spokeMs < 1_200) return 900
+  if (spokeMs < 5_000) return 1_300
+  return 1_800
+}
+
+/** Preserve low-volume first/last phonemes without retaining the full VAD tail. */
+export function transcriptTrimThreshold(floor: NoiseFloor): number {
+  return clamp(floor.value * 0.55, 0.0035, 0.009)
+}
+
+export function nextSpeechHoldMs(prevHoldMs: number, energyIsSpeech: boolean, tickMs: number): number {
+  if (!energyIsSpeech) return 0
+  return prevHoldMs + tickMs
+}
+
+export function isSustainedSpeech(holdMs: number, needMs = SPEECH_HOLD_MS): boolean {
+  return holdMs >= needMs
+}
+
+/** True while Kai is still in the sentence, including quieter syllables. */
+export function isStillInPhrase(opts: {
+  loudNow: boolean
+  aboveSilence: boolean
+  msSinceLoudSpeech: number
+  hasSpoken: boolean
+}): boolean {
+  if (opts.loudNow) return true
+  if (!opts.hasSpoken) return false
+  if (!opts.aboveSilence) return false
+  return opts.msSinceLoudSpeech < PHRASE_HOLD_MS
+}
+
+/** True when the VAD should stop Listening and send the buffer to Whisper. */
+export function shouldEndpointUtterance(opts: {
+  spokeMs: number
+  silenceMs: number
+  minSpeechMs: number
+  speakingNow: boolean
+  canEndpoint: boolean
+  recordingMs?: number
+}): boolean {
+  if (!opts.canEndpoint) return false
+  // Never cut a live talker, even on a long turn.
+  if (opts.speakingNow) return false
+  if (opts.spokeMs < opts.minSpeechMs) return false
+  return opts.silenceMs >= endOfUtteranceSilenceMs(opts.spokeMs)
+}
+
+/** Abandon a finished sub-minimum burst so it cannot contaminate the next command. */
+export function shouldResetShortUtterance(opts: {
+  spokeMs: number
+  silenceMs: number
+  minSpeechMs: number
+  speakingNow: boolean
+  canEndpoint: boolean
+}): boolean {
+  return opts.canEndpoint && !opts.speakingNow && opts.spokeMs > 0 &&
+    opts.spokeMs < opts.minSpeechMs && opts.silenceMs >= endOfUtteranceSilenceMs(opts.spokeMs)
 }
 
 /**

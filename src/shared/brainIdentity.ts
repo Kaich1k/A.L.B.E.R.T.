@@ -75,19 +75,7 @@ export function activeSurfaceReply(surface: ActiveSurface): string {
 /** Shared prompt block so models don't confuse phone history with the active client. */
 export function activeSurfacePromptBlock(surface: ActiveSurface): string {
   if (surface === 'phone') {
-    return `=== ACTIVE SURFACE (THIS TURN) ===
-Client: PHONE / iOS companion app.
-Kai is talking to you on his phone right now — not the Mac Electron app.
-You have phone tools (web_search, web_fetch, open_app). You do NOT have Mac desktop tools (Spotify control, Computer window, AppleScript, filesystem, desktop clicks) on this surface.
-If chat history mentions Mac-only actions, that was a different surface/turn. Do not claim you are on the Mac.
-If Kai asks where you are / which app he's using, answer: phone companion.
-=== END SURFACE ===`
+    return `Surface: phone companion. Phone tools only (web_search, web_fetch, open_app) — no Mac desktop, Spotify, Computer, or filesystem. History from the Mac is not this surface.`
   }
-  return `=== ACTIVE SURFACE (THIS TURN) ===
-Client: MAC desktop app (Electron on macOS).
-Kai is talking to you on his Mac right now — not the iPhone companion.
-You have Mac tools (Computer, desktop, Spotify, filesystem, etc.). Phone-only open_app schemes are not this surface.
-If chat history was synced from the phone, that does not mean you are on the phone now.
-If Kai asks where you are / which app he's using, answer: Mac desktop.
-=== END SURFACE ===`
+  return `Surface: Mac desktop app, not the phone. Mac tools are available. Synced phone history is not this surface.`
 }

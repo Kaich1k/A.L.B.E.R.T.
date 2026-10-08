@@ -1,4 +1,4 @@
-import { ALBERT_SYSTEM_PROMPT } from '../agent/prompt'
+import { ALBERT_SYSTEM_PROMPT, compressMemoryBlock } from '../agent/prompt'
 import { getSettings, requireOpenAIApiKey } from '../config'
 import { recallMemories } from '../memory/service'
 import { getRealtimeToolSchemas } from '../tools/registry'
@@ -13,10 +13,7 @@ export async function createRealtimeSession(): Promise<RealtimeSessionConfig> {
   const projectFolder = settings.projectFolder?.trim()
 
   const memories = await recallMemories('user preferences identity projects', 8)
-  const memoryBlock =
-    memories.length > 0
-      ? `\n\nLong-term memories:\n${memories.map((m) => `- ${m.content}`).join('\n')}`
-      : ''
+  const memoryBlock = compressMemoryBlock(memories)
   const projectBlock = projectFolder
     ? `\n\nConfigured project folder: ${projectFolder}`
     : ''

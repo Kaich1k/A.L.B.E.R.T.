@@ -73,7 +73,7 @@ export const fileTools: ToolDefinition[] = [
   {
     name: 'write_file',
     description:
-      'Create/overwrite a text file under allowed roots. Prefer apply_project_patch / write_project_file inside the project. While ALBERT is running live, do not write ALBERT src/scripts/package.json — call cursor_agent instead.',
+      'Create or overwrite a text file under allowed roots. Inside the project, prefer apply_project_patch. Do not write ALBERT src — use cursor_agent.',
     parameters: {
       type: 'object',
       properties: {

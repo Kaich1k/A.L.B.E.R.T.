@@ -1,0 +1,105 @@
+Backup: docs/ui-redesign/backup/20260924-workshop-correction
+Date: 2026-09-24T06:27:31Z
+HEAD: 9497f174007541304ab3a6edf0caf84d2a224947
+Branch: main
+
+== git status ==
+ M mobile/src/lib/voiceCommands.ts
+ M mobile/src/lib/voiceReliability.ts
+ M package.json
+ M scripts/archive-app.sh
+ M scripts/codex-reliability.test.mjs
+ M scripts/interface-reliability.test.mjs
+ M scripts/speech-text.test.mjs
+ M scripts/voice-reliability.test.mjs
+ M src/main/agent/orchestrator.ts
+ M src/main/agent/prompt.ts
+ M src/main/codex/models.ts
+ M src/main/codex/service.ts
+ M src/main/config.ts
+ M src/main/hud/miniHud.ts
+ M src/main/index.ts
+ M src/main/ipc/handlers.ts
+ M src/main/memory/db.ts
+ M src/main/memory/service.ts
+ M src/main/tools/desktop.ts
+ M src/main/tools/registry.ts
+ M src/main/voice/kokoro.ts
+ M src/main/voice/whisper-worker.cjs
+ M src/preload/index.ts
+ M src/renderer/src/App.tsx
+ M src/renderer/src/HudApp.tsx
+ M src/renderer/src/components/ActivityPanel.tsx
+ M src/renderer/src/components/AmbientHud.tsx
+ M src/renderer/src/components/ConversationPanel.tsx
+ M src/renderer/src/components/MemoryPanel.tsx
+ M src/renderer/src/components/SettingsPanel.tsx
+ M src/renderer/src/components/Sidebar.tsx
+ M src/renderer/src/main.tsx
+ M src/renderer/src/styles/global.css
+ M src/renderer/src/voice/claudeVoiceSession.ts
+ M src/renderer/src/voice/tts.ts
+ M src/renderer/src/voice/voiceCommands.ts
+ M src/renderer/src/voice/wakeWord.ts
+ M src/shared/api.ts
+ M src/shared/hudWork.ts
+ M src/shared/ipc.ts
+ M src/shared/memoryGraph.ts
+ M src/shared/speechText.ts
+ M src/shared/types.ts
+ M src/shared/voiceCommands.ts
+ M src/shared/voiceGate.ts
+?? docs/ui-redesign/
+?? scripts/computer-control.test.mjs
+?? scripts/turn-interrupt.test.mjs
+?? src/main/agent/turnControl.ts
+?? src/main/computer/automation.ts
+?? src/main/computer/graph.ts
+?? src/main/computer/outlook.ts
+?? src/main/computer/runIntent.ts
+?? src/main/system/
+?? src/main/tools/control.ts
+?? src/main/tools/outlook.ts
+?? src/renderer/src/components/FilamentOrb.tsx
+?? src/renderer/src/components/WorkshopHome.tsx
+?? src/renderer/src/styles/workshop.css
+?? src/shared/buildMarker.ts
+?? src/shared/codexModels.ts
+?? src/shared/computerIntent.ts
+?? src/shared/redact.ts
+
+== files copied ==
+src/renderer/src/styles/global.css
+src/renderer/src/styles/workshop.css
+src/renderer/src/components/WorkshopHome.tsx
+src/renderer/src/components/FilamentOrb.tsx
+src/renderer/src/components/MemoryPanel.tsx
+src/renderer/src/components/AmbientHud.tsx
+src/renderer/src/store.ts
+src/renderer/src/App.tsx
+docs/ui-redesign/rollback.md
+docs/ui-redesign/feature-parity.md
+
+Classic archive left intact: docs/ui-redesign/backup/classic-ui-20260924.tar.gz
+This snapshot does not restore later main-process/voice/computer-control work.
+
+== later main/preload/shared recoverables (NOT part of the 06:27 renderer snapshot) ==
+
+These files were missing from the original copy list. They are labeled by how they were obtained. Do not treat them as files copied at 06:27.
+
+TRUE PRE-EDIT COPY (file was untouched by the Workshop correction until the computerChanged broadcast fix):
+  src/main/computer/tabs.ts
+  Copied from the working tree immediately before that broadcast change.
+  Still contains prior uncommitted computer-control work. Not HEAD.
+
+RECONSTRUCTED PRE-CORRECTION (not a later working-tree copy):
+  src/main/ipc/handlers.ts
+  src/preload/index.ts
+  src/shared/api.ts
+  src/shared/types.ts
+  Taken from the post-correction tree, then only the correction's
+  open_panel / showWindow(panel) edits were reversed.
+  They keep the uncommitted voice/computer-control work that already
+  existed at 06:27. They are not HEAD and not the post-correction files.
+
+See RECONSTRUCTION.txt in this folder.

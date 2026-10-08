@@ -15,9 +15,11 @@ Electron runtime: synthesis completed in 1.108 seconds and produced a valid 123,
 
 The voice path is now:
 
-`3s end-of-turn → trim silence → Whisper → route/model → sentence queue → neural synthesis → decode → playback`
+`adaptive speech endpoint → trim silence → Whisper → route/model → phrase queue → neural synthesis → decode → playback`
 
-- The deliberate three-second VAD tail is removed before transcription.
+- Short commands use a 900 ms silence tail, ordinary turns 1300 ms, and long turns 1800 ms. Quiet phrase holds remain to avoid cutting off a thought. The captured tail is trimmed before transcription.
+- Streamed speech waits for a useful clause; decimal token boundaries and incomplete code fences do not become stray spoken fragments. Paragraph pauses survive streaming.
+- Interrupting speech invalidates the old playback epoch, stops host speech, and releases the turn immediately. Old completion callbacks cannot clear the next turn’s speaking state. With barge-in disabled, speaker bleed is not captured as a new user turn.
 - Exact adjacent long transcript repetitions are collapsed conservatively.
 - Neural synthesis is bounded at 25 seconds per part; Web Audio resume/decode/playback waits are bounded.
 - Web Audio declares Speaking only after its rendering clock reaches the scheduled clip, not when a
@@ -48,6 +50,11 @@ npm run build
 ```
 
 The voice regression suite covers the reported duplicate transcript, conservative non-deduplication,
-fallback/cancellation decisions, three-second tail trimming, current-brain question scope, truthful
+fallback/cancellation decisions, adaptive tail trimming and endpoint behavior, current-brain question scope, truthful
 provider reply formatting, and the Groq retirement cutoff. Systems → Preview voice now distinguishes verified Kokoro playback from a
 verified system-voice fallback.
+
+
+## September 28 installed verification
+
+The installed Kokoro / Daniel preview completed with “Kokoro synthesis + playback verified”. Existing voice settings were retained. Automated capture/streaming/interrupt regressions passed. The installed app entered Listening after successful `getUserMedia` acquisition and local speech-engine warm-up; the test session was then ended. macOS showed microphone access enabled, although the previous unsigned build’s Electron status reported `not-determined`. Live recognition accuracy in the user’s room and subjective Siri-like conversation quality are not claimed. No cloud voice service or paid subscription was added.

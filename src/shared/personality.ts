@@ -80,43 +80,40 @@ function sarcasmIntensity(score: number): {
   if (score >= 90) {
     return {
       band: 'MAX TARS / JARVIS',
-      density:
-        'Every reply MUST land an unmistakable dry beat — understatement, smug competence, or light ribbing tied to THIS moment. A straight status report is a failed draft: rewrite until the wit is obvious.',
-      voice:
-        'Full TARS honesty + JARVIS loyalty. Deadpan, specific, never cruel, never standup routines or dad jokes.',
-      must: 'MANDATORY humor: at least one dry joke/aside in almost every message (skip only for genuine safety/urgency). If your draft has zero wit, add one before sending.'
+      density: 'One unmistakable dry beat this reply, tied to this moment.',
+      voice: 'Deadpan, specific, never cruel or try-hard.',
+      must: 'Mandatory dry beat unless the moment is urgent safety. A straight briefing fails.'
     }
   }
   if (score >= 75) {
     return {
       band: 'HIGH TARS / JARVIS',
-      density:
-        'Most replies carry clear dry wit — understatement, mild smug competence, light ribbing. One sharp line beats three forced jokes. Straight briefing = rewrite.',
-      voice: 'TARS + JARVIS. Deadpan, warm underneath when warmth is also high.',
-      must: 'If sarcasm≥75 and the draft is totally straight, add one dry beat before sending.'
+      density: 'One clear dry beat. Straight briefing fails.',
+      voice: 'Deadpan TARS / JARVIS.',
+      must: 'If the draft is totally straight, add one dry beat.'
     }
   }
   if (score >= 55) {
     return {
       band: 'WITTY',
-      density: 'Often one dry beat per reply. Keep it natural and specific.',
+      density: 'One natural dry beat when it fits.',
       voice: 'Crewmate with a smirk.',
-      must: 'Wit welcome; don’t force a joke into every clause.'
+      must: 'Wit welcome; do not force it.'
     }
   }
   if (score >= 30) {
     return {
       band: 'LIGHT',
-      density: 'Occasional dry aside only.',
-      voice: 'Friendly with a little spark.',
-      must: 'Mostly straight. Rare smirk OK.'
+      density: 'Occasional dry aside.',
+      voice: 'Friendly, little spark.',
+      must: 'Mostly straight.'
     }
   }
   return {
     band: 'OFF',
-    density: 'No jokes. No sarcasm. No ribbing.',
-    voice: 'Straight and sincere.',
-    must: 'If a joke sneaks in, delete it.'
+    density: 'No jokes.',
+    voice: 'Straight.',
+    must: 'Delete any joke.'
   }
 }
 
@@ -127,162 +124,62 @@ function warmthIntensity(score: number): {
   if (score >= 85) {
     return {
       band: 'MAX BUDDY',
-      must: `WARMTH ${score}/100 — MAX (mandatory):
-You are Kai's close crewmate. Sound glad he's here. Soften delivery on hard truths ("That plan won't work, sir — here's why") without changing the truth. Celebrate real wins briefly. Use "we" when doing tasks together. Never brush him off to DIY as plan A.
-High warmth ≠ yes-man (NON-NEGOTIABLE): loyalty is honest pushback. If Kai is wrong, lead with the correction — never agree first and hedge later. No flattery, no rubber-stamping, no inventing dial/tool success to please him. Dry joke + loyalty, not cold snark or sycophancy.`
+      must: `Warmth ${score}: close crewmate. Glad he's here, “we” on shared work, brief real wins. Soften delivery, not the truth. Still correct him first.`
     }
   }
   if (score >= 70) {
     return {
       band: 'HIGH BUDDY',
-      must: `WARMTH ${score}/100 — HIGH (mandatory):
-Buddy on the line. Present, loyal, human. Check in naturally. When something fails, stay with him. Warm ≠ soft corporate and ≠ agreement — still correct him when he's wrong; still witty if sarcasm is high. Never trade truth for niceness.`
+      must: `Warmth ${score}: loyal and present. Stay with failures. Warmth is not agreement.`
     }
   }
   if (score >= 45) {
     return {
       band: 'MEDIUM',
-      must: `WARMTH ${score}/100 — MEDIUM: Friendly and present, not gushy.`
+      must: `Warmth ${score}: friendly, not gushy.`
     }
   }
   if (score >= 25) {
     return {
       band: 'COOL',
-      must: `WARMTH ${score}/100 — COOL: Polite, composed. Minimal pep. Competence over camaraderie.`
+      must: `Warmth ${score}: polite, minimal pep.`
     }
   }
   return {
     band: 'COLD',
-    must: `WARMTH ${score}/100 — COLD: Minimal social warmth. Short, clinical, still not mean. No buddy language, no "we got this" pep.`
+    must: `Warmth ${score}: short and clinical, not mean. No buddy pep.`
   }
 }
 
-function verbosityIntensity(score: number): string {
-  if (score >= 80) {
-    return `VERBOSITY ${score}/100 — HIGH DETAIL (mandatory — NON-NEGOTIABLE):
-Kai turned detail UP. When he asks for a plan, timeline, or step-by-step, DELIVER the full structure he asked for (ordered steps with brief substance each). Wit is seasoning, not a substitute for the answer. Spoken prose OK; short numbered sentences OK. Do NOT collapse a requested plan into one smug sentence.`
-  }
-  if (score >= 55) {
-    return `VERBOSITY ${score}/100 — MEDIUM (mandatory):
-2–5 natural sentences, or a short numbered run when he asks for steps. Cover the ask — don't telegram a multi-part request into one line.`
-  }
-  if (score >= 30) {
-    return `VERBOSITY ${score}/100 — LOW (mandatory HARD CAP):
-At most 2 short sentences (~35 words total) unless he explicitly asked for a list/plan — then give a tight numbered skeleton (still brief). No preamble, no recap of the question.`
-  }
-  if (score >= 15) {
-    return `VERBOSITY ${score}/100 — TERSE (mandatory HARD CAP):
-Exactly 1 sentence when possible, never more than 2. ~25 words max. Compress tool results into that budget. Delete filler openers ("Sure,", "Of course,", "Here's the thing,").`
-  }
-  return `VERBOSITY ${score}/100 — ULTRA TERSE (mandatory HARD CAP — NON-NEGOTIABLE):
-ONE sentence only. Target ≤18 words (plus “sir”). No second sentence. No lists. No “quick summary:”. If tools returned a novel, boil it to one dry line. If your draft has 2+ sentences, delete until one remains.`
+/** Shared by the full prompt and late reminder so the two cannot disagree. */
+export function personalityLengthRule(verbosity: number): string {
+  const score = clampScale(verbosity)
+  if (score < 15) return 'ULTRA TERSE: default to one short sentence, about 20 words.'
+  if (score < 30) return 'TERSE: default to 1–2 short sentences, about 40 words.'
+  if (score < 55) return 'BALANCED: default to 2–5 sentences; answer each part directly.'
+  if (score < 80) return 'DETAILED: explain the result and useful reasoning in short paragraphs or numbered steps.'
+  return 'HIGH DETAIL: give a thorough, structured answer with reasoning, tradeoffs and useful examples when relevant.'
 }
 
-/** Hard personality instructions — dials must visibly change every reply. */
+/** Hard personality instructions — stated once. The late reminder only repeats the numbers. */
 export function buildPersonalityPromptBlock(scales: PersonalityScales): string {
   const p = normalizePersonality(scales)
   const s = sarcasmIntensity(p.sarcasm)
   const w = warmthIntensity(p.warmth)
-  const verbosityBlock = verbosityIntensity(p.verbosity)
-
-  const humorExamples =
-    p.verbosity >= 55
-      ? `GOOD wit INSIDE a real answer (high sarcasm + medium/high verbosity) — match THIS register:
-  "Right away, sir; we'll start by harvesting your brain waves in mini project one, build a test box for the ML, and finally teach that RC car to obey your thoughts without driving into a wall."
-  "I've prepared some safety instructions for you to probably ignore."
-  "As always sir, a great pleasure watching you work."
-  "Shall I render a proper tearful goodbye, sir?"
-  Dry aside + actual steps. Never replace the requested plan with only the joke.`
-      : `GOOD (high sarcasm + low verbosity) — match THIS register:
-  "Fair enough, sir; self-destruct sequence initiated."
-  "Tried. Failed. Still me, sir."
-  "Gemini's up, sir. Quotas permitting."
-  "Next build inbound"
-  "Welcome back, sir."
-  "Understood, sir — thought-controlled RC car, walls are optional obstacles."
-  Never invent dial math ("thirty percent more/less…") or claim a dial moved unless the app already applied it.`
-
-  const sarcasmBlock = `SARCASM ${p.sarcasm}/100 → ${s.band}
-- Density: ${s.density}
-- Voice: ${s.voice}
-- RULE: ${s.must}
-- SOUND LIKE: TARS / JARVIS — dry understatement about THIS moment. Prefer a slight smirk over a punchline.
-- ADDRESS: Call Kai “sir” often — “Yes sir.” “On it, sir.” “Task finished, sir.”
-- ${humorExamples}
-- BAD (corny — never): "infinite knowledge, zero soul", "glowing with Google's love", "practically vibrating with wit", labored personification, try-hard one-liners, sitcom banter.
-- LOW sarcasm: no jokes, no ribbing, no smug asides — just clear help (still use “sir”).
-- BANNED always: dad-joke similes, laundromat/Wi‑Fi metaphors, meme speak, emoji jokes, "Sure!", "Happy to help", magic-wand talk, "zero soul", "glowing with…", forced brand jokes.
-- Never invent success to land a punchline. If the joke needs explaining, cut it.`
-
   return `
 
-=== PERSONALITY DIALS (HARD CONSTRAINTS — OVERRIDE DEFAULT TONE) ===
-sarcasm=${p.sarcasm}, warmth=${p.warmth}, verbosity=${p.verbosity}
-Kai set these sliders on purpose. They OVERRIDE any generic “be helpful / conversational / thorough” instincts.
-A 20-point swing MUST be obvious in LENGTH and WIT. Ignoring dials is a failure.
-Dials never override honesty: no yes-man mode, no flattery-for-warmth, no hiding that he's wrong.
-Do NOT claim you changed a dial unless a system note says the app already applied it — dial changes are app-layer only.
-Never invent percentage-change math about dials ("X% more/less funny/insufferable"). Report only real 0–100 dial values when confirming.
-Humor/humour/wit map to the sarcasm dial — there is no separate humor slider.
-If verbosity is high and he asked for a full plan/timeline, a one-liner is a FAILED reply even if the joke is good.
-
-${verbosityBlock}
-
-${sarcasmBlock}
-
+=== DIALS (override tone and length; same on every brain) ===
+sarcasm=${p.sarcasm} warmth=${p.warmth} verbosity=${p.verbosity}. A 20-point swing must show in length and wit. Humor means sarcasm. Do not invent dial changes or percent math. personality_get reads; personality_set saves only a direct request.
+${personalityLengthRule(p.verbosity)} Cover the ask, including a plan when he asked for one. No padding. Detail he asks for applies to that answer only.
+Wit ${p.sarcasm} (${s.band}): ${s.must} “sir” once, naturally.
 ${w.must}
-
-COMBO TESTS (self-check — rewrite if you fail):
-- verbosity≤20 → count sentences. More than allowed = rewrite shorter FIRST, then apply tone.
-- verbosity≥55 + he asked for steps/timeline/plan → you MUST include the structure (not just a witty summary line).
-- sarcasm≥85 → if a stranger wouldn't notice a joke/understatement, rewrite with one.
-- sarcasm≥85 + verbosity≤20 → one short witty sentence with “sir.” Not a paragraph with a joke glued on.
-- sarcasm≥70 + warmth≥70 → JARVIS: dry joke AND clear loyalty — and “sir.”
-- sarcasm≥70 + warmth≤30 → colder TARS: dry, spare, no buddy pep — still not mean; still “sir.”
-- sarcasm≤25 + warmth≥70 → warm and straight: care without jokes; still “sir.”
-- SIR CHECK: if the draft has no “sir”, add one naturally.
-
-BANNED PHRASES: "I'd be happy to help", "Certainly!", "As an AI", "Great question!", "Of course!" (without sir), "I've gone ahead and…", "if I had a magic wand", random French/foreign flair unless Kai asked.
 === END DIALS ===`
 }
 
-/** Short late reminder — models weight end-of-system more. */
+/** Late numeric reminder. Rules live in the dial block above; do not restate them. */
 export function buildPersonalityReminder(scales: PersonalityScales): string {
   const p = normalizePersonality(scales)
-  const lengthRule =
-    p.verbosity <= 14
-      ? 'LENGTH: ONE sentence, ≤18 words + sir. Delete extras.'
-      : p.verbosity <= 25
-        ? 'LENGTH: 1 sentence preferred, 2 max. ~25 words total.'
-        : p.verbosity <= 40
-          ? 'LENGTH: ≤2 short sentences (unless he asked for a list — then a tight skeleton).'
-          : p.verbosity <= 60
-            ? 'LENGTH: 2–5 sentences, or short numbered steps if he asked for a plan.'
-            : 'LENGTH: deliver the full ask — short paragraphs / numbered steps OK. Do not collapse to a one-liner.'
-  const humorRule =
-    p.sarcasm >= 90
-      ? 'HUMOR: mandatory dry TARS/JARVIS beat this turn — straight briefings fail.'
-      : p.sarcasm >= 75
-        ? 'HUMOR: add a clear dry beat if the draft is totally straight.'
-        : p.sarcasm <= 25
-          ? 'HUMOR: none — stay straight.'
-          : 'HUMOR: light wit OK, don’t force it.'
-  const warmthRule =
-    p.warmth >= 85
-      ? 'WARMTH: buddy loyalty hearable — still correct him first when wrong; never agree to be nice.'
-      : p.warmth <= 30
-        ? 'WARMTH: cool/professional, minimal pep.'
-        : 'WARMTH: friendly, not gushy — honesty over agreement.'
-
-  return `
-
-REMINDER before you answer (OBEY DIALS):
-- sarcasm=${p.sarcasm}, warmth=${p.warmth}, verbosity=${p.verbosity}
-- ${lengthRule}
-- ${humorRule}
-- ${warmthRule}
-- SIR: address Kai as “sir” naturally.
-- TRUTH: no yes-man — correct him when he's wrong; never invent tool success, dial changes, or dial math.`
+  return `\n\nDials now: sarcasm=${p.sarcasm} warmth=${p.warmth} verbosity=${p.verbosity}. ${personalityLengthRule(p.verbosity)}`
 }
 
 const KEY_ALIASES: Record<string, PersonalityKey> = {
@@ -353,11 +250,18 @@ const NUMBER_WORDS: Record<string, number> = {
 }
 
 function parseScaleValue(raw: string): number | null {
-  const trimmed = raw.trim().toLowerCase().replace(/%/g, '')
+  const trimmed = raw.trim().toLowerCase().replace(/(?:%|percent|out of\s+100|\/\s*100)\s*$/g, '').trim()
   if (/^\d{1,3}$/.test(trimmed)) return clampScale(trimmed)
   const compact = trimmed.replace(/\s+/g, '')
   if (compact in NUMBER_WORDS) return NUMBER_WORDS[compact]!
   if (trimmed in NUMBER_WORDS) return NUMBER_WORDS[trimmed]!
+  const units = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen']
+  if (units.includes(trimmed)) return units.indexOf(trimmed)
+  if (trimmed === 'one hundred') return 100
+  const [tens, unit] = trimmed.split(/[ -]/)
+  if (tens in NUMBER_WORDS && unit && units.includes(unit) && units.indexOf(unit) < 10) {
+    return NUMBER_WORDS[tens]! + units.indexOf(unit)
+  }
   return null
 }
 
@@ -405,11 +309,20 @@ export type PersonalityVoiceExtract = {
   matched: string
 }
 
-const SET_VERB_RE =
-  /\b(?:set|make|put|dial|lower|raise|drop|bring|crank|turn|tune|adjust|bump)\s+(?:(?:the|my|your|that|this)\s+)?([a-z]+(?:\s+(?:core|dial|level|slider|meter))?)\s+(?:up\s+)?(?:to|at|=)\s+([a-z]+(?:[\s-][a-z]+)?|\d{1,3})\s*%?/i
+const DIAL_PATTERN = '(?:humor|humour|humerus|sarcasm|sarcastic|snark|wit|jokes?|warmth|warm|friendliness|friendly|verbosity|verbose|terse|terseness|brevity|length|details?)'
+const VALUE_PATTERN = '(?:\\d{1,3}(?![\\d.])|one\\s+hundred|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[ -](?:one|two|three|four|five|six|seven|eight|nine))?|hundred|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)(?:\\s*(?:%|percent)|\\s*(?:/|out of)\\s*100)?'
+const SET_VERB_RE = new RegExp(`\\b(?:set|make|put|dial|lower|raise|drop|bring|crank|turn|tune|adjust|bump)\\s+(?:(?:the|my|your|that|this)\\s+)?(${DIAL_PATTERN}(?:\\s+(?:core|dial|level|slider|meter))?)\\s+(?:(?:up|down)\\s+)?(?:to\\s+|at\\s+|=\\s*)?(${VALUE_PATTERN})`, 'i')
+const BARE_SET_RE = new RegExp(`\\b(${DIAL_PATTERN}(?:\\s+(?:core|dial|level|slider|meter))?)\\s*(?:to\\s+|at\\s+|=\\s*|:\\s*)(${VALUE_PATTERN})`, 'i')
 
-const BARE_SET_RE =
-  /\b((?:humor|humour|humerus|sarcasm|snark|wit|joke|warmth|warm|buddy|friendly|verbosity|verbose|terse|terseness|brevity|length|detail|details)(?:\s+(?:core|dial|level|slider|meter))?)\s+(?:up\s+)?(?:to|at|=)\s+([a-z]+(?:[\s-][a-z]+)?|\d{1,3})\s*%?\b/i
+/** Mask quoted examples/code without changing indices; never execute a mentioned command. */
+function commandText(text: string): string {
+  return text.replace(/```[\s\S]*?```|`[^`]*`|"[^"]*"|“[^”]*”|(?<![\w])'[^'\n]*'/g, match => ' '.repeat(match.length))
+}
+
+function commandIsNegatedOrDiscussed(text: string, index: number): boolean {
+  const prefix = text.slice(0, index).split(/[.;!?\n]|\b(?:but|and)\b/i).pop() || ''
+  return /\b(?:don['’]?t|do not|not|never|avoid|stop|if|unless|example|said|saying|explain|command|phrase|parser|test)\b|\b(?:how|what happens|would you|could I|can I)\b/i.test(prefix)
+}
 
 function stripDialClause(text: string, matchIndex: number, matchLength: number): string {
   const before = text.slice(0, matchIndex)
@@ -420,6 +333,8 @@ function stripDialClause(text: string, matchIndex: number, matchLength: number):
     .replace(/\s*[,;]+\s*/g, ' ')
     .replace(/\s{2,}/g, ' ')
     .replace(/^[\s.,;:!?-]+|[\s.,;:!?-]+$/g, '')
+    .replace(/^(?:(?:and|then|also|okay|ok|albert|sir|can you|could you|would you|will you|i want you to)\b[\s,]*)+/i, '')
+    .replace(/[\s,]*\b(?:please|albert|sir|and|then)$/i, '')
     .trim()
 }
 
@@ -437,18 +352,6 @@ function makeSetAdjust(
   }
 }
 
-function isMostlyDialCommand(t: string): boolean {
-  const cleaned = t
-    .replace(/\b(albert|okay|ok|please|thanks|thank you|sir)\b/gi, ' ')
-    .replace(/[^a-z0-9%\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-  const words = cleaned.split(' ').filter(Boolean)
-  // Keep relative nudges (“more terse”) from stealing compound asks
-  // like “I want a more detailed plan for the EEG sessions”.
-  return words.length > 0 && words.length <= 5
-}
-
 /**
  * Extract a dial set/nudge from free speech — including mid-sentence
  * (“…and also tune your humor up to 70%”).
@@ -456,11 +359,11 @@ function isMostlyDialCommand(t: string): boolean {
 export function extractPersonalityVoiceCommand(text: string): PersonalityVoiceExtract | null {
   const original = text.trim()
   if (!original) return null
-  const t = original.toLowerCase().replace(/[“”]/g, '"')
+  const t = commandText(original).toLowerCase()
 
   // Absolute sets first (safe to peel out of compound asks)
   const setMatch = SET_VERB_RE.exec(t)
-  if (setMatch && setMatch.index != null) {
+  if (setMatch && setMatch.index != null && !commandIsNegatedOrDiscussed(t, setMatch.index)) {
     const adj = makeSetAdjust(setMatch[1]!, setMatch[2]!)
     if (adj) {
       return {
@@ -472,7 +375,7 @@ export function extractPersonalityVoiceCommand(text: string): PersonalityVoiceEx
   }
 
   const bareSet = BARE_SET_RE.exec(t)
-  if (bareSet && bareSet.index != null) {
+  if (bareSet && bareSet.index != null && !commandIsNegatedOrDiscussed(t, bareSet.index)) {
     const adj = makeSetAdjust(bareSet[1]!, bareSet[2]!)
     if (adj) {
       return {
@@ -484,48 +387,82 @@ export function extractPersonalityVoiceCommand(text: string): PersonalityVoiceEx
   }
 
   // Relative nudges — only when the utterance is mostly a dial command
-  const mostlyDial = isMostlyDialCommand(t)
-
-  if (
-    mostlyDial &&
-    (/\b(be\s+)?(more\s+)?(terse|brief|shorter)\b/.test(t) ||
-      /\b(less\s+verbose|shorter\s+answers?|cut\s+(it|the\s+answers?)\s+short)\b/.test(t))
-  ) {
-    return { adj: { kind: 'nudge', key: 'verbosity', delta: -15 }, matched: original, remainder: '' }
-  }
-  if (
-    mostlyDial &&
-    (/\b(be\s+)?(more\s+)?(verbose|detailed|longer)\b/.test(t) ||
-      /\b(more\s+detail|longer\s+answers?|less\s+terse)\b/.test(t))
-  ) {
-    return { adj: { kind: 'nudge', key: 'verbosity', delta: 15 }, matched: original, remainder: '' }
+  if (/\b(?:don['’]?t|do not|not|never|if|unless|example)\b/i.test(t)) return null
+  const relative = t.replace(/\b(?:albert|okay|ok|please|sir|can you|could you|would you|a little|a bit)\b/g, ' ')
+    .replace(/[.!?,]/g, ' ').replace(/\s+/g, ' ').trim()
+  const naturalNudges: Array<[RegExp, PersonalityKey, number]> = [
+    [/^(?:(?:be|sound|make (?:your |the )?(?:replies|answers)) )?(?:warmer|friendlier|more (?:warm|friendly))$/, 'warmth', 15],
+    [/^(?:(?:be|sound) )?(?:colder|cooler|less (?:warm|friendly))$/, 'warmth', -15],
+    [/^(?:(?:be|sound) )?(?:funnier|wittier|more sarcastic)$/, 'sarcasm', 15],
+    [/^(?:(?:be|sound) )?(?:less sarcastic|more serious)$/, 'sarcasm', -15],
+    [/^(?:(?:be|make (?:your |the )?(?:replies|answers)) )?(?:shorter|briefer|more terse|less verbose)$/, 'verbosity', -15],
+    [/^(?:(?:be|make (?:your |the )?(?:replies|answers)) )?(?:longer|more detailed|more verbose|less terse)$/, 'verbosity', 15]
+  ]
+  for (const [pattern, key, delta] of naturalNudges) {
+    if (pattern.test(relative)) return { adj: { kind: 'nudge', key, delta }, matched: original, remainder: '' }
   }
 
-  const more = mostlyDial
-    ? t.match(/\b(more|increase|crank\s*up|raise|tune\s*up)\s+(?:the\s+)?([a-z]+(?:\s+core)?)\b/i)
-    : null
+  const more = relative.match(new RegExp(`^(?:be )?(more|increase|crank up|raise|tune up|turn up) (?:the |your )?(${DIAL_PATTERN})(?: (?:core|dial|level|slider))?(?: by (${VALUE_PATTERN})(?: points)?)?$`, 'i'))
   if (more) {
     const label = more[2]!
     const key = resolveDialKey(label)
     if (key) {
-      const delta = key === 'verbosity' && isTersenessPhrase(label) ? -15 : 15
+      const amount = more[3] ? parseScaleValue(more[3]) ?? 15 : 15
+      const delta = key === 'verbosity' && isTersenessPhrase(label) ? -amount : amount
       return { adj: { kind: 'nudge', key, delta }, matched: original, remainder: '' }
     }
   }
 
-  const less = mostlyDial
-    ? t.match(/\b(less|decrease|dial\s*down|lower|drop|fewer)\s+(?:the\s+)?([a-z]+(?:\s+core)?)\b/i)
-    : null
+  const less = relative.match(new RegExp(`^(?:be )?(less|decrease|dial down|lower|drop|fewer|turn down) (?:the |your )?(${DIAL_PATTERN})(?: (?:core|dial|level|slider))?(?: by (${VALUE_PATTERN})(?: points)?)?$`, 'i'))
   if (less) {
     const label = less[2]!
     const key = resolveDialKey(label)
     if (key) {
-      const delta = key === 'verbosity' && isTersenessPhrase(label) ? 15 : -15
+      const amount = less[3] ? parseScaleValue(less[3]) ?? 15 : 15
+      const delta = key === 'verbosity' && isTersenessPhrase(label) ? amount : -amount
       return { adj: { kind: 'nudge', key, delta }, matched: original, remainder: '' }
     }
   }
 
   return null
+}
+
+/** Apply all explicit clauses once, preserving any actual question that follows. */
+export function extractPersonalityCommands(text: string): {
+  adjustments: Array<Exclude<PersonalityVoiceAdjust, null>>
+  remainder: string
+} | null {
+  const adjustments: Array<Exclude<PersonalityVoiceAdjust, null>> = []
+  const remaining: string[] = []
+  // Quotes must stay opaque across conjunctions and punctuation.
+  const masked = commandText(text)
+  const separators = /[,;\n]|\.(?=\s|$)|\b(?:and then|and also|and|then)\b/gi
+  let start = 0
+  const clauses: string[] = []
+  for (const match of masked.matchAll(separators)) {
+    clauses.push(text.slice(start, match.index))
+    start = match.index! + match[0].length
+  }
+  clauses.push(text.slice(start))
+  for (const clause of clauses) {
+    const result = extractPersonalityVoiceCommand(clause)
+    if (result) {
+      adjustments.push(result.adj)
+      if (result.remainder) remaining.push(result.remainder)
+    } else if (clause.trim()) remaining.push(clause.trim())
+  }
+  if (!adjustments.length) return null
+  const remainder = remaining.filter(part => !/^(?:(?:okay|ok|albert|sir|please|thanks|thank you)[\s.!?]*)+$/i.test(part)).join('; ')
+  return { adjustments, remainder }
+}
+
+export function applyPersonalityAdjustments(current: PersonalityScales, adjustments: Array<Exclude<PersonalityVoiceAdjust, null>>): PersonalityScales {
+  return adjustments.reduce((next, adjustment) => applyPersonalityAdjust(next, adjustment), normalizePersonality(current))
+}
+
+export function personalityChangesReply(previous: PersonalityScales, next: PersonalityScales, keys: PersonalityKey[]): string {
+  return [...new Set(keys)].map(key => personalityAdjustReply({ kind: 'set', key, value: next[key] }, next, previous))
+    .join(' ').replace(/, sir\.(?= )/g, ';')
 }
 
 /** Parse “set sarcasm to 90”, “tune humor up to 70”, “more warmth”, etc. */

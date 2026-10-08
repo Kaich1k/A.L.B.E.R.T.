@@ -7,3 +7,5 @@ dist
 .vscode
 .idea
 .albert-hmr-pause
+# Compiled from native/DesktopHelper.swift during build.
+resources/albert-desktop-helper

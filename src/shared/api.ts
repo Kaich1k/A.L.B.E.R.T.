@@ -22,6 +22,7 @@ import type {
   DailyBrief,
   HudSnapshot,
   MissionArtifact,
+  PanelId,
   ProjectPulse,
   TheaterEvent,
   RealtimeSessionConfig,
@@ -62,6 +63,10 @@ export interface AlbertApi {
   /** Text or `{ text, images }` — images are base64 payloads from Comm. */
   sendChat: (payload: string | ChatSendPayload) => Promise<ChatMessage>
   getChatImageDataUrl: (fileName: string) => Promise<string | null>
+  /** Read an allowlisted local image linked by an assistant message. */
+  getArtifactImageDataUrl: (filePath: string) => Promise<string | null>
+  /** Open an allowlisted local artifact with its default macOS application. */
+  openArtifact: (filePath: string) => Promise<boolean>
   readClipboardImage: () => Promise<ChatImagePayload | null>
   onChatEvent: (handler: (event: AgentStreamEvent) => void) => () => void
   listMemories: () => Promise<MemoryFact[]>
@@ -115,6 +120,7 @@ export interface AlbertApi {
     overrides?: { apiKey?: string; voiceId?: string }
   ) => Promise<string>
   speakKokoro: (text: string, overrides?: { voiceId?: string }) => Promise<string>
+  cancelKokoro: () => Promise<boolean>
   warmKokoro: () => Promise<boolean>
   onKokoroProgress: (
     handler: (payload: {
@@ -144,11 +150,25 @@ export interface AlbertApi {
       | { requestId: string; ok: false; error: string }
   ) => void
   hideWindow: () => Promise<boolean>
-  showWindow: () => Promise<boolean>
+  showWindow: (panel?: PanelId) => Promise<boolean>
   toggleWindow: () => Promise<boolean>
   openPrivacyPane: (
-    pane: 'accessibility' | 'screen' | 'automation' | 'microphone'
+    pane: 'accessibility' | 'screen' | 'automation' | 'microphone' | 'desktop-controller'
   ) => Promise<boolean>
+  requestPermission: (kind: 'accessibility' | 'screen') => Promise<{ ok: boolean; message: string }>
+  permissionStatus: () => Promise<{
+    accessibility: boolean
+    accessibilityStatus?: 'granted' | 'denied' | 'unknown'
+    screenRecording: 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown'
+    microphone: 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown'
+    automation: 'granted' | 'denied' | 'unknown'
+    outlook: 'graph' | 'app' | 'web-only' | 'unavailable'
+    outlookDetail: string
+    controllerDetail: string
+    checkedAt: number
+  }>
+  beginOutlookGraph: () => Promise<{ ok: boolean; message: string }>
+  finishOutlookGraph: () => Promise<{ ok: boolean; message: string }>
   probeOllama: () => Promise<{ ok: boolean; mode: 'cloud' | 'local'; detail: string }>
   pullOllamaModel: (model?: string) => Promise<{ ok: boolean; detail: string }>
   probeGroq: () => Promise<{ ok: boolean; mode: 'cloud'; detail: string }>
@@ -175,6 +195,7 @@ export interface AlbertApi {
   logoutCodex: () => Promise<CodexStatus>
   refreshCodexAllowance: () => Promise<CodexAllowance | null>
   interruptCodex: () => Promise<boolean>
+  stopCurrentWork: () => Promise<boolean>
   newCodexThread: () => Promise<CodexStatus>
 
   /** One-time ChatGPT export import (no memory API exists) */
@@ -209,6 +230,8 @@ export interface AlbertApi {
     screenY: number
   }) => Promise<void>
   setHudRoam: (enabled: boolean) => Promise<boolean>
+  setHudExpanded: (expanded: boolean) => Promise<boolean>
+  returnHudToDock: () => Promise<boolean>
   dockHud: (slot?: {
     x: number
     y: number

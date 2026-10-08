@@ -64,7 +64,7 @@ export const computerTools: ToolDefinition[] = [
   {
     name: 'computer_open_tab',
     description:
-      'Open a new tab in YOUR sandbox Computer window (separate window inside A.L.B.E.R.T.). Prefer this over system browser tools when researching or working visibly. For YouTube videos, prefer computer_youtube instead.',
+      'Open a tab in the sandbox Computer window. Prefer computer_youtube for videos.',
     parameters: {
       type: 'object',
       properties: {
@@ -85,7 +85,7 @@ export const computerTools: ToolDefinition[] = [
   {
     name: 'computer_youtube',
     description:
-      'Find and play a YouTube video in YOUR Computer window. Use for “pull up a video on X”, tutorials, how-tos. Searches YouTube and opens the top result (watch URL with autoplay when possible).',
+      'Search YouTube and open the top result in the Computer window.',
     parameters: {
       type: 'object',
       properties: {

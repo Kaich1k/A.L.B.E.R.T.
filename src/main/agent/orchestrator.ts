@@ -1,7 +1,7 @@
 import type { MessageParam, ToolUseBlock } from '@anthropic-ai/sdk/resources/messages'
 import { BrowserWindow } from 'electron'
 import { v4 as uuid } from 'uuid'
-import { ALBERT_SYSTEM_PROMPT } from './prompt'
+import { ALBERT_SYSTEM_PROMPT, compressMemoryBlock } from './prompt'
 import { selectModelTier, type ModelRoute } from './router'
 import { createAnthropic } from '../anthropic/client'
 import { type CodexBridgeEvent } from '../codex/events'
@@ -72,6 +72,7 @@ import type {
   ChatMessage,
   ChatSendPayload
 } from '../../shared/types'
+import { DEFAULT_CLAUDE_MODEL } from '../../shared/modelCatalog'
 import { DEFAULT_GEMINI_MODEL } from '../../shared/types'
 
 function emit(win: BrowserWindow | null, event: AgentStreamEvent): void {
@@ -511,15 +512,10 @@ Remaining ask: ${extracted.remainder}
   // Performance mode avoids a blocking embeddings request before every reply.
   // Local lexical recall is immediate; full semantic recall remains available
   // when performance mode is disabled.
-  const memories = await recallMemories(text || 'image', 6, {
+  const memories = await recallMemories(text || 'image', 8, {
     semantic: settings.performanceMode === false
   })
-  const memoryBlock =
-    memories.length > 0
-      ? `\n\nRelevant long-term memories:\n${memories
-          .map((m) => `- [${m.category}] ${m.content}`)
-          .join('\n')}`
-      : ''
+  const memoryBlock = compressMemoryBlock(memories)
 
   const localLabel =
     route.provider === 'groq'
@@ -530,41 +526,26 @@ Remaining ask: ${extracted.remainder}
           ? 'Ollama'
           : null
 
-  const routingNote =
+  const brainLine =
     route.provider === 'codex'
-      ? `\n\n=== ACTIVE BRAIN (THIS TURN) ===
-Provider: ChatGPT (OpenAI Codex on Kai's ChatGPT allowance). Tier: CHATGPT.
-You are ChatGPT / Codex this turn — not Gemini, not Opus, not Ollama/Groq.
-You have real shell, file editing, and test-running access inside the project sandbox.
-Running npm run update:app / install:app is allowed: the Mac host intercepts it and starts a detached installer, then relaunches. Treat a declined shell plus “started detached” as success — do not retry. Never killall/pkill/osascript-quit ALBERT; call restart via the host instead.
-After you edit ALBERT src/scripts/package.json, the host rebuilds when the turn finishes — including if the turn is interrupted. You do not have to reach the shell. Tell Kai that.
-If Kai asks whether the update ran, or tells you to run npm run update:app / reopen the app now, the host starts that installer immediately.
-Acknowledge once (“On it, sir.”), then work silently. Do not read files or say you are still working. One short final when done.
-Finish the work, then report the outcome in one short spoken paragraph. Do not paste diffs or command logs as your reply — the UI already shows them.
-If Kai asks which brain you're on, say ChatGPT (Codex) on your ChatGPT allowance.
-=== END BRAIN ===`
+      ? `ChatGPT/Codex (${route.model}) on Kai's allowance — real shell, files, and tests in the project sandbox. Not Gemini, Opus, Groq, or Ollama. Host rebuilds after ALBERT source edits, including an interrupted turn; npm run update:app starts a detached installer (do not retry or kill the app).`
       : localLabel
-      ? `\n\n=== ACTIVE BRAIN (THIS TURN) ===
-Provider: ${localLabel}. Model: ${route.model}. Tier: QUICK.
-You ARE on ${localLabel} right now — not Haiku, not Opus.
-If chat history has you saying you were on Haiku, that was an older turn. Do NOT claim Haiku/fallback unless THIS system message says fallback.
-If Kai asks which brain you're on, answer ${localLabel} and name ${route.model}.
-${route.provider === 'groq' ? 'Groq is cloud inference, not an on-device/local-private model.' : ''}
-${route.provider === 'gemini' ? 'Gemini free tier is Google cloud inference; free-tier prompts may be used to improve Google products. Not on-device/private.' : ''}
-Keep it light; for heavy coding, suggest Haiku/Opus.
-${images.length ? `Kai attached image(s). Vision on ${localLabel} is best-effort — describe what you can; if you cannot see them, say so briefly and suggest Haiku.` : ''}
-=== END BRAIN ===`
-      : route.tier === 'fast'
-        ? `\n\n=== ACTIVE BRAIN (THIS TURN) ===
-Provider: Anthropic. Model: ${route.model}. Tier: HAIKU.
-You are on Haiku this turn — not Ollama/Groq. Say so only if asked; don't invent outages.
-${images.length ? 'Kai attached image(s) in this message — look at them and respond accordingly.' : ''}
-=== END BRAIN ===`
-        : `\n\n=== ACTIVE BRAIN (THIS TURN) ===
-Provider: Anthropic. Model: ${route.model}. Tier: OPUS.
-You are on Opus this turn — not Ollama/Groq. Thorough when it matters, still no fluff.
-${images.length ? 'Kai attached image(s) in this message — look at them and respond accordingly.' : ''}
-=== END BRAIN ===`
+        ? `${localLabel} / ${route.model} (QUICK). Not Haiku or Opus unless a fallback note says so.${
+            route.provider === 'groq' ? ' Groq is cloud, not on-device.' : ''
+          }${
+            route.provider === 'gemini'
+              ? ' Gemini is Google cloud; free-tier prompts may improve Google products.'
+              : ''
+          }${images.length ? ` Vision on ${localLabel} is best-effort.` : ''}`
+        : route.tier === 'fast'
+          ? `Anthropic Haiku / ${route.model}. Not Ollama or Groq.`
+          : `Anthropic Opus / ${route.model}. Not Ollama or Groq.`
+
+  const routingNote = `\n\n=== THIS TURN ===
+${activeSurfacePromptBlock('mac')}
+Brain: ${brainLine}${images.length && route.provider !== 'groq' && route.provider !== 'gemini' && route.provider !== 'ollama' ? ' Kai attached image(s) — look at them.' : ''}
+Trust this block over chat history.
+=== END TURN ===`
 
   const projectFolder = settings.projectFolder?.trim()
   const projectBlock = projectFolder
@@ -577,18 +558,7 @@ ${images.length ? 'Kai attached image(s) in this message — look at them and re
   }`
   const personality = normalizePersonality(settings.personality)
   const personalityBlock = buildPersonalityPromptBlock(personality)
-  // Repeat dials at the end — models weight late system instructions more
-  const brainLabel =
-    route.provider === 'codex' ? 'ChatGPT' : localLabel || 'Anthropic'
-  const personalityTail =
-    buildPersonalityReminder(personality) +
-    `\n- SURFACE: Mac desktop app this turn — not the phone companion. Never contradict that.
-- BRAIN: ${brainLabel} / ${route.model} this turn. Never contradict that.
-- ACT: never ask permission for screenshots/clicks when confirms are OFF. Never paste [OK]/[FAIL]/file paths as your reply.
-- EXPERIMENT: keep trying with Kai; don't pawn the task off on him as plan A.
-- VOICE: you can speak — just reply; TTS handles it. Never say you're text-only.`
-
-  const surfaceBlock = `\n\n${activeSurfacePromptBlock('mac')}`
+  const personalityTail = buildPersonalityReminder(personality)
   const resumeNote = consumePendingResumeNote()
   const resumeBlock = resumeNote ? `\n\n=== RESTORED CONTEXT CAPSULE ===\n${resumeNote}\n=== END CAPSULE ===` : ''
 
@@ -598,7 +568,6 @@ ${images.length ? 'Kai attached image(s) in this message — look at them and re
     memoryBlock +
     projectBlock +
     modeBlock +
-    surfaceBlock +
     resumeBlock +
     routingNote +
     dialAppliedNote +
@@ -654,8 +623,8 @@ function escalationTarget(): { provider: 'codex' | 'anthropic'; model: string } 
   if (settings.codexEnabled !== false) {
     return { provider: 'codex', model: settings.codexModel || 'codex' }
   }
-  if (settings.paidFallbackEnabled) {
-    return { provider: 'anthropic', model: settings.fastModel || 'claude-haiku-4-5' }
+  if (settings.fallbackBrain === 'claude' && settings.anthropicApiKey?.trim()) {
+    return { provider: 'anthropic', model: settings.powerModel || DEFAULT_CLAUDE_MODEL }
   }
   return null
 }
@@ -921,21 +890,18 @@ async function codexFallback(
   const { win } = args
   const settings = getSettings()
 
-  if (settings.geminiApiKey?.trim()) {
+  if (settings.fallbackBrain === 'gemini' && settings.geminiApiKey?.trim()) {
     const model = settings.geminiModel || DEFAULT_GEMINI_MODEL
     emit(win, {
       type: 'route',
       model,
       tier: 'local',
-      reason: `ChatGPT failed → Gemini`
+      reason: `Chosen brain failed → Gemini ${model}`
     })
     return runOpenAiLocalTurn(
       args.displayContent,
       args.system +
-        `\n\n=== ACTIVE BRAIN (THIS TURN — GEMINI FALLBACK) ===
-ChatGPT/Codex failed: ${fault.message}
-You are NOW on Gemini (${model}), the free fallback. Answer the ask. Do not claim to be ChatGPT. Do not narrate the ChatGPT fault unless Kai asks.
-=== END BRAIN ===`,
+        `\n\nFallback: the chosen brain failed (${fault.message}). You are Gemini (${model}) because Kai selected that backup. Do not claim to be the other brain.`,
       model,
       win,
       'gemini',
@@ -944,22 +910,18 @@ You are NOW on Gemini (${model}), the free fallback. Answer the ask. Do not clai
     )
   }
 
-  if (settings.paidFallbackEnabled && settings.anthropicApiKey?.trim()) {
-    const model = settings.powerModel || 'claude-opus-5'
+  if (settings.fallbackBrain === 'claude' && settings.anthropicApiKey?.trim()) {
+    const model = settings.powerModel || DEFAULT_CLAUDE_MODEL
     emit(win, {
       type: 'route',
       model,
       tier: 'power',
-      reason: `ChatGPT failed → Opus (paid)`
+      reason: `Chosen brain failed → Claude ${model}`
     })
     return runAnthropicTurn(
       args.displayContent,
       args.system +
-        `\n\n=== ACTIVE BRAIN (THIS TURN — PAID FALLBACK) ===
-ChatGPT/Codex failed: ${fault.message}
-You are NOW on Anthropic Opus (${model}), which Kai pays for per token. He turned paid Opus fallback ON, so this is expected.
-Answer the ask. Do not claim to be ChatGPT. Do not narrate the ChatGPT fault unless Kai asks.
-=== END BRAIN ===`,
+        `\n\nFallback: the chosen brain failed (${fault.message}). You are Claude (${model}) because Kai selected that backup. Do not claim to be the other brain.`,
       model,
       'power',
       win,
@@ -974,10 +936,10 @@ Answer the ask. Do not claim to be ChatGPT. Do not narrate the ChatGPT fault unl
       : fault.kind === 'notSignedIn'
         ? ' Sign in from Systems → Brain.'
         : fault.kind === 'usageLimit'
-          ? ' Add a Gemini key in Systems, or turn on paid Opus fallback.'
+          ? ' Pick another model in Systems, or choose one backup brain.'
           : fault.kind === 'contextWindow'
             ? ' Say “new ChatGPT thread” and I’ll start clean.'
-            : ' Gemini (free) or Opus (paid) can cover if you enable them in Systems.'
+            : ' Pick the model in Systems. A backup runs only if you chose one.'
   const content = `${fault.message}${advice}`
 
   emit(win, { type: 'error', error: fault.message })
@@ -1042,11 +1004,7 @@ async function runOpenAiLocalTurn(
         displayContent: _userText,
         system,
         reason: `QUICK (${label}) failed → escalating (${short})`,
-        note: `\n\n=== ACTIVE BRAIN (THIS TURN — FALLBACK) ===
-${label} failed (${short}). You are NOT on ${label} any more; the brain named above is answering.
-Kai still has QUICK selected — only this turn fell back. If asked, say ${label} errored and this brain covered it.
-Do not keep claiming fallback on later turns unless this note appears again.
-=== END BRAIN ===`,
+        note: `\n\nFallback: ${label} failed (${short}). This turn only — the brain named above is answering. Do not claim ${label} unless asked, and then say it errored.`,
         win,
         replyBudget: replyTokens,
         toolBudget: toolTokens
@@ -1271,7 +1229,7 @@ async function runAnthropicTurn(
     }
 
     if (tier === 'fast' && loops === 1 && toolUses.length >= 2) {
-      const power = getSettings().powerModel || 'claude-opus-5'
+      const power = getSettings().powerModel || DEFAULT_CLAUDE_MODEL
       if (power !== model) {
         model = power
         emit(win, {

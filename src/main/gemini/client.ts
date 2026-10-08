@@ -15,16 +15,10 @@ import { DEFAULT_GEMINI_MODEL } from '../../shared/types'
 
 /** OpenAI-compatible Gemini endpoint (Google AI Studio / Gemini API). */
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/openai'
-const GEMINI_FALLBACK_MODELS = [
-  DEFAULT_GEMINI_MODEL,
-  'gemini-3.5-flash-lite',
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-lite'
-] as const
-
+/** The model Kai picked. Do not silently swap in another Gemini id. */
 export function geminiModelCandidates(primary: string): string[] {
   const requested = (primary || DEFAULT_GEMINI_MODEL).trim() || DEFAULT_GEMINI_MODEL
-  return [...new Set([requested, ...GEMINI_FALLBACK_MODELS])]
+  return [requested]
 }
 
 function requireGeminiKey(): string {

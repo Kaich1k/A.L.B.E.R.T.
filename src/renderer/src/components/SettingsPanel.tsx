@@ -3,6 +3,7 @@ import {
   CLAUDE_DASHBOARD_URL,
   DEFAULT_GEMINI_MODEL,
   DEFAULT_GROQ_MODEL,
+  type FallbackBrain,
   DEFAULT_PERSONALITY,
   PERSONALITY_META,
   type AlbertSettings,
@@ -16,7 +17,18 @@ import type { ChatGptImportScan } from '../../../shared/api'
 import type { CodexStatus } from '../../../shared/types'
 import { normalizePersonality } from '../../../shared/personality'
 import { APP_NAME } from '../../../shared/brand'
+import {
+  CHATGPT_SOL_61_MODEL,
+  codexModelLabel,
+  codexModelListed,
+  sol61UnavailableReason
+} from '../../../shared/codexModels'
 import { groqTransitionWindowOpen } from '../../../shared/groqModels'
+import {
+  CLAUDE_MODEL_OPTIONS,
+  GEMINI_MODEL_OPTIONS,
+  withSavedModel
+} from '../../../shared/modelCatalog'
 import { useAlbertStore } from '../store'
 import { listTtsVoices, speakText, stopSpeaking } from '../voice/tts'
 
@@ -44,14 +56,6 @@ function settingsPayload(form: AlbertSettings): Partial<AlbertSettings> {
   }
 }
 
-const MODEL_OPTIONS = [
-  'claude-haiku-4-5',
-  'claude-sonnet-4-6',
-  'claude-sonnet-5',
-  'claude-opus-4-8',
-  'claude-opus-5'
-]
-
 const OLLAMA_MODEL_OPTIONS: Array<{ id: string; label: string; disabled?: boolean }> = [
   { id: 'qwen3.5:4b', label: 'qwen3.5:4b — recommended · ~3.4GB' },
   { id: 'qwen3.5:9b', label: 'qwen3.5:9b — stronger, slower · ~6.6GB' },
@@ -76,15 +80,33 @@ const GROQ_MODEL_OPTIONS = [
     : [])
 ]
 
-const GEMINI_MODEL_OPTIONS = [
-  { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash — recommended current plan route' },
-  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite — fastest / lightest' },
-  { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash — legacy; missing from many current plans' },
-  { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite — legacy lite route' },
-  { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro — legacy; tighter quotas' }
-]
-
 const PERSONALITY_KEYS = Object.keys(PERSONALITY_META) as PersonalityKey[]
+
+function CodexModelOptions({
+  models,
+  version
+}: {
+  models: ReadonlyArray<{ id: string; displayName: string }>
+  version?: string | null
+}): React.JSX.Element {
+  const sol61Ready = codexModelListed(models, CHATGPT_SOL_61_MODEL)
+  const others = models.filter(
+    (m) => m.id !== CHATGPT_SOL_61_MODEL && !m.id.startsWith(`${CHATGPT_SOL_61_MODEL}-`)
+  )
+  return (
+    <>
+      <option value={CHATGPT_SOL_61_MODEL} disabled={!sol61Ready}>
+        {codexModelLabel(CHATGPT_SOL_61_MODEL)} ({CHATGPT_SOL_61_MODEL})
+        {sol61Ready ? '' : ` — ${sol61UnavailableReason(version)}`}
+      </option>
+      {others.map((m) => (
+        <option key={m.id} value={m.id}>
+          {codexModelLabel(m.id, m.displayName)} ({m.id})
+        </option>
+      ))}
+    </>
+  )
+}
 
 type CompanionStatus = {
   running: boolean
@@ -124,9 +146,43 @@ export function SettingsPanel(): React.JSX.Element {
   const [importScan, setImportScan] = useState<ChatGptImportScan | null>(null)
   const [importNote, setImportNote] = useState('')
   const [importBusy, setImportBusy] = useState(false)
+  const [permissions, setPermissions] = useState<Awaited<ReturnType<typeof window.albert.permissionStatus>> | null>(null)
+  const [graphNote, setGraphNote] = useState('')
+  const [permissionNote, setPermissionNote] = useState('')
+  const [permissionBusy, setPermissionBusy] = useState(false)
   const lastSavedJson = useRef(JSON.stringify(settingsPayload(settings)))
   const saveTimer = useRef(0)
   const savedFlashTimer = useRef(0)
+  const formRef = useRef(form)
+  formRef.current = form
+
+  const flushSettingsNow = useCallback(async (nextForm = formRef.current): Promise<void> => {
+    const payload = settingsPayload(nextForm)
+    const json = JSON.stringify(payload)
+    if (json === lastSavedJson.current) return
+    window.clearTimeout(saveTimer.current)
+    try {
+      setSaveState('saving')
+      const next = await window.albert.setSettings(payload)
+      lastSavedJson.current = JSON.stringify(settingsPayload(next))
+      setSettings(next)
+      setSaveState('saved')
+      window.clearTimeout(savedFlashTimer.current)
+      savedFlashTimer.current = window.setTimeout(() => setSaveState('idle'), 1600)
+    } catch (err) {
+      setSaveState('error')
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }, [setSettings, setError])
+
+  const refreshPermissions = useCallback(async (): Promise<void> => {
+    try {
+      setPermissions(await window.albert.permissionStatus())
+    } catch (error) {
+      setPermissions(null)
+      setPermissionNote(`Permission check failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }, [])
 
   const refreshCompanion = useCallback(async (): Promise<void> => {
     try {
@@ -148,6 +204,17 @@ export function SettingsPanel(): React.JSX.Element {
   useEffect(() => {
     void refreshCompanion()
   }, [refreshCompanion])
+
+  useEffect(() => {
+    void refreshPermissions()
+    const onFocus = (): void => void refreshPermissions()
+    window.addEventListener('focus', onFocus)
+    window.addEventListener('albert-permissions-refresh', onFocus)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      window.removeEventListener('albert-permissions-refresh', onFocus)
+    }
+  }, [refreshPermissions])
 
   // Codex: connect once when the panel opens, then follow pushed status events
   // (sign-in completing in the browser arrives asynchronously).
@@ -435,8 +502,9 @@ export function SettingsPanel(): React.JSX.Element {
             <p className="section-sub">
               High sarcasm = dry TARS/JARVIS (also called humor/wit). High warmth = buddy on
               the line — still honest, never a yes-man. Low verbosity = short; high = full plans
-              when you ask. Voice: “set sarcasm to 60”, “tune humor up to 70”, “more terse”,
-              “set verbosity to 80”, “more warmth”. Reset restores defaults.
+              when you ask. Type or say “set humor to 70 and warmth to 90”, “be less sarcastic”,
+              or “set verbosity to 80 and explain the plan”. Changes are saved across models;
+              the next reply uses them. Reset restores defaults.
             </p>
             <div className="personality-grid">
               {PERSONALITY_KEYS.map((key) => {
@@ -455,18 +523,24 @@ export function SettingsPanel(): React.JSX.Element {
                     </div>
                     <input
                       type="range"
+                      aria-label={`${meta.label} dial`}
                       min={0}
                       max={100}
                       value={value}
-                      onChange={(e) =>
-                        setForm({
-                          ...form,
-                          personality: {
-                            ...normalizePersonality(form.personality),
-                            [key]: Number(e.target.value)
-                          }
-                        })
-                      }
+                      onChange={(e) => {
+                        const personality = {
+                          ...normalizePersonality(formRef.current.personality),
+                          [key]: Number(e.target.value)
+                        }
+                        const nextForm = { ...formRef.current, personality }
+                        formRef.current = nextForm
+                        setForm(nextForm)
+                      }}
+                      onPointerUp={() => {
+                        // Commit on release so the next Comm turn sees live dials.
+                        void flushSettingsNow(formRef.current)
+                      }}
+                      onKeyUp={() => void flushSettingsNow(formRef.current)}
                     />
                   </div>
                 )
@@ -508,9 +582,47 @@ export function SettingsPanel(): React.JSX.Element {
           <div className="settings-section" id="systems-ai">
             <h3 className="settings-section-title">2 · Brain</h3>
             <p className="section-sub">
-              ChatGPT is the brain for every turn. Gemini is the free backup. Opus is the paid
-              backup. Use the sidebar to lock a fallback; otherwise ChatGPT always answers.
+              Pick the brain and the exact model for every turn. A backup runs only if you choose
+              one below — Albert does not hop from Gemini to Claude on its own.
             </p>
+
+            <div className="field">
+              <label htmlFor="activeBrain">Active brain</label>
+              <select
+                id="activeBrain"
+                value={
+                  form.routingMode === 'power' || form.routingMode === 'fast'
+                    ? 'claude'
+                    : form.routingMode === 'local'
+                      ? form.localProvider === 'groq'
+                        ? 'groq'
+                        : form.localProvider === 'ollama'
+                          ? 'ollama'
+                          : 'gemini'
+                      : 'chatgpt'
+                }
+                onChange={(e) => {
+                  const choice = e.target.value
+                  if (choice === 'gemini') {
+                    setForm({ ...form, routingMode: 'local', localProvider: 'gemini' })
+                  } else if (choice === 'claude') {
+                    setForm({ ...form, routingMode: 'power' })
+                  } else if (choice === 'groq') {
+                    setForm({ ...form, routingMode: 'local', localProvider: 'groq' })
+                  } else if (choice === 'ollama') {
+                    setForm({ ...form, routingMode: 'local', localProvider: 'ollama' })
+                  } else {
+                    setForm({ ...form, routingMode: 'codex' })
+                  }
+                }}
+              >
+                <option value="chatgpt">ChatGPT</option>
+                <option value="gemini">Gemini</option>
+                <option value="claude">Claude</option>
+                <option value="groq">Groq</option>
+                <option value="ollama">Ollama</option>
+              </select>
+            </div>
 
             <div className={`settings-brain-card ${codex?.signedIn ? 'ok' : ''}`}>
               <div className="settings-brain-card-head">
@@ -568,6 +680,33 @@ export function SettingsPanel(): React.JSX.Element {
               >
                 Refresh allowance
               </button>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={codexBusy || !codex?.installed}
+                onClick={() => {
+                  setCodexBusy(true)
+                  setCodexNote('Rechecking ChatGPT models…')
+                  void window.albert
+                    .connectCodex()
+                    .then((status) => {
+                      setCodex(status)
+                      useAlbertStore.getState().setCodexStatus(status)
+                      const solReady = codexModelListed(status.availableModels, CHATGPT_SOL_61_MODEL)
+                      setCodexNote(
+                        solReady
+                          ? 'Models refreshed — 6.1 Sol is available on this account.'
+                          : `Models refreshed — 6.1 Sol: ${sol61UnavailableReason(status.version)}.`
+                      )
+                    })
+                    .catch((err) =>
+                      setCodexNote(err instanceof Error ? err.message : String(err))
+                    )
+                    .finally(() => setCodexBusy(false))
+                }}
+              >
+                Recheck models
+              </button>
             </div>
             {(codexNote || codex?.lastError) && (
               <p className="section-sub" style={{ marginTop: 4 }}>
@@ -575,7 +714,7 @@ export function SettingsPanel(): React.JSX.Element {
               </p>
             )}
 
-            {codex?.availableModels?.length ? (
+            {codex ? (
               <>
                 <div className="field">
                   <label htmlFor="codexModel">ChatGPT model (everyday)</label>
@@ -587,12 +726,14 @@ export function SettingsPanel(): React.JSX.Element {
                     <option value="">
                       auto — currently {codex.model ?? 'unset'}
                     </option>
-                    {codex.availableModels.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.displayName} ({m.id})
-                      </option>
-                    ))}
+                    <CodexModelOptions models={codex.availableModels || []} version={codex.version} />
                   </select>
+                  {!codexModelListed(codex.availableModels, CHATGPT_SOL_61_MODEL) ? (
+                    <p className="section-sub" style={{ marginTop: 4 }}>
+                      6.1 Sol ({CHATGPT_SOL_61_MODEL}) — {sol61UnavailableReason(codex.version)}. Use Recheck
+                      models after OpenAI enables it on this Codex account.
+                    </p>
+                  ) : null}
                 </div>
 
                 <div className="field">
@@ -605,11 +746,7 @@ export function SettingsPanel(): React.JSX.Element {
                     <option value="">
                       auto — currently {codex.escalationModel ?? 'unset'}
                     </option>
-                    {codex.availableModels.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.displayName} ({m.id})
-                      </option>
-                    ))}
+                    <CodexModelOptions models={codex.availableModels || []} version={codex.version} />
                   </select>
                 </div>
 
@@ -664,21 +801,19 @@ export function SettingsPanel(): React.JSX.Element {
             </div>
 
             <h4 className="section-title" style={{ margin: '0.75rem 0 0', fontSize: '0.85rem' }}>
-              Fallbacks
+              Gemini
             </h4>
             <p className="section-sub">
-              Used only when ChatGPT is signed out, hits a limit, or you lock one from the sidebar.
+              Used when Gemini is the active brain, or the one backup you picked.
             </p>
 
             <div className="field">
-              <label htmlFor="geminiApiKey">Gemini — free fallback</label>
+              <label htmlFor="geminiApiKey">Gemini API key</label>
               <input
                 id="geminiApiKey"
                 type="password"
                 value={form.geminiApiKey || ''}
-                onChange={(e) =>
-                  setForm({ ...form, geminiApiKey: e.target.value, localProvider: 'gemini' })
-                }
+                onChange={(e) => setForm({ ...form, geminiApiKey: e.target.value })}
                 placeholder="from aistudio.google.com/apikey"
                 autoComplete="off"
               />
@@ -690,7 +825,7 @@ export function SettingsPanel(): React.JSX.Element {
                 value={form.geminiModel || DEFAULT_GEMINI_MODEL}
                 onChange={(e) => setForm({ ...form, geminiModel: e.target.value })}
               >
-                {GEMINI_MODEL_OPTIONS.map((m) => (
+                {withSavedModel(GEMINI_MODEL_OPTIONS, form.geminiModel).map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.label}
                   </option>
@@ -711,20 +846,34 @@ export function SettingsPanel(): React.JSX.Element {
             </button>
             {geminiStatus ? <p className="section-sub">{geminiStatus}</p> : null}
 
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={form.paidFallbackEnabled === true}
-                onChange={(e) => setForm({ ...form, paidFallbackEnabled: e.target.checked })}
-              />
-              <span>Allow paid Opus when ChatGPT and Gemini both fail</span>
-            </label>
-            <p className="section-sub" style={{ marginTop: 4 }}>
-              Off by default. Opus bills your Anthropic key. Leave this off unless you want that.
-            </p>
-
             <div className="field">
-              <label htmlFor="anthropicApiKey">Anthropic API key (Opus only)</label>
+              <label htmlFor="fallbackBrain">If this brain fails</label>
+              <select
+                id="fallbackBrain"
+                value={form.fallbackBrain || 'none'}
+                onChange={(e) => {
+                  const fallbackBrain = e.target.value as FallbackBrain
+                  setForm({
+                    ...form,
+                    fallbackBrain,
+                    paidFallbackEnabled: fallbackBrain === 'claude'
+                  })
+                }}
+              >
+                <option value="none">Stay on the chosen brain and say what failed</option>
+                <option value="gemini">Try the Gemini model once</option>
+                <option value="claude">Try the Claude model once</option>
+              </select>
+              <p className="section-sub" style={{ marginTop: 4 }}>
+                One backup, or none. Claude uses your Anthropic key and bills that account.
+              </p>
+            </div>
+
+            <h4 className="section-title" style={{ margin: '0.75rem 0 0', fontSize: '0.85rem' }}>
+              Claude
+            </h4>
+            <div className="field">
+              <label htmlFor="anthropicApiKey">Anthropic API key</label>
               <input
                 id="anthropicApiKey"
                 type="password"
@@ -735,7 +884,7 @@ export function SettingsPanel(): React.JSX.Element {
               />
             </div>
             <div className="field">
-              <label htmlFor="powerModel">Opus model</label>
+              <label htmlFor="powerModel">Claude model</label>
               <select
                 id="powerModel"
                 value={form.powerModel || form.model}
@@ -743,9 +892,9 @@ export function SettingsPanel(): React.JSX.Element {
                   setForm({ ...form, powerModel: e.target.value, model: e.target.value })
                 }
               >
-                {MODEL_OPTIONS.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
+                {withSavedModel(CLAUDE_MODEL_OPTIONS, form.powerModel || form.model).map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
                   </option>
                 ))}
               </select>
@@ -835,8 +984,7 @@ export function SettingsPanel(): React.JSX.Element {
             <details className="settings-advanced">
               <summary>Advanced · Groq / Ollama / extra routing</summary>
               <p className="section-sub">
-                Not needed for normal use. ChatGPT is the brain. These stay available if you lock
-                them from a voice command.
+                Groq and Ollama are extra brains. Pick one in Active brain above to use it.
               </p>
               <div className="field">
                 <label htmlFor="routingMode">Force a brain</label>
@@ -847,9 +995,9 @@ export function SettingsPanel(): React.JSX.Element {
                     setForm({ ...form, routingMode: e.target.value as RoutingMode })
                   }
                 >
-                  <option value="codex">ChatGPT (default)</option>
-                  <option value="local">Gemini / Groq / Ollama lock</option>
-                  <option value="power">Opus lock</option>
+                  <option value="codex">ChatGPT</option>
+                  <option value="local">Gemini / Groq / Ollama</option>
+                  <option value="power">Claude</option>
                 </select>
               </div>
               <h4 className="section-title" style={{ margin: '0.5rem 0 0', fontSize: '0.85rem' }}>
@@ -939,7 +1087,7 @@ export function SettingsPanel(): React.JSX.Element {
                     value={form.geminiModel || DEFAULT_GEMINI_MODEL}
                     onChange={(e) => setForm({ ...form, geminiModel: e.target.value })}
                   >
-                    {GEMINI_MODEL_OPTIONS.map((m) => (
+                    {withSavedModel(GEMINI_MODEL_OPTIONS, form.geminiModel).map((m) => (
                       <option key={m.id} value={m.id}>
                         {m.label}
                       </option>
@@ -1141,24 +1289,94 @@ export function SettingsPanel(): React.JSX.Element {
               macOS permissions (desktop control)
             </h4>
             <p className="section-sub">
-              For Spotify, clicking around apps, screenshots, and browser automation, toggle these on
-              for <strong>ALBERT</strong> (or Electron if you&apos;re in dev). Restart the app after
-              granting.
+              Request access from this installed ALBERT, then approve it in macOS. Accessibility
+              may be called Device Control and Data Access. Restart ALBERT after granting Screen
+              Recording. If a switch is already on but access fails, an older build may still own
+              that entry; remove and re-add the current ALBERT app in that category.
             </p>
             <ul className="section-sub" style={{ margin: '0.5rem 0 0.75rem', paddingLeft: '1.1rem' }}>
               <li>
-                <strong>Accessibility</strong> — click, type, hotkeys, System Events
+                <strong>Accessibility</strong> — {permissions ? (permissions.accessibilityStatus || (permissions.accessibility ? 'granted' : 'not granted')) : 'not checked'}
+                {permissions && !permissions.accessibility
+                  ? '. Click, type, and shortcuts stay unavailable until this is enabled.'
+                  : ''}
               </li>
               <li>
-                <strong>Screen Recording</strong> — desktop screenshots (so he can aim clicks)
+                <strong>Screen Recording</strong> — {permissions?.screenRecording || 'checking'}
+                {permissions && permissions.screenRecording !== 'granted'
+                  ? '. Screenshots stay unavailable until this is granted.'
+                  : ''}
               </li>
               <li>
-                <strong>Automation</strong> — control Chrome/Safari/Spotify via AppleScript
+                <strong>Automation</strong> — {permissions?.automation || 'checking'}
+                {permissions?.automation === 'denied'
+                  ? '. Apple Events to other apps stay unavailable.'
+                  : ''}
               </li>
               <li>
-                <strong>Microphone</strong> — voice wake + talk
+                <strong>Microphone</strong> — {permissions?.microphone || 'checking'}
+              </li>
+              <li>
+                <strong>Outlook</strong> — {permissions?.outlook || 'checking'}. {permissions?.outlookDetail}
               </li>
             </ul>
+            {permissions?.controllerDetail ? <p className="section-sub">{permissions.controllerDetail}</p> : null}
+            {permissionNote ? <p className="section-sub" role="status">{permissionNote}</p> : null}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+              {([['accessibility', 'desktop control'], ['screen', 'Screen Recording']] as const).map(([kind, label]) => (
+                <button key={kind} type="button" className="btn ghost" disabled={permissionBusy} onClick={async () => {
+                  setPermissionBusy(true)
+                  setPermissionNote('Waiting for macOS. Complete any permission prompt, then return here.')
+                  try {
+                    const result = await window.albert.requestPermission(kind)
+                    setPermissionNote(result.message)
+                    await refreshPermissions()
+                  } catch (error) {
+                    setPermissionNote(`Permission request failed: ${error instanceof Error ? error.message : String(error)}`)
+                  } finally { setPermissionBusy(false) }
+                }}>Request {label}</button>
+              ))}
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              <button type="button" className="btn ghost" onClick={() => void window.albert.openPrivacyPane('desktop-controller')}>
+                Reveal desktop controller
+              </button>
+              <button type="button" className="btn ghost" onClick={() => void refreshPermissions()}>
+                Recheck permissions
+              </button>
+            </div>
+            <div className="field">
+              <label htmlFor="microsoftClientId">Outlook Graph client id</label>
+              <input
+                id="microsoftClientId"
+                value={form.microsoftClientId || ''}
+                spellCheck={false}
+                placeholder="Azure application (client) id — leave empty if you use the Outlook app"
+                onChange={(e) => setForm({ ...form, microsoftClientId: e.target.value })}
+              />
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => void window.albert.beginOutlookGraph().then((result) => setGraphNote(result.message))}
+              >
+                Connect Graph
+              </button>
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() =>
+                  void window.albert.finishOutlookGraph().then((result) => {
+                    setGraphNote(result.message)
+                    void refreshPermissions()
+                  })
+                }
+              >
+                Finish Graph sign-in
+              </button>
+            </div>
+            {graphNote ? <p className="section-sub">{graphNote}</p> : null}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {(
                 [
@@ -1378,7 +1596,7 @@ export function SettingsPanel(): React.JSX.Element {
                 checked={form.startupAnimationEnabled !== false}
                 onChange={(e) => setForm({ ...form, startupAnimationEnabled: e.target.checked })}
               />
-              Cinematic startup sequence (plays once when Albert launches)
+              Startup orb animation (plays once when Albert launches)
             </label>
             <div>
               <button
@@ -1387,10 +1605,27 @@ export function SettingsPanel(): React.JSX.Element {
                 disabled={form.startupAnimationEnabled === false}
                 onClick={() => window.dispatchEvent(new CustomEvent('albert:replay-startup'))}
               >
-                Replay startup sequence
+                Replay startup animation
               </button>
             </div>
 
+            <div className="field">
+              <label htmlFor="interfaceStyle">Interface</label>
+              <select
+                id="interfaceStyle"
+                value={form.interfaceStyle || 'workshop'}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    interfaceStyle: e.target.value as AlbertSettings['interfaceStyle']
+                  })
+                }
+              >
+                <option value="workshop">Workshop — blue radial workspace</option>
+                <option value="classic">Classic — previous sidebar shell</option>
+              </select>
+              <p className="section-sub">Switching shells keeps the conversation, voice session, and settings.</p>
+            </div>
             <div className="field">
               <label htmlFor="hudDensity">HUD density</label>
               <select

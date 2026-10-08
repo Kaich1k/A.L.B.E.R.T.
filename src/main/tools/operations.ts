@@ -59,7 +59,7 @@ export const operationsTools: ToolDefinition[] = [
   },
   {
     name: 'approval_request',
-    description: 'Stage a consequential action for human review in the Approval Inbox. Use before sending, publishing, purchasing, deleting, or other external/irreversible action when it should not run immediately.',
+    description: 'Stage a send, publish, purchase, or delete in the Approval Inbox. Does not perform it.',
     parameters: { type: 'object', properties: { missionId: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' }, actionLabel: { type: 'string' }, risk: { type: 'string' }, preview: { type: 'string' } }, required: ['title','description','actionLabel','risk'], additionalProperties: false },
     execute: async (args) => {
       const approval = createApproval({ missionId: args.missionId ? String(args.missionId) : undefined, title: String(args.title), description: String(args.description), actionLabel: String(args.actionLabel), risk: String(args.risk), preview: args.preview ? String(args.preview) : undefined })

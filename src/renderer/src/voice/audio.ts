@@ -1,13 +1,63 @@
 export function downsampleTo16k(input: Float32Array, fromSampleRate: number): Float32Array {
+  if (!Number.isFinite(fromSampleRate) || fromSampleRate <= 0) throw new RangeError('Invalid sample rate')
+  if (!input.length) return new Float32Array()
   if (fromSampleRate === 16000) return input
   const ratio = fromSampleRate / 16000
   const newLength = Math.round(input.length / ratio)
   const result = new Float32Array(newLength)
+  // Windowed-sinc resampling filters frequencies that 16 kHz cannot represent.
+  // Reusing fractional-phase kernels keeps long recordings inexpensive.
+  const radius = Math.ceil(12 * Math.max(1, ratio))
+  const cutoff = 0.47 / Math.max(1, ratio)
+  const phases = 256
+  const kernels = new Map<number, Float64Array>()
+  const kernelFor = (phase: number): Float64Array => {
+    const cached = kernels.get(phase)
+    if (cached) return cached
+    const fraction = phase / phases
+    const kernel = new Float64Array(radius * 2 + 1)
+    let total = 0
+    for (let tap = -radius; tap <= radius; tap++) {
+      const distance = tap - fraction
+      const x = 2 * cutoff * distance
+      const sinc = Math.abs(x) < 1e-12 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x)
+      const window = Math.abs(distance) <= radius ? 0.5 + 0.5 * Math.cos(Math.PI * distance / radius) : 0
+      const weight = 2 * cutoff * sinc * window
+      kernel[tap + radius] = weight
+      total += weight
+    }
+    for (let i = 0; i < kernel.length; i++) kernel[i] /= total
+    kernels.set(phase, kernel)
+    return kernel
+  }
   for (let i = 0; i < newLength; i++) {
-    const idx = Math.min(input.length - 1, Math.floor(i * ratio))
-    result[i] = input[idx]
+    const position = i * ratio
+    const base = Math.floor(position)
+    const kernel = kernelFor(Math.round((position - base) * phases))
+    let value = 0
+    for (let tap = -radius; tap <= radius; tap++) {
+      const index = Math.max(0, Math.min(input.length - 1, base + tap))
+      value += input[index]! * kernel[tap + radius]!
+    }
+    result[i] = value
   }
   return result
+}
+
+/** Select the VAD-observed speech interval; padding is audio context, not speech evidence. */
+export function speechWindow(
+  samples: Float32Array,
+  firstSpeechMs: number,
+  lastSpeechMs: number,
+  paddingMs = 0,
+  sampleRate = 16_000
+): Float32Array {
+  if (!Number.isFinite(firstSpeechMs) || !Number.isFinite(lastSpeechMs) || lastSpeechMs <= firstSpeechMs) {
+    return new Float32Array()
+  }
+  const start = Math.max(0, Math.floor((firstSpeechMs - paddingMs) * sampleRate / 1000))
+  const end = Math.min(samples.length, Math.ceil((lastSpeechMs + paddingMs) * sampleRate / 1000))
+  return samples.subarray(Math.min(start, end), end)
 }
 
 export async function decodeBlobToMono16k(blob: Blob): Promise<Float32Array> {

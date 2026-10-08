@@ -5,6 +5,34 @@ const reliability = await import('../src/shared/voiceReliability.ts')
 const brainIdentity = await import('../src/shared/brainIdentity.ts')
 const audio = await import('../src/renderer/src/voice/audio.ts')
 const groqModels = await import('../src/shared/groqModels.ts')
+const wakeWord = await import('../src/renderer/src/voice/wakeWord.ts')
+
+test('wake matching accepts the natural phrase and keeps active speech in one segment', () => {
+  assert.equal(wakeWord.isWakePhrase('ALBERT wake up'), true)
+  assert.equal(wakeWord.isWakePhrase('Albert, wake up.'), true)
+  assert.equal(wakeWord.isWakePhrase('Hey Albert'), true)
+  assert.equal(wakeWord.isWakePhrase('Wake up, Albert'), true)
+  assert.equal(wakeWord.isMicrophoneTrackHealthy({ readyState: 'live', enabled: true, muted: false }), true)
+  assert.equal(wakeWord.isMicrophoneTrackHealthy({ readyState: 'ended', enabled: true, muted: false }), false)
+  assert.equal(wakeWord.isMicrophoneTrackHealthy({ readyState: 'live', enabled: false, muted: false }), false)
+  assert.equal(wakeWord.isMicrophoneTrackHealthy({ readyState: 'live', enabled: true, muted: true }), false)
+  assert.equal(
+    wakeWord.shouldFinishWakeSegment({ elapsedMs: 3_300, spokeMs: 500, silenceMs: 0 }),
+    false
+  )
+  assert.equal(
+    wakeWord.shouldFinishWakeSegment({ elapsedMs: 3_300, spokeMs: 500, silenceMs: 200 }),
+    true
+  )
+  assert.equal(
+    wakeWord.shouldFinishWakeSegment({ elapsedMs: 6_500, spokeMs: 500, silenceMs: 0 }),
+    false
+  )
+  assert.equal(
+    wakeWord.shouldFinishWakeSegment({ elapsedMs: 12_000, spokeMs: 2_000, silenceMs: 0 }),
+    true
+  )
+})
 
 test('collapses the exact repeated Whisper question from the reported turn', () => {
   assert.equal(
@@ -123,6 +151,21 @@ test('noise crumbs from HVAC and keyboard are treated as hallucinations', () => 
   assert.equal(voiceCommands.isLikelyHallucination('inspect this project and run the tests'), false)
 })
 
+test('repairs the observed recommended homophone without rewriting real amendments', () => {
+  assert.equal(
+    voiceCommands.correctTranscript('Pull up the tabs in the York Amendment in your Computer.'),
+    'Pull up the tabs you recommended in your Computer.'
+  )
+  assert.equal(
+    voiceCommands.correctTranscript('Compare the options the York Amendment.'),
+    'Compare the options you recommended.'
+  )
+  assert.equal(
+    voiceCommands.correctTranscript('Explain the New York amendment.'),
+    'Explain the New York amendment.'
+  )
+})
+
 test('stopword-only utterances never count as a command', () => {
   assert.equal(voiceCommands.voiceContentWords('yeah okay so').length, 0)
   assert.equal(voiceCommands.voiceContentWords('inspect this project').length >= 2, true)
@@ -169,6 +212,17 @@ test('bare I am going to go does not end voice, standby still does', () => {
   assert.equal(voiceCommands.isEndVoiceCommand("I'm going to go now."), true)
   assert.equal(voiceCommands.isEndVoiceCommand('standby'), true)
   assert.equal(voiceCommands.isEndVoiceCommand('go to standby'), true)
+  assert.equal(voiceCommands.isEndVoiceCommand('stop listening'), true)
+  assert.equal(
+    voiceCommands.isEndVoiceCommand("it didn't stop like the listening section"),
+    false
+  )
+  assert.equal(
+    voiceCommands.isEndVoiceCommand('make the listening stop at the correct time'),
+    false
+  )
+  assert.equal(voiceCommands.isBareStandbyReply('Standing by, sir.'), true)
+  assert.equal(voiceCommands.isBareStandbyReply('On it — opening Chrome now.'), false)
 })
 
 test('barge-in hold and command confidence keep one-word noise from stopping him', () => {
@@ -177,10 +231,79 @@ test('barge-in hold and command confidence keep one-word noise from stopping him
   assert.equal(voiceGate.commandConfident(0.1, 2), true)
 })
 
-test('voice endpointing answers short commands quickly without clipping longer thoughts', () => {
-  assert.equal(voiceGate.endOfUtteranceSilenceMs(600), 1_800)
-  assert.equal(voiceGate.endOfUtteranceSilenceMs(2_000), 2_200)
-  assert.equal(voiceGate.endOfUtteranceSilenceMs(8_000), 2_600)
+test('voice endpointing is quick for commands and patient with longer thoughts', () => {
+  assert.equal(voiceGate.endOfUtteranceSilenceMs(600), 900)
+  assert.equal(voiceGate.endOfUtteranceSilenceMs(2_000), 1_300)
+  assert.equal(voiceGate.endOfUtteranceSilenceMs(8_000), 1_800)
+  assert.equal(voiceGate.isSustainedSpeech(80, 90), false)
+  assert.equal(voiceGate.isSustainedSpeech(90, 90), true)
+  assert.equal(
+    voiceGate.isStillInPhrase({
+      loudNow: false,
+      aboveSilence: true,
+      msSinceLoudSpeech: 1_000,
+      hasSpoken: true
+    }),
+    true
+  )
+  assert.equal(
+    voiceGate.isStillInPhrase({
+      loudNow: false,
+      aboveSilence: false,
+      msSinceLoudSpeech: 1_000,
+      hasSpoken: true
+    }),
+    false
+  )
+  assert.equal(
+    voiceGate.isStillInPhrase({
+      loudNow: false,
+      aboveSilence: true,
+      msSinceLoudSpeech: voiceGate.PHRASE_HOLD_MS,
+      hasSpoken: true
+    }),
+    false
+  )
+  assert.equal(
+    voiceGate.shouldEndpointUtterance({
+      spokeMs: 800,
+      silenceMs: 2_800,
+      minSpeechMs: 320,
+      speakingNow: false,
+      canEndpoint: true
+    }),
+    true
+  )
+  assert.equal(
+    voiceGate.shouldEndpointUtterance({
+      spokeMs: 800,
+      silenceMs: 800,
+      minSpeechMs: 320,
+      speakingNow: false,
+      canEndpoint: true
+    }),
+    false
+  )
+  assert.equal(
+    voiceGate.shouldEndpointUtterance({
+      spokeMs: 20_000,
+      silenceMs: 2_000,
+      minSpeechMs: 320,
+      speakingNow: true,
+      canEndpoint: true,
+      recordingMs: 30_000
+    }),
+    false
+  )
+})
+
+test('silence trimming follows room tone while retaining quiet phonemes', () => {
+  assert.equal(voiceGate.transcriptTrimThreshold({ value: 0.002, samples: 40 }), 0.0035)
+  assert.ok(
+    Math.abs(voiceGate.transcriptTrimThreshold({ value: 0.01, samples: 40 }) - 0.0055) <
+      Number.EPSILON * 4
+  )
+  assert.equal(voiceGate.transcriptTrimThreshold({ value: 0.03, samples: 40 }), 0.009)
 })
 
 test('overlapping Whisper chunks keep the whole thought without duplicated boundaries', () => {

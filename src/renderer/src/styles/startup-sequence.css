@@ -586,9 +586,8 @@ body.perf-mode .startup-sequence .startup-sequence__orbit {
 }
 
 @keyframes startup-depart {
-  0% { opacity: 1; transform: scale(1); }
-  35% { opacity: 1; transform: scale(1.012); }
-  100% { opacity: 0; transform: scale(1.045); }
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 
 @keyframes startup-core-enter {

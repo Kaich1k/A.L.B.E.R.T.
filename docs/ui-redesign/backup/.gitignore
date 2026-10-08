@@ -1,0 +1,5 @@
+# Local application rollback bundles and archives are not source artifacts.
+*.app/
+*.asar
+*.zip
+*.dmg

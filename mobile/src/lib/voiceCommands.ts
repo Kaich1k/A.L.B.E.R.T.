@@ -90,6 +90,9 @@ const STANDBY_INTENT: RegExp[] = [
 const STANDBY_META =
   /\b(if\s+you\s+hear|that\s+means|from\s+now\s+on|internal\s+logic|update\s+(your|the|my)\s+(internal\s+)?(logic|code|matcher|memory)|keywords?|listen(?:ing)?\s+for|recognize|don'?t\s+just\s+think|in\s+your\s+memory|make\s+sure\s+you\s+(can|recognize|do)|how\s+standby\s+works|what\s+standby\s+means|think\s+about\s+listening)\b/i
 
+const LISTENING_FEATURE_TALK =
+  /\b(listen(?:ing)?\s+(section|gate|endpoint|vad|timeout|timer|thing|issue|bug|problem|accurate)|make\s+(the\s+)?listen(?:ing)?|(doesn'?t|didn'?t|did\s+not|won'?t|will\s+not|never)\s+stop|stop\s+at\s+the\s+correct|when\s+i\s+(finish|stop)\s+(talking|speaking)|natural(?:ly)?(?:\s+\w+){0,4}\s+(listening|pause)|correct\s+time)\b/i
+
 /** Explicit negation near a standby phrase. */
 const STANDBY_NEGATED =
   /\b(don'?t|do\s+not|never|not\s+yet|no\s+longer)\b[\s\S]{0,48}\b(standby|take\s+(a\s+)?(5|five)|end\s+voice)\b/i
@@ -266,6 +269,9 @@ export function isEndVoiceCommand(text: string): boolean {
   if (parts.length === 0) return false
 
   const last = parts[parts.length - 1]!
+  if (LISTENING_FEATURE_TALK.test(corrected) && !matchesWhole(corrected, END_VOICE_WHOLE)) {
+    return false
+  }
   // Last sentence wins — “… with that said, now you can go and standby.”
   if (clauseIsEndVoice(last)) return true
 

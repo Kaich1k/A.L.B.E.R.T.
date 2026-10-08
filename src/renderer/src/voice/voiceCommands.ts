@@ -2,6 +2,7 @@
 export {
   correctTranscript,
   coreUtterance,
+  isBareStandbyReply,
   isEndVoiceCommand,
   isHideCommand,
   isLikelyHallucination,

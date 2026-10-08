@@ -1,9 +1,20 @@
-import { FormEvent, useEffect, useRef, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { APP_NAME } from '../../../shared/brand'
-import type { ChatImageMediaType, ChatImagePayload, ChatImageRef } from '../../../shared/types'
+import type { ChatImagePayload, ChatImageRef } from '../../../shared/types'
+import {
+  clipboardLooksLikeImage,
+  fileToDraft,
+  filesFromClipboard,
+  MAX_ATTACH,
+  payloadToDraft,
+  withoutDraftImage,
+  type DraftImage
+} from '../chat/draftImages'
+import { localImageTargets, tokenizeRichMessage } from '../chat/richMessage'
 import { useAlbertStore } from '../store'
 import { isEndVoiceCommand } from '../voice/voiceCommands'
-import { AlbertCore } from './AlbertCore'
+import { FilamentOrb, orbMood } from './FilamentOrb'
+import { stopSpeaking } from '../voice/tts'
 
 interface Props {
   onTalk: () => void
@@ -11,15 +22,6 @@ interface Props {
   onStandby?: () => void | Promise<void>
 }
 
-interface DraftImage {
-  id: string
-  mediaType: ChatImageMediaType
-  data: string
-  previewUrl: string
-}
-
-const MAX_ATTACH = 4
-const MAX_BYTES = 4_500_000
 const voiceStackCommands = [
   { label: 'Short version', prompt: 'Give me the short version of your last answer.' },
   { label: 'Hold thought', prompt: 'Hold that thought and save the current thread context for later.' },
@@ -41,82 +43,6 @@ function voiceCaption(state: string): string {
     default:
       return 'Voice idle'
   }
-}
-
-function normalizeMediaType(raw: string): ChatImageMediaType | null {
-  const t = raw.toLowerCase().split(';')[0]!.trim()
-  if (t === 'image/jpg') return 'image/jpeg'
-  if (t === 'image/png' || t === 'image/jpeg' || t === 'image/gif' || t === 'image/webp') {
-    return t
-  }
-  return null
-}
-
-function fileToDraft(file: File): Promise<DraftImage | null> {
-  return new Promise((resolve) => {
-    const named = /\.(png|jpe?g|gif|webp)$/i.exec(file.name || '')
-    const mediaType =
-      normalizeMediaType(file.type) ||
-      (named?.[1] === 'jpg' || named?.[1] === 'jpeg'
-        ? 'image/jpeg'
-        : named?.[1] === 'gif'
-          ? 'image/gif'
-          : named?.[1] === 'webp'
-            ? 'image/webp'
-            : named
-              ? 'image/png'
-              : null)
-    if (!mediaType) {
-      resolve(null)
-      return
-    }
-    if (file.size > MAX_BYTES) {
-      resolve(null)
-      return
-    }
-    const reader = new FileReader()
-    reader.onload = () => {
-      const result = String(reader.result || '')
-      const m = /^data:([^;]+);base64,(.+)$/s.exec(result)
-      if (!m) {
-        resolve(null)
-        return
-      }
-      resolve({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        mediaType,
-        data: m[2]!,
-        previewUrl: result
-      })
-    }
-    reader.onerror = () => resolve(null)
-    reader.readAsDataURL(file)
-  })
-}
-
-function filesFromClipboard(data: DataTransfer | null): File[] {
-  if (!data) return []
-  const files: File[] = []
-  const seen = new Set<string>()
-  const push = (file: File | null): void => {
-    if (!file) return
-    const key = `${file.name}:${file.size}:${file.type}`
-    if (seen.has(key)) return
-    seen.add(key)
-    files.push(file)
-  }
-  for (const file of Array.from(data.files || [])) push(file)
-  for (const item of Array.from(data.items || [])) {
-    if (item.kind === 'file' && (item.type.startsWith('image/') || item.type === '' || item.type === 'image/tiff')) {
-      push(item.getAsFile())
-    }
-  }
-  return files.filter(
-    (file) =>
-      file.type.startsWith('image/') ||
-      file.type === '' ||
-      /\.(png|jpe?g|gif|webp|tiff?|heic)$/i.test(file.name)
-  )
 }
 
 function MessageImages({ images }: { images: ChatImageRef[] }): React.JSX.Element {
@@ -167,6 +93,126 @@ function MessageImages({ images }: { images: ChatImageRef[] }): React.JSX.Elemen
   )
 }
 
+function RichMessageBody({ content }: { content: string }): React.JSX.Element {
+  const tokens = useMemo(() => tokenizeRichMessage(content), [content])
+  const artifacts = useMemo(() => localImageTargets(tokens), [tokens])
+  const [artifactUrls, setArtifactUrls] = useState<Record<string, string>>({})
+  const [inspecting, setInspecting] = useState<{ label: string; path: string; url: string } | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const loaded: Record<string, string> = {}
+      for (const artifact of artifacts) {
+        const dataUrl = await window.albert.getArtifactImageDataUrl(artifact.path)
+        if (dataUrl) loaded[artifact.path] = dataUrl
+      }
+      if (!cancelled && Object.keys(loaded).length) {
+        setArtifactUrls((previous) => ({ ...previous, ...loaded }))
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [artifacts])
+
+  useEffect(() => {
+    if (!inspecting) return
+    const close = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setInspecting(null)
+    }
+    window.addEventListener('keydown', close)
+    return () => window.removeEventListener('keydown', close)
+  }, [inspecting])
+
+  const openLocal = (target: string): void => {
+    const image = artifacts.find((artifact) => artifact.path === target)
+    const url = artifactUrls[target]
+    if (image && url) {
+      setInspecting({ ...image, url })
+      return
+    }
+    void window.albert.openArtifact(target)
+  }
+
+  return (
+    <div className="body rich-message-body">
+      <div className="rich-message-text">
+        {tokens.map((token, index) =>
+          token.type === 'text' ? (
+            <span key={`text-${index}`}>{token.value}</span>
+          ) : token.local ? (
+            <button
+              key={`link-${index}`}
+              type="button"
+              className="rich-message-link"
+              onClick={() => openLocal(token.target)}
+              title={token.target}
+            >
+              {token.label}
+            </button>
+          ) : /^https?:\/\//i.test(token.target) ? (
+            <a
+              key={`link-${index}`}
+              className="rich-message-link"
+              href={token.target}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {token.label}
+            </a>
+          ) : (
+            <span key={`link-${index}`}>{token.label}</span>
+          )
+        )}
+      </div>
+
+      {artifacts.length ? (
+        <div className="message-artifacts" aria-label="Attached output images">
+          {artifacts.map((artifact) => {
+            const url = artifactUrls[artifact.path]
+            return url ? (
+              <button
+                key={artifact.path}
+                type="button"
+                className="message-artifact"
+                onClick={() => setInspecting({ ...artifact, url })}
+                title={`Inspect ${artifact.label}`}
+              >
+                <img src={url} alt={artifact.label} />
+                <span>{artifact.label} · click to inspect</span>
+              </button>
+            ) : null
+          })}
+        </div>
+      ) : null}
+
+      {inspecting ? (
+        <div
+          className="artifact-lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Inspecting ${inspecting.label}`}
+          onClick={() => setInspecting(null)}
+        >
+          <div className="artifact-lightbox__content" onClick={(event) => event.stopPropagation()}>
+            <div className="artifact-lightbox__toolbar">
+              <span>{inspecting.label}</span>
+              <button type="button" onClick={() => void window.albert.openArtifact(inspecting.path)}>
+                Open original
+              </button>
+              <button type="button" onClick={() => setInspecting(null)} aria-label="Close image inspector">
+                ×
+              </button>
+            </div>
+            <img src={inspecting.url} alt={inspecting.label} />
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Element {
   const messages = useAlbertStore((s) => s.messages)
   const streamingText = useAlbertStore((s) => s.streamingText)
@@ -174,17 +220,22 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
   const error = useAlbertStore((s) => s.error)
   const voiceState = useAlbertStore((s) => s.voiceState)
   const voiceStatus = useAlbertStore((s) => s.voiceStatus)
+  const interfaceStyle = useAlbertStore((s) => s.settings.interfaceStyle)
   const routeInfo = useAlbertStore((s) => s.routeInfo)
   const codexPlan = useAlbertStore((s) => s.codexPlan)
   const codexProgress = useAlbertStore((s) => s.codexProgress)
   const codexDiff = useAlbertStore((s) => s.codexDiff)
   const setBusy = useAlbertStore((s) => s.setBusy)
+  const setStreamingText = useAlbertStore((s) => s.setStreamingText)
+  const submitGen = useRef(0)
   const setError = useAlbertStore((s) => s.setError)
   const setMessages = useAlbertStore((s) => s.setMessages)
   const appendMessage = useAlbertStore((s) => s.appendMessage)
   const setVoiceStatus = useAlbertStore((s) => s.setVoiceStatus)
   const [draft, setDraft] = useState('')
   const [draftImages, setDraftImages] = useState<DraftImage[]>([])
+  const imagesRef = useRef(draftImages)
+  imagesRef.current = draftImages
   const [dragOver, setDragOver] = useState(false)
   const [purgeArmed, setPurgeArmed] = useState(false)
   const [purging, setPurging] = useState(false)
@@ -207,7 +258,6 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
     draft.trim().length > 0 && draftImages.length === 0 && isEndVoiceCommand(draft)
   const canSend =
     (draft.trim().length > 0 || draftImages.length > 0) &&
-    !busy &&
     (!voiceLive || standbyDraft)
 
   function dockSlot(park: boolean): { x: number; y: number; width: number; height: number; park: boolean } | undefined {
@@ -230,14 +280,19 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
   }
 
   useEffect(() => {
-    setOrbParked(false)
-    void window.albert.undockHud()
+    const workshop = interfaceStyle !== 'classic'
     void window.albert
       .getHudSnapshot()
       .then((snap) => {
         setRoam(snap.roam !== false)
+        setOrbParked(workshop ? snap.docked !== false : false)
       })
       .catch(() => undefined)
+    // Classic starts undocked; workshop Comm Link reuses the berth like Hub home.
+    if (!workshop) {
+      setOrbParked(false)
+      void window.albert.undockHud()
+    }
     const node = dockRef.current
     if (!node) return
     const remember = (): void => {
@@ -250,14 +305,16 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
     const off = window.albert.onChatEvent((event) => {
       if (event.type === 'hud_docked') setOrbParked(event.docked !== false)
     })
+    const timer = window.setTimeout(remember, 120)
     return () => {
+      window.clearTimeout(timer)
       observer.disconnect()
       window.removeEventListener('resize', remember)
       off()
       void window.albert.dockHud(null)
       void window.albert.undockHud()
     }
-  }, [])
+  }, [interfaceStyle])
 
   useEffect(() => {
     if (!followOutput) return
@@ -311,46 +368,39 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
   })
 
   async function addFiles(files: FileList | File[]): Promise<number> {
-    if (busy || voiceLive) return 0
+    if (voiceLive) return 0
     const list = Array.from(files)
-    const next: DraftImage[] = [...draftImages]
+    if (!list.length) return 0
+    const accepted: DraftImage[] = []
     for (const file of list) {
-      if (next.length >= MAX_ATTACH) break
-      if (!file.type.startsWith('image/') && !/\.(png|jpe?g|gif|webp)$/i.test(file.name)) continue
+      if (imagesRef.current.length + accepted.length >= MAX_ATTACH) break
       const draftImg = await fileToDraft(file)
-      if (draftImg) next.push(draftImg)
+      if (draftImg) accepted.push(draftImg)
     }
-    if (next.length === draftImages.length && list.some((f) => f.type.startsWith('image/'))) {
+    if (useAlbertStore.getState().voiceState !== 'idle') return 0
+    if (accepted.length) {
+      const next = [...imagesRef.current, ...accepted].slice(0, MAX_ATTACH)
+      imagesRef.current = next
+      setDraftImages(next)
+    } else if (list.some((file) => file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|tiff?)$/i.test(file.name))) {
       setError('Couldn’t attach that image (use PNG/JPEG/GIF/WebP under ~4.5MB, max 4).')
     }
-    const current = useAlbertStore.getState()
-    if (current.busy || current.voiceState !== 'idle') return 0
-    setDraftImages(next.slice(0, MAX_ATTACH))
-    return Math.max(0, next.length - draftImages.length)
+    return accepted.length
   }
 
   async function addClipboardFallback(): Promise<boolean> {
     const clip = await window.albert.readClipboardImage()
     if (!clip) return false
-    const current = useAlbertStore.getState()
-    if (current.busy || current.voiceState !== 'idle') return false
-    setDraftImages((prev) => {
-      if (prev.length >= MAX_ATTACH) return prev
-      return [
-        ...prev,
-        {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          mediaType: clip.mediaType,
-          data: clip.data,
-          previewUrl: `data:${clip.mediaType};base64,${clip.data}`
-        }
-      ].slice(0, MAX_ATTACH)
-    })
+    if (useAlbertStore.getState().voiceState !== 'idle') return false
+    if (imagesRef.current.length >= MAX_ATTACH) return false
+    const next = [...imagesRef.current, payloadToDraft(clip)].slice(0, MAX_ATTACH)
+    imagesRef.current = next
+    setDraftImages(next)
     return true
   }
 
   async function ingestPaste(event: React.ClipboardEvent | ClipboardEvent): Promise<void> {
-    if (event.defaultPrevented || busy || voiceLive) return
+    if (event.defaultPrevented || voiceLive) return
     const data = 'clipboardData' in event ? event.clipboardData : null
     const files = filesFromClipboard(data)
     if (files.length) {
@@ -360,27 +410,27 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
       setError('Couldn’t attach that image (use PNG/JPEG/GIF/WebP under ~4.5MB, max 4).')
       return
     }
-    const types = Array.from(data?.types || [])
-    const looksLikeImage = types.some(
-      (type) =>
-        type.startsWith('image/') ||
-        /png|jpe?g|gif|webp|tiff/i.test(type) ||
-        type === 'Files'
-    )
-    if (!looksLikeImage) return
+    if (!clipboardLooksLikeImage(data)) return
     event.preventDefault()
     const attached = await addClipboardFallback()
     if (!attached) setError('Couldn’t read that clipboard image. Try PNG/JPEG/GIF/WebP under ~4.5MB.')
   }
 
   function removeDraftImage(id: string): void {
-    setDraftImages((prev) => prev.filter((img) => img.id !== id))
+    const next = withoutDraftImage(imagesRef.current, id)
+    if (next.length === imagesRef.current.length) return
+    for (const img of imagesRef.current) {
+      if (next.some((kept) => kept.id === img.id)) continue
+      if (img.previewUrl.startsWith('blob:')) URL.revokeObjectURL(img.previewUrl)
+    }
+    imagesRef.current = next
+    setDraftImages(next)
   }
 
   async function onSubmit(e: FormEvent): Promise<void> {
     e.preventDefault()
     const text = draft.trim()
-    if ((!text && !draftImages.length) || busy) return
+    if (!text && !draftImages.length) return
 
     const isStandby = Boolean(text && draftImages.length === 0 && isEndVoiceCommand(text))
     // Composer stays locked during voice except for standby / take 5
@@ -422,13 +472,16 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
       return
     }
 
+    const gen = ++submitGen.current
+    stopSpeaking()
+    setStreamingText('')
     setBusy(true)
     try {
       await window.albert.sendChat(images.length ? { text, images } : text)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setBusy(false)
+      if (submitGen.current === gen) setBusy(false)
     }
   }
 
@@ -474,7 +527,7 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
       onPaste={(e) => void ingestPaste(e)}
       onDragOver={(e) => {
         e.preventDefault()
-        if (!busy && !voiceLive && Array.from(e.dataTransfer.types).includes('Files')) setDragOver(true)
+        if (!voiceLive && Array.from(e.dataTransfer.types).includes('Files')) setDragOver(true)
       }}
       onDragLeave={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false)
@@ -482,7 +535,7 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
       onDrop={(e) => {
         e.preventDefault()
         setDragOver(false)
-        if (!busy && !voiceLive && e.dataTransfer.files?.length) {
+        if (!voiceLive && e.dataTransfer.files?.length) {
           void addFiles(e.dataTransfer.files)
         }
       }}
@@ -493,7 +546,8 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
             Comm Link
           </h2>
           <p className="section-sub">
-            Text, images, or voice. {APP_NAME} retains context and can act on your Mac.
+            Text, images, or voice. One continuous thread across every brain — personality and
+            memory stay with the conversation. {APP_NAME} can act on your Mac.
           </p>
         </div>
         <div className="comm-header-actions">
@@ -622,33 +676,60 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
             ) : null}
             {messages
               .filter((m) => m.role !== 'system')
-              .map((m) => (
-                <article
-                  key={m.id}
-                  className={`msg ${m.role}`}
-                  aria-label={`${m.role === 'assistant' ? APP_NAME : m.role === 'tool' ? 'Tool' : 'You'} message`}
-                >
-                  <div className="role">
-                    {m.role === 'assistant'
-                      ? APP_NAME
-                      : m.role === 'tool'
-                        ? `Tool · ${m.toolName || 'action'}`
-                        : 'You'}
-                  </div>
-                  {m.images?.length ? <MessageImages images={m.images} /> : null}
-                  {m.content && m.content !== '(image)' && !/^\(\d+ images\)$/.test(m.content) ? (
-                    <div className="body">{m.content}</div>
-                  ) : m.images?.length ? null : (
-                    <div className="body">{m.content}</div>
-                  )}
-                </article>
-              ))}
+              .map((m) => {
+                const isAlbert = m.role === 'assistant'
+                const isTool = m.role === 'tool'
+                const speaker = isAlbert ? APP_NAME : isTool ? 'Tool' : 'Kai'
+                const identityClass = isAlbert
+                  ? 'msg-identity--albert'
+                  : isTool
+                    ? 'msg-identity--tool'
+                    : 'msg-identity--kai'
+                return (
+                  <article
+                    key={m.id}
+                    className={`msg ${m.role}`}
+                    data-speaker={isAlbert ? 'albert' : isTool ? 'tool' : 'kai'}
+                    aria-label={`${speaker === 'Kai' ? 'You' : speaker} message`}
+                  >
+                    <div className="msg-heading">
+                      <span
+                        className={`msg-identity ${identityClass}`}
+                        title={speaker === 'Kai' ? 'You' : speaker}
+                        role="img"
+                        aria-label={speaker === 'Kai' ? 'You' : speaker}
+                      />
+                      <div className="role">
+                        {isAlbert
+                          ? APP_NAME
+                          : isTool
+                            ? `Tool · ${m.toolName || 'action'}`
+                            : 'You'}
+                      </div>
+                    </div>
+                    {m.images?.length ? <MessageImages images={m.images} /> : null}
+                    {m.content && m.content !== '(image)' && !/^\(\d+ images\)$/.test(m.content) ? (
+                      <RichMessageBody content={m.content} />
+                    ) : m.images?.length ? null : (
+                      <div className="body">{m.content}</div>
+                    )}
+                  </article>
+                )
+              })}
             {streamingText ? (
               <article
                 className="msg assistant streaming"
+                data-speaker="albert"
                 aria-label={`${APP_NAME} response in progress`}
               >
-                <div className="role">{APP_NAME}</div>
+                <div className="msg-heading">
+                  <span
+                    className="msg-identity msg-identity--albert"
+                    title={APP_NAME}
+                    aria-hidden="true"
+                  />
+                  <div className="role">{APP_NAME}</div>
+                </div>
                 <div className="body">{streamingText}</div>
               </article>
             ) : null}
@@ -684,14 +765,19 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
               <div className="composer-previews">
                 {draftImages.map((img, index) => (
                   <div key={img.id} className="composer-preview">
-                    <img src={img.previewUrl} alt={`Pending attachment ${index + 1}`} />
+                    <img src={img.previewUrl} alt={`Pending attachment ${index + 1}`} draggable={false} />
                     <button
                       type="button"
                       className="composer-preview-remove"
                       aria-label={`Remove attachment ${index + 1}`}
-                      onClick={() => removeDraftImage(img.id)}
+                      title={`Remove attachment ${index + 1}`}
+                      onClick={(event) => {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        removeDraftImage(img.id)
+                      }}
                     >
-                      ×
+                      <span aria-hidden="true">×</span>
                     </button>
                   </div>
                 ))}
@@ -706,7 +792,7 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
                 multiple
                 hidden
                 onChange={(e) => {
-                  if (!busy && !voiceLive && e.target.files?.length) void addFiles(e.target.files)
+                  if (!voiceLive && e.target.files?.length) void addFiles(e.target.files)
                   e.target.value = ''
                 }}
               />
@@ -715,7 +801,7 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
                 className="btn ghost composer-attach"
                 title="Attach or paste an image"
                 aria-label="Attach images"
-                disabled={busy || voiceLive || draftImages.length >= MAX_ATTACH}
+                disabled={voiceLive || draftImages.length >= MAX_ATTACH}
                 onClick={() => fileInputRef.current?.click()}
               >
                 Image
@@ -749,9 +835,9 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
                 className="btn primary"
                 type="submit"
                 disabled={!canSend}
-                aria-label={busy ? `${APP_NAME} is responding` : 'Send message'}
+                aria-label={busy ? 'Send and interrupt the current reply' : 'Send message'}
               >
-                {busy ? 'Working…' : 'Send'}
+                {busy ? 'Interrupt' : 'Send'}
               </button>
             </div>
           </form>
@@ -794,18 +880,24 @@ export function ConversationPanel({ onTalk, onStandby }: Props): React.JSX.Eleme
             ref={dockRef}
             className={`orb-dock__berth${orbParked ? '' : ' is-empty'}`}
             onPointerDown={orbParked ? undockOrb : undefined}
+            onKeyDown={orbParked ? (event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault()
+                undockOrb()
+              }
+            } : undefined}
             role={orbParked ? 'button' : undefined}
             tabIndex={orbParked ? 0 : -1}
-            aria-label={orbParked ? 'Undock and move the orb' : undefined}
+            aria-label={orbParked ? 'Undock and move the orb' : 'Orb is undocked'}
             title={orbParked ? 'Press to release the orb, then drag it from the dock' : undefined}
           >
             {orbParked ? (
-              <AlbertCore
-                state={voiceState}
-                variant="orb"
+              <FilamentOrb
+                variant="hub"
+                mood={orbMood(voiceState, busy)}
                 label={`Orb dock, ${voiceLabel.toLowerCase()}`}
               />
-            ) : null}
+            ) : <span className="orb-dock__empty-label">Orb undocked</span>}
           </div>
           <button type="button" className="orb-dock__button" onClick={() => parkOrb()}>
             Return orb

@@ -237,7 +237,7 @@ export const projectTools: ToolDefinition[] = [
   {
     name: 'write_project_file',
     description:
-      'Create or overwrite a file in the project folder. Prefer apply_project_patch for existing files. While ALBERT is running live, do not write ALBERT src/scripts/package.json — call cursor_agent instead.',
+      'Create or overwrite a project file. Prefer apply_project_patch for edits. Do not write ALBERT src/scripts/package.json — use cursor_agent.',
     parameters: {
       type: 'object',
       properties: {
@@ -345,7 +345,7 @@ export const projectTools: ToolDefinition[] = [
   {
     name: 'run_project_command',
     description:
-      'Run a shell command with cwd = project folder. Without God mode, only allowlisted single commands (npm, git, tsc, rg, …). Use for tests/builds after edits.',
+      'Run one command in the project folder. Without God mode, allowlisted commands only (npm, git, tsc, rg).',
     parameters: {
       type: 'object',
       properties: {

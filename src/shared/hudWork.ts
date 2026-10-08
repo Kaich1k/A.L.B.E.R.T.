@@ -40,6 +40,8 @@ export function processNameForApp(app: string): string {
     safari: 'Safari',
     terminal: 'Terminal',
     mail: 'Mail',
+    outlook: 'Microsoft Outlook',
+    'microsoft outlook': 'Microsoft Outlook',
     messages: 'Messages',
     slack: 'Slack',
     music: 'Music'
@@ -61,7 +63,11 @@ export function hintForTool(name: string, args: Record<string, unknown> = {}): H
     const browser = String(args.browser || '').trim()
     return { kind: 'app', app: processNameForApp(browser || 'Safari') }
   }
-  if (name === 'open_app') return { kind: 'app', app: processNameForApp(String(args.name || 'Finder')) }
+  if (name === 'open_app' || name === 'activate_app') {
+    return { kind: 'app', app: processNameForApp(String(args.name || 'Finder')) }
+  }
+  if (name.startsWith('outlook_')) return { kind: 'app', app: 'Microsoft Outlook' }
+  if (name === 'find_files') return { kind: 'app', app: 'Finder' }
   if (name.startsWith('spotify')) return { kind: 'app', app: 'Spotify' }
   if (name.includes('cursor')) return { kind: 'app', app: 'Cursor' }
   if (name === 'open_path' || name === 'run_applescript' || name === 'run_shell' || name === 'run_project_command') {

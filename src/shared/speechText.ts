@@ -333,7 +333,9 @@ export function stripMarkdownForSpeech(text: string): string {
   const slots: Slot[] = []
   let out = text.replace(/\r\n/g, '\n')
 
-  out = out.replace(/```[\s\S]*?```/g, () => stash(slots, ''))
+  // In a token stream a code fence may not be closed yet. It is never speech.
+  out = out.replace(/(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\1|$)/g, () => stash(slots, ''))
+  out = out.replace(/```[\s\S]*?(?:```|$)/g, () => stash(slots, ''))
   out = out.replace(/`([^`]+)`/g, (_m, code: string) => {
     const trimmed = String(code).trim()
     if (!trimmed) return ''
@@ -512,10 +514,37 @@ function speakMaybeDecimal(raw: string): string {
   return raw.includes('.') ? speakDecimal(raw) : integerToWords(Number(raw))
 }
 
+/**
+ * Map UI chrome (arrows, bullets, carets) into spoken prose so TTS engines do
+ * not read glyphs as “down arrow”, “right arrow”, etc.
+ */
+function scrubUiSymbolsForSpeech(text: string): string {
+  return (
+    text
+      // Directional arrows → natural connectors (drop vertical UI chevrons)
+      .replace(/[→⇒⟶↦➔➜➡⇛⇉➠➢➤]/gu, ' to ')
+      .replace(/[←⇐⟵↤⬅⇇]/gu, ' from ')
+      .replace(/[↔⇔⟷⇄⇆]/gu, ' to ')
+      .replace(/[↑⬆⇧⇑⇈⤴]/gu, ' ')
+      .replace(/[↓⬇⇩⇓⇊⤵]/gu, ' ')
+      .replace(/[↕⇅]/gu, ' ')
+      // Literal arrow/UI descriptors (model prose or engine expansions)
+      .replace(/\b(?:up|down|left|right|north|south|east|west)[\s-]+arrows?\b/gi, ' ')
+      .replace(/\b(?:curved|double|long|thick|thin|black|white)[\s-]+arrows?\b/gi, ' ')
+      .replace(/\barrows?\b/gi, ' ')
+      // Decorative / list / disclosure glyphs that survive markdown strip
+      .replace(/[•●○◦▪▫▸▹►▻▼▲▶◀◆◇★☆✓✔✕✖✗]/gu, ' ')
+      .replace(/[⟦⟧⟨⟩«»‹›]/gu, ' ')
+      .replace(/^\s*[>»›]+\s*/gm, '')
+      .replace(/\s*[>»›]{2,}\s*/g, ' ')
+  )
+}
+
 function tidySpoken(text: string): string {
   return text
     .replace(/[—–]/g, ' to ')
     .replace(/\s+to\s+to\s+/g, ' to ')
+    .replace(/\s+from\s+from\s+/g, ' from ')
     .replace(/\s+([,.;:!?])/g, '$1')
     .replace(/([.!?]){2,}/g, '$1')
     .replace(/\s+/g, ' ')
@@ -534,6 +563,7 @@ export function normalizeForSpeech(text: string): string {
     cacheSet(key, '')
     return ''
   }
+  out = scrubUiSymbolsForSpeech(out)
   out = protectIdentifiers(out, slots)
   out = applyPronunciations(out, slots)
   out = convertSpeechTokens(out, slots)
@@ -573,9 +603,11 @@ export function endsWithAbbreviation(candidate: string): boolean {
 
 function splitAt(text: string, index: number): { speak: string; rest: string } {
   if (index <= 0) return { speak: '', rest: text }
-  if (index >= text.length) return { speak: text, rest: '' }
+  const head = text.slice(0, index)
+  // Carry paragraph intent through the queue; plain trim() erased its pause.
+  const paragraph = /\n\s*\n\s*$/.test(head)
   return {
-    speak: text.slice(0, index).replace(/^\s+|\s+$/g, ''),
+    speak: head.trim() + (paragraph ? '\n\n' : ''),
     rest: text.slice(index).replace(/^\s+/g, '')
   }
 }
@@ -588,6 +620,9 @@ interface Span {
 function protectedSpans(text: string): Span[] {
   const spans: Span[] = []
   const patterns = [
+    /(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\1|$)/g,
+    /```[\s\S]*?(?:```|$)/g,
+    /`[^`]*(?:`|$)/g,
     /\bhttps?:\/\/[^\s)]+/gi,
     /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
     /[$£€]\d[\d,]*(?:\.\d+)?/g,
@@ -644,6 +679,9 @@ export function takeSpeakableUnits(
   while ((m = re.exec(text))) {
     const end = m.index + m[0].length
     if (indexInsideSpan(m.index, spans)) continue
+    // A trailing dot can still become a decimal, abbreviation or URL when
+    // the next token arrives. Wait for lookahead (or the final flush).
+    if (!final && end === text.length && !/\s$/.test(m[0])) continue
     const candidate = text.slice(0, end).replace(/\s+/g, ' ').trim()
     if (!candidate) continue
     if (endsWithAbbreviation(candidate)) continue
@@ -668,13 +706,16 @@ export function takeSpeakableUnits(
       const soft = conjunctionCut(text, 120)
       if (soft >= 18 && !indexInsideSpan(soft, spans)) return splitAt(text, soft + 1)
     }
-    if (trimmed.length >= 96) {
-      const window = text.slice(0, Math.min(text.length, 88))
+    // Give a normal spoken clause room to finish. The old 88-character cut
+    // regularly ended on "if you tell me" and restarted with "what ...".
+    // A word boundary is only the bounded fallback for unusually long clauses.
+    if (trimmed.length >= 180) {
+      const window = text.slice(0, Math.min(text.length, 160))
       let cut = window.lastIndexOf(' ')
-      while (cut >= 36 && indexInsideSpan(cut, spans)) {
+      while (cut >= 72 && indexInsideSpan(cut, spans)) {
         cut = window.lastIndexOf(' ', cut - 1)
       }
-      if (cut >= 36) return splitAt(text, cut)
+      if (cut >= 72) return splitAt(text, cut)
     }
   }
 
@@ -709,7 +750,7 @@ export function drainSpeakableUnits(
   let eager = eagerFirst
 
   for (let i = 0; i < 32; i++) {
-    const next = takeSpeakableUnits(rest, false, eager)
+    const next = takeSpeakableUnits(rest, final, eager)
     if (!next.speak) {
       rest = next.rest
       break
@@ -731,12 +772,16 @@ export function drainSpeakableUnits(
 
 /** Full-string neural segmentation after display text is known. */
 export function segmentForSpeech(text: string, maxChars = 280): SpeechChunk[] {
+  const finalPause = inferPauseAfter(text)
   const cleaned = stripMarkdownForSpeech(text)
   if (!cleaned.trim()) return []
   const { units } = drainSpeakableUnits(cleaned, true, false)
   const chunks: SpeechChunk[] = []
-  for (const unit of units) {
-    const pauseAfter = inferPauseAfter(unit)
+  for (let index = 0; index < units.length; index++) {
+    const unit = units[index]!
+    const pauseAfter = index === units.length - 1 && finalPause === 'paragraph'
+      ? 'paragraph'
+      : inferPauseAfter(unit)
     const spoken = normalizeForSpeech(unit)
     if (!spoken) continue
     if (spoken.length <= maxChars) {

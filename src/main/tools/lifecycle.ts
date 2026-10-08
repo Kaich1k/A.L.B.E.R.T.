@@ -5,7 +5,7 @@ export const lifecycleTools: ToolDefinition[] = [
   {
     name: 'update_app',
     description:
-      'Rebuild and reinstall ~/Applications/ALBERT.app (same as npm run update:app) in a detached process, then reopen ALBERT. Prefer this, or run npm run update:app in a shell — the host intercepts the shell and runs this same job.',
+      'Rebuild and reopen ALBERT.app in a detached installer. Same job as npm run update:app.',
     parameters: {
       type: 'object',
       properties: {

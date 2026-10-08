@@ -1,6 +1,8 @@
 import type { PersonalityScales } from './personality'
+import { DEFAULT_CLAUDE_MODEL, DEFAULT_GEMINI_MODEL } from './modelCatalog'
 export type { PersonalityScales, PersonalityKey } from './personality'
 export { DEFAULT_PERSONALITY, PERSONALITY_META } from './personality'
+export { DEFAULT_CLAUDE_MODEL, DEFAULT_GEMINI_MODEL }
 
 export type VoiceState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking'
 
@@ -76,6 +78,8 @@ export interface ActivityEntry {
   result: string
   ok: boolean
   createdAt: number
+  appName?: string
+  approvalRequired?: boolean
 }
 
 export type MissionState = 'draft' | 'queued' | 'active' | 'waiting' | 'approval' | 'blocked' | 'complete' | 'cancelled'
@@ -298,6 +302,9 @@ export interface HudSnapshot {
 
 export type RoutingMode = 'auto' | 'local' | 'fast' | 'power' | 'codex'
 
+/** One optional backup. Never a Gemini-then-Claude chain. */
+export type FallbackBrain = 'none' | 'gemini' | 'claude'
+
 export type ModelTier = 'local' | 'fast' | 'power' | 'codex'
 
 /** How Codex command/file-write approvals are handled. */
@@ -336,6 +343,8 @@ export interface CodexStatus {
   lastError: string | null
   /** Populated when the CLI is missing so the UI can tell Kai what to run. */
   installHint: string | null
+  /** Set when the requested ChatGPT model, including Astra, cannot be used. */
+  modelNotice?: string | null
 }
 
 export type OllamaEndpointMode = 'auto' | 'cloud' | 'local'
@@ -407,6 +416,8 @@ export interface AlbertSettings {
   startupAnimationEnabled: boolean
   /** Visual information density for ambient HUD elements. */
   hudDensity: 'minimal' | 'balanced' | 'cinematic'
+  /** Classic keeps the previous shell. Workshop is the blue radial workspace. */
+  interfaceStyle: 'classic' | 'workshop'
   /** system = macOS; kokoro = free local neural; elevenlabs = cloud */
   ttsProvider: TtsProvider
   /** Kokoro voice id (e.g. am_michael) */
@@ -430,24 +441,32 @@ export interface AlbertSettings {
   companionToken: string
   /** Route engineering work to Codex over the app-server protocol */
   codexEnabled: boolean
-  /** Everyday Codex model; empty means "let discovery pick" */
+  /** Everyday Codex model; empty means Astra when the account lists gpt-6-astra */
   codexModel: string
+  /** Azure app client id for Outlook Graph. Empty means Graph is not connected. */
+  microsoftClientId: string
   /** Reserved for hard work — costs more allowance */
   codexEscalationModel: string
   /** Reasoning effort: minimal / low / medium / high (model-dependent) */
   codexEffort: string
   /** Persisted so Codex context survives an app restart */
   codexThreadId: string
+  /** Explicit fresh-thread boundary; model switches do not change this. */
+  codexContextStartAt?: number
   /**
    * project = auto-accept inside projectFolder only; always = prompt every time;
    * never = auto-accept anywhere (dangerous, opt-in).
    */
   codexApprovalMode: CodexApprovalMode
   /**
-   * Allow paid Anthropic (Haiku/Opus) to cover for Codex failures.
-   * Off by default so a Codex outage never quietly spends money.
+   * Allow paid Anthropic to cover when fallbackBrain is claude.
+   * Kept in sync with fallbackBrain so older checks stay accurate.
    */
   paidFallbackEnabled: boolean
+  /**
+   * If the chosen brain fails, try this one brain. `none` reports the failure.
+   */
+  fallbackBrain: FallbackBrain
   /**
    * Quietly store lasting facts Kai mentions (preferences, identity, projects).
    * One-off tasks and secrets are ignored.
@@ -485,6 +504,7 @@ export interface AgentStreamEvent {
     | 'theater'
     | 'cursor_progress'
     | 'hud_docked'
+    | 'open_panel'
   content?: string
   message?: ChatMessage
   toolName?: string
@@ -508,6 +528,10 @@ export interface AgentStreamEvent {
   theater?: TheaterEvent
   /** Floating HUD was parked in / released from the Comm berth. */
   docked?: boolean
+  /** Main window destination requested from the HUD or another surface. */
+  panel?: PanelId
+  /** Turn generation. Stale tokens from an interrupted reply are ignored. */
+  generation?: number
 }
 
 export interface RealtimeSessionConfig {
@@ -527,8 +551,6 @@ export interface RealtimeToolDefinition {
 
 export const CLAUDE_DASHBOARD_URL = 'https://platform.claude.com/dashboard'
 export const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-20b'
-/** Current Google AI Studio Flash route. 2.5 Flash is leaving free plans. */
-export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash'
 
 export const DEFAULT_SETTINGS: AlbertSettings = {
   anthropicApiKey: '',
@@ -536,12 +558,12 @@ export const DEFAULT_SETTINGS: AlbertSettings = {
   ollamaApiKey: '',
   groqApiKey: '',
   geminiApiKey: '',
-  model: 'claude-opus-5',
+  model: DEFAULT_CLAUDE_MODEL,
   localModel: 'qwen3.5:4b',
   groqModel: DEFAULT_GROQ_MODEL,
   geminiModel: DEFAULT_GEMINI_MODEL,
-  fastModel: 'claude-haiku-4-5',
-  powerModel: 'claude-opus-5',
+  fastModel: 'claude-haiku-5-5',
+  powerModel: DEFAULT_CLAUDE_MODEL,
   routingMode: 'codex',
   localProvider: 'ollama',
   ollamaEndpoint: 'auto',
@@ -564,6 +586,7 @@ export const DEFAULT_SETTINGS: AlbertSettings = {
   performanceMode: true,
   startupAnimationEnabled: true,
   hudDensity: 'cinematic',
+  interfaceStyle: 'workshop',
   ttsProvider: 'kokoro',
   kokoroVoiceId: 'am_michael',
   elevenLabsApiKey: '',
@@ -577,11 +600,13 @@ export const DEFAULT_SETTINGS: AlbertSettings = {
   companionToken: '',
   codexEnabled: true,
   codexModel: '',
+  microsoftClientId: '',
   codexEscalationModel: '',
   codexEffort: 'medium',
   codexThreadId: '',
   codexApprovalMode: 'project',
   paidFallbackEnabled: false,
+  fallbackBrain: 'none',
   autoRememberEnabled: true,
   cursorApiKey: '',
   ambientHudEnabled: true,

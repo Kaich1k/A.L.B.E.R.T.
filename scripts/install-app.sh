@@ -40,6 +40,10 @@ if [[ -z "${BUILT}" ]]; then
   exit 1
 fi
 
+# Never replace a working app with a bundle whose native controller/signature
+# cannot be validated. Privacy permissions depend on the complete app identity.
+/usr/bin/codesign --verify --deep --strict "${BUILT}"
+
 mkdir -p "${DEST_DIR}"
 
 # Quit the packaged app only — never pkill a regex that can match this script.
@@ -53,14 +57,15 @@ fi
 
 # Snapshot the outgoing bundle first — a bad build should never be one-way.
 if [[ -d "${DEST}" ]]; then
-  bash "${ROOT}/scripts/archive-app.sh" || echo "WARN: archive step failed; continuing install"
+  bash "${ROOT}/scripts/archive-app.sh"
 fi
 
 echo "==> Installing to ${DEST}"
 rm -rf "${DEST}" "${DOTTED_DEST}"
 cp -R "${BUILT}" "${DEST}"
+/usr/bin/codesign --verify --deep --strict "${DEST}"
 
-# Clear quarantine so first launch is less painful (still unsigned)
+# Preserve the existing personal-install behavior; this build is locally signed.
 xattr -dr com.apple.quarantine "${DEST}" 2>/dev/null || true
 
 VERSION="$(node -p "require('./package.json').version")"

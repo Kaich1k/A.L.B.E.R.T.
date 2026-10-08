@@ -70,17 +70,21 @@ function hasConfiguredBrain(settings: AlbertSettings): boolean {
 }
 
 function shortenModel(model: string): string {
-  return model.replace(/^claude-/i, '').replace(/-latest$/i, '').toUpperCase()
+  return model.replace(/^(claude|gemini)-/i, '').replace(/-latest$/i, '').toUpperCase()
 }
 
 function routeLabel(settings: AlbertSettings): string {
   switch (settings.routingMode) {
     case 'local':
-      return settings.localProvider === 'gemini' ? 'GEMINI FALLBACK' : 'LOCKED FALLBACK'
+      return settings.localProvider === 'gemini'
+        ? `GEMINI · ${shortenModel(settings.geminiModel)}`
+        : settings.localProvider === 'groq'
+          ? 'GROQ'
+          : 'OLLAMA'
     case 'fast':
-      return `OPUS FAMILY · ${shortenModel(settings.fastModel)}`
+      return `CLAUDE · ${shortenModel(settings.fastModel)}`
     case 'power':
-      return `OPUS · ${shortenModel(settings.powerModel)}`
+      return `CLAUDE · ${shortenModel(settings.powerModel)}`
     default:
       return 'CHATGPT'
   }

@@ -7,6 +7,7 @@ import { computerTools } from './computer'
 import { desktopTools } from './desktop'
 import { fileTools } from './files'
 import { memoryTools } from './memory'
+import { personalityTools } from './personality'
 import { contextTools } from './context'
 import { cursorTools } from './cursor'
 import { lifecycleTools } from './lifecycle'
@@ -28,6 +29,11 @@ import { blockedLiveWrite } from '../cursor/selfEdit'
 import { guideHudForTool, reportHudRuntime } from '../hud/miniHud'
 import { pushTheaterEvent } from '../theater/bus'
 import { QUICK_TOOL_DENY } from './quickPolicy'
+import { controlTools } from './control'
+import { outlookTools } from './outlook'
+import { appForTool, approvalRequiredFor, automationEpoch, computerWorkStale } from '../computer/automation'
+import { chatTurnStale } from '../agent/turnControl'
+import { redactSensitive, redactValue } from '../../shared/redact'
 
 const allTools: ToolDefinition[] = [
   ...appTools,
@@ -39,8 +45,11 @@ const allTools: ToolDefinition[] = [
   ...fileTools,
   ...shellTools,
   ...desktopTools,
+  ...controlTools,
+  ...outlookTools,
   ...systemTools,
   ...memoryTools,
+  ...personalityTools,
   ...operationsTools,
   ...contextTools,
   ...cursorTools,
@@ -108,15 +117,36 @@ async function confirmDangerous(
   return result.response === 0
 }
 
+function recordActivity(entry: {
+  toolName: string
+  args: Record<string, unknown>
+  result: string
+  ok: boolean
+  approvalRequired?: boolean
+}): void {
+  logActivity({
+    toolName: entry.toolName,
+    args: redactValue(entry.args) as Record<string, unknown>,
+    result: redactSensitive(entry.result).slice(0, 4_000),
+    ok: entry.ok,
+    appName: appForTool(entry.toolName, entry.args),
+    approvalRequired: entry.approvalRequired
+  })
+}
+
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
   options?: { confirmed?: boolean }
 ): Promise<ToolResult & { logged: boolean }> {
   const tool = byName.get(name)
+  if (chatTurnStale()) {
+    return { ok: false, result: 'Interrupted before this action ran.', logged: false }
+  }
+  const epoch = automationEpoch()
   if (!tool) {
     const result = { ok: false, result: `Unknown tool: ${name}` }
-    logActivity({ toolName: name, args, result: result.result, ok: false })
+    recordActivity({ toolName: name, args, result: result.result, ok: false })
     return { ...result, logged: true }
   }
 
@@ -124,7 +154,7 @@ export async function executeTool(
   if (name === 'run_shell' || name === 'run_project_command') {
     const taken = takeoverSelfLifecycleCommand(String(args?.command ?? ''))
     if (taken) {
-      logActivity({ toolName: name, args: args ?? {}, result: taken.result, ok: taken.ok })
+      recordActivity({ toolName: name, args: args ?? {}, result: taken.result, ok: taken.ok })
       return { ...taken, logged: true }
     }
   }
@@ -135,7 +165,13 @@ export async function executeTool(
         ok: false,
         result: `User denied tool “${name}”.`
       }
-      logActivity({ toolName: name, args: args ?? {}, result: result.result, ok: false })
+      recordActivity({
+        toolName: name,
+        args: args ?? {},
+        result: result.result,
+        ok: false,
+        approvalRequired: true
+      })
       return { ...result, logged: true }
     }
   }
@@ -143,7 +179,7 @@ export async function executeTool(
   const liveBlock = blockedLiveWrite(name, args ?? {})
   if (liveBlock) {
     const result = { ok: false, result: liveBlock }
-    logActivity({ toolName: name, args: args ?? {}, result: liveBlock, ok: false })
+    recordActivity({ toolName: name, args: args ?? {}, result: liveBlock, ok: false })
     return { ...result, logged: true }
   }
 
@@ -159,30 +195,40 @@ export async function executeTool(
     if (!win.isDestroyed()) win.webContents.send('albert:chat:event', { type: 'theater', theater: start })
   }
 
+  if (computerWorkStale(epoch) || chatTurnStale()) {
+    const result = { ok: false, result: 'Stopped before the action could run.' }
+    recordActivity({ toolName: name, args: args ?? {}, result: result.result, ok: false })
+    return { ...result, logged: true }
+  }
+
   try {
     const result = await tool.execute(args ?? {})
-    logActivity({
+    const confirmed = computerWorkStale(epoch)
+      ? { ok: false, result: 'Interrupted. The computer state was not confirmed after this step.' }
+      : result
+    recordActivity({
       toolName: name,
       args: args ?? {},
-      result: result.result,
-      ok: result.ok
+      result: confirmed.result,
+      ok: confirmed.ok,
+      approvalRequired: approvalRequiredFor(name, tool.dangerous)
     })
     const end = pushTheaterEvent({
       toolName: name,
       argsPreview: start.argsPreview,
-      resultPreview: result.result,
-      ok: result.ok,
+      resultPreview: confirmed.result,
+      ok: confirmed.ok,
       phase: 'end'
     })
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) win.webContents.send('albert:chat:event', { type: 'theater', theater: end })
     }
     reportHudRuntime({ tool: '' })
-    return { ...result, logged: true }
+    return { ...confirmed, logged: true }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     const result = { ok: false, result: message }
-    logActivity({ toolName: name, args: args ?? {}, result: message, ok: false })
+    recordActivity({ toolName: name, args: args ?? {}, result: message, ok: false })
     reportHudRuntime({ tool: '' })
     return { ...result, logged: true }
   }

@@ -8,9 +8,10 @@ const { createRequire } = require('module')
 const { join } = require('path')
 const { mkdirSync, existsSync } = require('fs')
 
-// Bias the decoder hard toward the assistant’s name (Whisper loves “Alfred” / “all bird”).
+// Give Whisper conversational and project vocabulary without changing models.
+// small.en is more accurate, but previously exceeded this app's safe memory ceiling.
 const WHISPER_PROMPT =
-  'Albert. Hey Albert. Okay Albert. A.L.B.E.R.T. Albert. Albert wake up. Wake up Albert. Yo Albert. Albert standby. Albert take 5. Albert end voice. Albert Haiku. Albert Opus. Albert Groq. Albert Ollama. Albert Spotify. Albert YouTube. Albert Arduino. Albert Computer.'
+  'A.L.B.E.R.T. Hey Albert. Okay Albert. You recommended. The tabs you recommended. The options you recommended. Open the pages you recommended in your Computer. Cursor AI. ChatGPT. Muse BCI. Brain-computer interface. OpenBCI. PiEEG. EEG. Raspberry Pi. Arduino. Spotify. YouTube. Standby. Take five. End voice.'
 
 function resolvePackageJson() {
   const candidates = [
@@ -46,12 +47,19 @@ function configureCache(dir) {
 
 function normalizeAudio(audio) {
   let peak = 0
+  let sum = 0
   for (let i = 0; i < audio.length; i++) {
     const a = Math.abs(audio[i])
     if (a > peak) peak = a
+    sum += audio[i] * audio[i]
   }
-  if (peak < 0.01 || peak > 0.95) return audio
-  const gain = Math.min(0.9 / peak, 8)
+  if (peak < 0.01 || peak > 0.98) return audio
+  // Peak-only normalization over-amplifies a quiet recording after one keyboard
+  // click. Target conversational RMS, with the peak retained as a hard ceiling.
+  const rms = Math.sqrt(sum / Math.max(1, audio.length))
+  if (rms < 0.004) return audio
+  const gain = Math.min(0.16 / rms, 0.92 / peak, 5)
+  if (gain <= 1.05) return audio
   const out = new Float32Array(audio.length)
   for (let i = 0; i < audio.length; i++) out[i] = audio[i] * gain
   return out
@@ -127,6 +135,8 @@ process.on('message', async (msg) => {
       const genOpts = {
         return_timestamps: false,
         temperature: 0,
+        language: 'english',
+        task: 'transcribe',
         initial_prompt:
           typeof msg.prompt === 'string' && msg.prompt.trim()
             ? msg.prompt.trim()

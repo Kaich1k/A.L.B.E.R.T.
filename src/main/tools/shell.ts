@@ -27,7 +27,7 @@ export const shellTools: ToolDefinition[] = [
   {
     name: 'run_shell',
     description:
-      'Run a shell command on the Mac. cwd must be under allowed roots (project/Documents/Desktop/Downloads). Without God mode: single allowlisted commands only (no pipes/chains). With God mode: freer, still under home+/tmp. Prefer run_project_command for project work.',
+      'Run a shell command under allowed roots. Without God mode: one allowlisted command, no pipes. Prefer run_project_command in the project.',
     parameters: {
       type: 'object',
       properties: {

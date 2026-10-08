@@ -1,4 +1,5 @@
 import { useAlbertStore } from '../store'
+import { findSpeechActiveWindow } from '../../../shared/ttsAudio'
 import {
   chunkForSystemTts,
   joinGapSeconds,
@@ -48,6 +49,8 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
 /** Shared Web Audio graph for gapless streamed clips */
 let gaplessCtx: AudioContext | null = null
 let gaplessNextTime = 0
+let gaplessPauseAfter: SpeechPause = 'none'
+let gaplessTrailingPadSec = 0
 const gaplessSources = new Set<AudioBufferSourceNode>()
 
 function pickVoice(preferredName: string): SpeechSynthesisVoice | null {
@@ -92,50 +95,7 @@ function systemTtsChunks(text: string): string[] {
   return chunkForSystemTts(text, stripPunctuationEnabled())
 }
 
-const TTS_SILENCE_THRESHOLD = 0.012
-const TTS_EDGE_PAD_SEC = 0.01
 const TTS_FADE_SEC = 0.008
-
-function channelRms(samples: Float32Array, start: number, end: number): number {
-  let sum = 0
-  const n = Math.max(1, end - start)
-  for (let i = start; i < end; i++) {
-    const value = samples[i] || 0
-    sum += value * value
-  }
-  return Math.sqrt(sum / n)
-}
-
-/** Leading/trailing quiet in a Kokoro/ElevenLabs clip — used to join without stacked dead air. */
-function ttsActiveWindow(buffer: AudioBuffer): { offsetSec: number; durationSec: number; trailingSilentSec: number } {
-  const length = buffer.length
-  const sampleRate = buffer.sampleRate
-  const frame = Math.max(1, Math.floor(sampleRate * 0.008))
-  let firstActive = -1
-  let lastActive = -1
-  for (let offset = 0; offset < length; offset += frame) {
-    const end = Math.min(length, offset + frame)
-    let energy = 0
-    for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-      energy = Math.max(energy, channelRms(buffer.getChannelData(channel), offset, end))
-    }
-    if (energy >= TTS_SILENCE_THRESHOLD) {
-      if (firstActive < 0) firstActive = offset
-      lastActive = end
-    }
-  }
-  if (firstActive < 0 || lastActive <= firstActive) {
-    return { offsetSec: 0, durationSec: buffer.duration, trailingSilentSec: 0 }
-  }
-  const pad = Math.floor(sampleRate * TTS_EDGE_PAD_SEC)
-  const start = Math.max(0, firstActive - pad)
-  const end = Math.min(length, lastActive + pad)
-  return {
-    offsetSec: start / sampleRate,
-    durationSec: (end - start) / sampleRate,
-    trailingSilentSec: Math.max(0, (length - lastActive) / sampleRate)
-  }
-}
 
 function unwrapIpcError(err: unknown): Error {
   const raw = err instanceof Error ? err.message : String(err)
@@ -168,6 +128,8 @@ function stopGaplessPlayback(): void {
   }
   gaplessSources.clear()
   gaplessNextTime = 0
+  gaplessPauseAfter = 'none'
+  gaplessTrailingPadSec = 0
 }
 
 async function ensureGaplessCtx(): Promise<AudioContext> {
@@ -232,11 +194,11 @@ async function scheduleGaplessBase64(
     return { ended: Promise.resolve() }
   }
 
-  const active = ttsActiveWindow(audioBuffer)
+  const active = findSpeechActiveWindow(audioBuffer)
   const maxDur = Math.max(0.02, audioBuffer.duration - active.offsetSec)
   const playDuration = Math.max(0.02, Math.min(active.durationSec, maxDur))
   const fade = Math.min(TTS_FADE_SEC, playDuration / 4)
-  const gap = joinGapSeconds(options?.pauseAfter ?? 'sentence', TTS_EDGE_PAD_SEC)
+  const gap = joinGapSeconds(gaplessPauseAfter, gaplessTrailingPadSec + active.leadingSilentSec)
 
   const source = ctx.createBufferSource()
   source.buffer = audioBuffer
@@ -247,12 +209,17 @@ async function scheduleGaplessBase64(
   const now = ctx.currentTime
   // Abut previous clip; small pad only when the timeline is idle
   const previousNextTime = gaplessNextTime
-  const startAt = gaplessNextTime > now + 0.005 ? gaplessNextTime : now + 0.015
+  const previousPauseAfter = gaplessPauseAfter
+  const previousTrailingPadSec = gaplessTrailingPadSec
+  const nextStart = gaplessNextTime + gap
+  const startAt = nextStart > now + 0.005 ? nextStart : now + 0.015
   gain.gain.setValueAtTime(0.0001, startAt)
   gain.gain.linearRampToValueAtTime(1, startAt + fade)
   gain.gain.setValueAtTime(1, startAt + Math.max(fade, playDuration - fade))
   gain.gain.linearRampToValueAtTime(0.0001, startAt + playDuration)
-  gaplessNextTime = startAt + playDuration + gap
+  gaplessNextTime = startAt + playDuration
+  gaplessPauseAfter = options?.pauseAfter ?? 'sentence'
+  gaplessTrailingPadSec = active.trailingSilentSec
 
   gaplessSources.add(source)
   let startPollTimer = 0
@@ -352,6 +319,8 @@ async function scheduleGaplessBase64(
     source.start(startAt, active.offsetSec, playDuration)
   } catch (error) {
     gaplessNextTime = previousNextTime
+    gaplessPauseAfter = previousPauseAfter
+    gaplessTrailingPadSec = previousTrailingPadSec
     abortEnded()
     throw error
   }
@@ -608,15 +577,16 @@ async function playBase64Chunks(
   clips: NeuralClip[],
   _mime: string,
   label: string,
-  options?: SpeakOptions & { generation?: number }
+  options?: SpeakOptions & { generation?: number; onGenerationChange?: (generation: number) => void }
 ): Promise<void> {
   let activeGeneration = options?.generation
   if (!options?.append) {
     // If something cancelled this handle while synthesis was in flight, do not
     // revive it. Otherwise stop prior audio and adopt the newly-issued token.
     if (activeGeneration != null && activeGeneration !== speakGeneration) return
-    stopSpeaking()
+    stopSpeaking({ cancelPending: false })
     activeGeneration = speakGeneration
+    options?.onGenerationChange?.(activeGeneration)
   }
 
   let announced = false
@@ -654,6 +624,7 @@ async function playBase64Chunks(
 }
 
 type SpeakHandle = {
+  isCancelled: () => boolean
   play: (playOpts?: { append?: boolean }) => Promise<void>
 }
 
@@ -700,18 +671,21 @@ async function synthesizeNeuralParts(
 export function beginSpeak(text: string, options?: SpeakOptions): SpeakHandle {
   const settings = useAlbertStore.getState().settings
   const provider = options?.provider || settings.ttsProvider || 'system'
-  const generation = speakGeneration
+  let generation = speakGeneration
+  const isCancelled = (): boolean => generation !== speakGeneration || Boolean(options?.shouldCancel?.())
 
   if (provider === 'elevenlabs' || provider === 'kokoro') {
     const started = synthesizeNeuralParts(text, provider, options)
     return {
+      isCancelled,
       play: async (playOpts) => {
         const { clips, mime } = await started
         if (!clips.length) return
         return playBase64Chunks(clips, mime, provider === 'elevenlabs' ? 'ElevenLabs' : 'Kokoro', {
           ...options,
           append: playOpts?.append ?? options?.append,
-          generation
+          generation,
+          onGenerationChange: (next) => { generation = next }
         })
       }
     }
@@ -719,13 +693,14 @@ export function beginSpeak(text: string, options?: SpeakOptions): SpeakHandle {
 
   const chunks = systemTtsChunks(text)
   if (!chunks.length) {
-    return { play: async () => undefined }
+    return { isCancelled, play: async () => undefined }
   }
 
   return {
+    isCancelled,
     play: async () => {
-      if (generation !== speakGeneration) return
-      await speakSystem(chunks, options)
+      if (isCancelled()) return
+      await speakSystem(chunks, { ...options, shouldCancel: isCancelled })
     }
   }
 }
@@ -748,11 +723,12 @@ export async function speakText(text: string, options?: SpeakOptions): Promise<S
     }
   }
 
+  const handle = beginSpeak(text, wrappedOptions)
   try {
-    await beginSpeak(text, wrappedOptions).play()
+    await handle.play()
     return { providerUsed: provider }
   } catch (error) {
-    if (provider === 'system' || started || options?.shouldCancel?.()) throw error
+    if (provider === 'system' || started || handle.isCancelled()) throw error
     console.warn(`[voice] ${provider} TTS failed; falling back to the system voice`, error)
     await beginSpeak(text, { ...wrappedOptions, provider: 'system', append: false }).play()
     return {
@@ -763,8 +739,11 @@ export async function speakText(text: string, options?: SpeakOptions): Promise<S
   }
 }
 
-export function stopSpeaking(): void {
+export function stopSpeaking(options?: { cancelPending?: boolean }): void {
   speakGeneration += 1
+  if (options?.cancelPending !== false) {
+    void window.albert.cancelKokoro().catch(() => undefined)
+  }
   window.speechSynthesis.cancel()
   stopGaplessPlayback()
   if (currentAudio) {

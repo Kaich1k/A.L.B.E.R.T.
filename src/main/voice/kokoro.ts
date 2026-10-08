@@ -73,13 +73,29 @@ function workerScriptPath(): string {
   )
 }
 
+/** Retire only this worker; its late exit/message must not reset a replacement. */
+function retireWorker(child: ChildProcess, error: Error): void {
+  if (worker !== child) return
+  worker = null
+  workerReady = null
+  const waiting = [...pending.values()]
+  pending.clear()
+  for (const slot of waiting) slot.reject(error)
+  try {
+    if (!child.killed) child.kill()
+  } catch {
+    /* already exited */
+  }
+  emitProgress({ status: 'error', message: error.message })
+}
+
 function ensureWorker(): Promise<void> {
   if (worker && worker.connected && workerReady) return workerReady
 
   const script = workerScriptPath()
   emitProgress({ status: 'starting', message: 'Starting Kokoro worker…' })
 
-  worker = fork(script, [], {
+  const child = fork(script, [], {
     execPath: process.execPath,
     env: {
       ...process.env,
@@ -87,12 +103,13 @@ function ensureWorker(): Promise<void> {
     },
     stdio: ['pipe', 'pipe', 'pipe', 'ipc']
   })
+  worker = child
 
-  worker.stderr?.on('data', (buf) => {
+  child.stderr?.on('data', (buf) => {
     console.error('[kokoro-worker]', buf.toString())
   })
 
-  worker.on('message', (msg: {
+  child.on('message', (msg: {
     type: string
     id?: number
     base64?: string
@@ -102,6 +119,7 @@ function ensureWorker(): Promise<void> {
     progress?: number
     result?: string
   }) => {
+    if (worker !== child) return
     if (msg.type === 'progress') {
       emitProgress({
         status: msg.status || 'progress',
@@ -119,20 +137,16 @@ function ensureWorker(): Promise<void> {
     else slot.reject(new Error(msg.message || 'Kokoro worker error'))
   })
 
-  worker.on('exit', (code) => {
+  child.on('exit', (code) => {
     const err = new Error(`Kokoro worker exited (${code ?? '?'})`)
-    for (const [, slot] of pending) slot.reject(err)
-    pending.clear()
-    worker = null
-    workerReady = null
-    emitProgress({ status: 'error', message: err.message })
+    retireWorker(child, err)
   })
 
-  worker.on('error', (err) => {
-    emitProgress({ status: 'error', message: err.message })
+  child.on('error', (err) => {
+    retireWorker(child, err)
   })
 
-  workerReady = new Promise((resolve, reject) => {
+  workerReady = new Promise<void>((resolve, reject) => {
     const id = ++reqId
     const timer = setTimeout(() => {
       pending.delete(id)
@@ -150,7 +164,14 @@ function ensureWorker(): Promise<void> {
       }
     })
 
-    worker!.send({ type: 'init', id, cacheDir: cacheDir() })
+    child.send({ type: 'init', id, cacheDir: cacheDir() }, (error) => {
+      if (error && worker === child) retireWorker(child, error)
+    })
+  }).catch((error: unknown) => {
+    const failure = error instanceof Error ? error : new Error(String(error))
+    // A rejected readiness promise must never be cached for the next request.
+    retireWorker(child, failure)
+    throw failure
   })
 
   return workerReady
@@ -182,11 +203,14 @@ function callWorker(payload: Record<string, unknown>): Promise<string> {
 }
 
 /** Lazy warm — safe; runs in a child Node process, not Electron main. */
-export function warmKokoro(): void {
-  void ensureWorker().catch((err) => {
+export async function warmKokoro(): Promise<void> {
+  try {
+    await ensureWorker()
+  } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     emitProgress({ status: 'error', message: `Kokoro failed: ${message}` })
-  })
+    throw err
+  }
 }
 
 export function getKokoroProgress(): ProgressPayload | null {
@@ -195,6 +219,11 @@ export function getKokoroProgress(): ProgressPayload | null {
 
 /** Serialize synth jobs — worker model isn't safe for parallel generate(). */
 let synthQueue: Promise<unknown> = Promise.resolve()
+let synthGeneration = 0
+
+export function cancelKokoroSynthesis(): void {
+  synthGeneration += 1
+}
 
 function enqueueSynth<T>(fn: () => Promise<T>): Promise<T> {
   const run = synthQueue.then(fn, fn)
@@ -209,6 +238,7 @@ export async function synthesizeKokoro(
   text: string,
   overrides?: { voiceId?: string }
 ): Promise<Buffer> {
+  const generation = synthGeneration
   const settings = getSettings()
   const voice =
     (overrides?.voiceId || settings.kokoroVoiceId || 'am_michael').trim() || 'am_michael'
@@ -220,7 +250,9 @@ export async function synthesizeKokoro(
   if (!cleaned) throw new Error('Nothing to speak')
 
   return enqueueSynth(async () => {
+    if (generation !== synthGeneration) throw new Error('Kokoro synthesis cancelled')
     await ensureWorker()
+    if (generation !== synthGeneration) throw new Error('Kokoro synthesis cancelled')
     const speed = Math.min(1.3, Math.max(0.7, settings.ttsRate || 1))
     const base64 = await callWorker({
       type: 'synthesize',
@@ -229,6 +261,7 @@ export async function synthesizeKokoro(
       speed,
       cacheDir: cacheDir()
     })
+    if (generation !== synthGeneration) throw new Error('Kokoro synthesis cancelled')
     return Buffer.from(base64, 'base64')
   })
 }

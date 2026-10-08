@@ -7,10 +7,26 @@
  *
  * Observed on codex-cli 0.153.4 (Plus): `gpt-6-astra` (server default),
  * `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4-mini`.
- * The response is keyed `data`, and each entry's `supportedReasoningEfforts`
- * is a list of objects, not strings.
+ * GPT-6.1 Sol (`gpt-6.1-sol`) stays visible in Systems as a catalog entry;
+ * selection is enabled only when `model/list` includes it. Efforts are
+ * low/medium/high/xhigh/max (not none/minimal). The response is keyed `data`,
+ * and each entry's `supportedReasoningEfforts` is a list of objects, not strings.
  */
 import type { CodexAppServer } from './appServer'
+import {
+  CHATGPT_ASTRA_MODEL,
+  CHATGPT_SOL_61_EFFORTS,
+  CHATGPT_SOL_61_MODEL,
+  CHATGPT_SOL_MODEL,
+  codexModelListed
+} from '../../shared/codexModels'
+
+export {
+  CHATGPT_ASTRA_MODEL,
+  CHATGPT_SOL_61_MODEL,
+  CHATGPT_SOL_MODEL,
+  codexModelListed
+}
 
 export interface CodexModel {
   id: string
@@ -22,20 +38,58 @@ export interface CodexModel {
 }
 
 /**
- * Everyday engineering model. Terra before Astra deliberately — Astra is the
- * server default but burns the Plus allowance far faster.
+ * Everyday ChatGPT brain. Astra first, then GPT-6.1 Sol when the account lists it.
+ * Terra remains the fallback when neither is present.
  */
 export const CODEX_MODEL_PREFERENCE = [
+  CHATGPT_ASTRA_MODEL,
+  CHATGPT_SOL_61_MODEL,
   'gpt-5.6-terra',
-  'gpt-5.6-sol',
   'gpt-5.6-luna',
-  'gpt-5.5'
+  'gpt-5.5',
+  CHATGPT_SOL_MODEL
 ]
 
+export function resolveEverydayCodexModel(
+  listed: CodexModel[],
+  requested: string | null | undefined,
+  previous: string | null | undefined
+): { id: string | null; notice: string | null } {
+  const want = requested?.trim() || ''
+  const ids = new Set(listed.map((model) => model.id))
+  if (!listed.length) return { id: want || null, notice: null }
+
+  if (want) {
+    if (ids.has(want)) return { id: want, notice: null }
+    const prefixed = listed.find((model) => model.id.startsWith(want) || want.startsWith(model.id))
+    if (prefixed) return { id: prefixed.id, notice: null }
+    const preserved =
+      previous && ids.has(previous)
+        ? previous
+        : pickModel(listed, CODEX_MODEL_PREFERENCE.filter((id) => id !== want), '')
+    return {
+      id: preserved,
+      notice: `${want} is not available on this ChatGPT plan. Kept ${preserved}.`
+    }
+  }
+
+  return { id: pickModel(listed, CODEX_MODEL_PREFERENCE, ''), notice: null }
+}
+
 /** Reserved for genuinely hard work. */
-export const CODEX_ESCALATION_PREFERENCE = ['gpt-6-astra', 'gpt-5.6-terra', 'gpt-5.6-sol']
+export const CODEX_ESCALATION_PREFERENCE = [
+  CHATGPT_ASTRA_MODEL,
+  CHATGPT_SOL_61_MODEL,
+  'gpt-5.6-terra',
+  CHATGPT_SOL_MODEL
+]
 
 export const CODEX_DEFAULT_EFFORT = 'medium'
+
+function isSol61(modelId: string | null | undefined): boolean {
+  const id = modelId?.trim() || ''
+  return id === CHATGPT_SOL_61_MODEL || id.startsWith(`${CHATGPT_SOL_61_MODEL}-`)
+}
 
 function effortList(raw: unknown): string[] {
   if (!Array.isArray(raw)) return []
@@ -114,20 +168,25 @@ export function pickModel(
 
 export function supportedEfforts(models: CodexModel[], modelId: string | null): string[] {
   if (!modelId) return []
-  return models.find((m) => m.id === modelId)?.efforts ?? []
+  const listed = models.find((m) => m.id === modelId)?.efforts ?? []
+  if (listed.length) return listed
+  // Official GPT-6.1 Sol efforts when model/list omits the array.
+  if (isSol61(modelId)) return [...CHATGPT_SOL_61_EFFORTS]
+  return []
 }
 
 /**
  * Coerce to an effort the chosen model actually supports, so a stale setting
  * can't make every turn fail. Prefers Kai's choice, then `medium`, then the
- * model's own default.
+ * model's own default. GPT-6.1 Sol rejects none/minimal — map those to low.
  */
 export function normalizeEffort(
   models: CodexModel[],
   modelId: string | null,
   requested: string | null | undefined
 ): string {
-  const want = (requested || '').trim() || CODEX_DEFAULT_EFFORT
+  let want = (requested || '').trim() || CODEX_DEFAULT_EFFORT
+  if (isSol61(modelId) && (want === 'none' || want === 'minimal')) want = 'low'
   const efforts = supportedEfforts(models, modelId)
   if (!efforts.length) return want
   if (efforts.includes(want)) return want

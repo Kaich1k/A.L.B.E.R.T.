@@ -310,7 +310,7 @@ export const spotifyTools: ToolDefinition[] = [
   {
     name: 'spotify_control',
     description:
-      'Control macOS Spotify. Prefer play_search for “play X”. Returns SUCCESS/FAILURE — only tell Kai a song is playing on SUCCESS with state playing. Never invent success. Never ask permission to use this tool.',
+      'Control macOS Spotify. Prefer play_search. Claim playback only on SUCCESS with state playing.',
     parameters: {
       type: 'object',
       properties: {

@@ -46,14 +46,9 @@ const STOP = new Set([
   'usually'
 ])
 
-const KIND_ANGLE: Record<MemoryKind, number> = {
-  person: -90,
-  project: -18,
-  preference: 54,
-  decision: 126,
-  place: 198,
-  general: 270
-}
+const KIND_ORDER: MemoryKind[] = ['person', 'project', 'preference', 'decision', 'place', 'general']
+
+export const MEMORY_GRAPH_VIEW = { width: 920, height: 540 }
 
 export function classifyMemoryKind(content: string, category = ''): MemoryKind {
   const cat = category.trim().toLowerCase()
@@ -136,7 +131,14 @@ function jaccard(a: string[], b: string[]): number {
 }
 
 export function buildMemoryGraph(memories: MemoryFact[], limit = 48): MemoryGraph {
-  const source = memories.slice(0, Math.max(8, limit))
+  const ranked = [...memories].sort((left, right) => {
+    const kindDelta =
+      KIND_ORDER.indexOf(classifyMemoryKind(left.content || '', left.category || '')) -
+      KIND_ORDER.indexOf(classifyMemoryKind(right.content || '', right.category || ''))
+    if (kindDelta) return kindDelta
+    return (right.updatedAt - left.updatedAt) || left.id.localeCompare(right.id)
+  })
+  const source = ranked.slice(0, Math.max(8, limit))
   const prepared = source.map((memory) => {
     const kind = classifyMemoryKind(memory.content || '', memory.category || '')
     return {
@@ -147,31 +149,41 @@ export function buildMemoryGraph(memories: MemoryFact[], limit = 48): MemoryGrap
     }
   })
 
-  const counts: Record<MemoryKind, number> = {
-    person: 0,
-    project: 0,
-    preference: 0,
-    decision: 0,
-    place: 0,
-    general: 0
-  }
+  const groups = KIND_ORDER.map((kind) =>
+    prepared
+      .filter((item) => item.kind === kind)
+      .sort(
+        (left, right) =>
+          (right.memory.updatedAt - left.memory.updatedAt) ||
+          left.memory.id.localeCompare(right.memory.id)
+      )
+  ).filter((group) => group.length > 0)
 
-  const nodes: MemoryGraphNode[] = prepared.map((item) => {
-    const index = counts[item.kind]
-    counts[item.kind] += 1
-    const angle = ((KIND_ANGLE[item.kind] + index * 17) * Math.PI) / 180
-    const radius = 118 + (index % 5) * 28
-    return {
-      id: item.memory.id,
-      kind: item.kind,
-      label: memoryLabel(item.memory.content || ''),
-      content: item.memory.content || '',
-      source: item.memory.source || 'conversation',
-      confidence: Number.isFinite(item.memory.confidence) ? Number(item.memory.confidence) : 1,
-      category: item.memory.category || 'general',
-      x: Math.round(320 + Math.cos(angle) * radius),
-      y: Math.round(250 + Math.sin(angle) * radius)
-    }
+  const { width, height } = MEMORY_GRAPH_VIEW
+  const padX = 36
+  const top = 46
+  const bottom = 28
+  const colWidth = groups.length ? (width - padX * 2) / groups.length : width
+  const nodes: MemoryGraphNode[] = []
+
+  groups.forEach((group, column) => {
+    const x = padX + colWidth * column + colWidth / 2
+    const gap = Math.min(42, (height - top - bottom) / Math.max(group.length, 1))
+    const block = gap * Math.max(group.length - 1, 0)
+    const startY = top + Math.max(0, (height - top - bottom - block) / 2)
+    group.forEach((item, row) => {
+      nodes.push({
+        id: item.memory.id,
+        kind: item.kind,
+        label: memoryLabel(item.memory.content || '', 24),
+        content: item.memory.content || '',
+        source: item.memory.source || 'conversation',
+        confidence: Number.isFinite(item.memory.confidence) ? Number(item.memory.confidence) : 1,
+        category: item.memory.category || 'general',
+        x: Math.round(x),
+        y: Math.round(startY + row * gap)
+      })
+    })
   })
 
   const edges: MemoryGraphEdge[] = []

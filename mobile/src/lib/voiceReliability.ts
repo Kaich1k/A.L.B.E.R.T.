@@ -1,4 +1,4 @@
-/** Match Mac end-of-utterance silence (~3s) before finalizing speech. */
+/** Keep ~3s of extra silence so a mid-thought pause is not treated as the end. */
 export const INTERIM_TAIL_SILENCE_MS = 3_000
 export const TTS_START_WATCHDOG_MS = 2_500
 

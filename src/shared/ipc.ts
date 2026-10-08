@@ -6,6 +6,8 @@ export const IpcChannels = {
   chatClear: 'albert:chat:clear',
   chatAppend: 'albert:chat:append',
   chatImageData: 'albert:chat:image-data',
+  chatArtifactImageData: 'albert:chat:artifact-image-data',
+  chatArtifactOpen: 'albert:chat:artifact-open',
   memoryList: 'albert:memory:list',
   memoryDelete: 'albert:memory:delete',
   memoryUpdate: 'albert:memory:update',
@@ -17,6 +19,10 @@ export const IpcChannels = {
   windowHide: 'albert:window:hide',
   windowShow: 'albert:window:show',
   openPrivacyPane: 'albert:system:open-privacy',
+  permissionStatus: 'albert:system:permissions',
+  requestPermission: 'albert:system:request-permission',
+  outlookGraphBegin: 'albert:outlook:graph-begin',
+  outlookGraphFinish: 'albert:outlook:graph-finish',
   ollamaProbe: 'albert:ollama:probe',
   ollamaPull: 'albert:ollama:pull',
   groqProbe: 'albert:groq:probe',
@@ -29,6 +35,7 @@ export const IpcChannels = {
   companionRevokeDevice: 'albert:companion:revoke-device',
   ttsSpeak: 'albert:tts:speak',
   ttsKokoro: 'albert:tts:kokoro',
+  ttsKokoroCancel: 'albert:tts:kokoro-cancel',
   ttsKokoroWarm: 'albert:tts:kokoro-warm',
   ttsKokoroProgress: 'albert:tts:kokoro-progress',
   computerState: 'albert:computer:state',
@@ -85,7 +92,10 @@ export const IpcChannels = {
   hudUndock: 'albert:hud:undock',
   hudRuntime: 'albert:hud:runtime',
   hudClickThrough: 'albert:hud:click-through',
-  voiceToggle: 'albert:voice:toggle'
+  hudExpand: 'albert:hud:expand',
+  hudReturn: 'albert:hud:return',
+  voiceToggle: 'albert:voice:toggle',
+  workStop: 'albert:work:stop'
 } as const
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels]

@@ -1,6 +1,7 @@
 import { v4 as uuid } from 'uuid'
 import { getDb } from './db'
 import { createOpenAI, hasOpenAIKey } from '../openai/client'
+import { setSettings } from '../config'
 import type { ActivityEntry, ChatMessage, MemoryFact } from '../../shared/types'
 
 function cosineSimilarity(a: number[], b: number[]): number {
@@ -77,7 +78,7 @@ export function getRecentMessages(limit = 80): ChatMessage[] {
     .prepare(
       `SELECT id, role, content, tool_name as toolName, tool_call_id as toolCallId,
               created_at as createdAt, images as imagesJson
-       FROM messages ORDER BY created_at DESC LIMIT ?`
+       FROM messages ORDER BY created_at DESC, rowid DESC LIMIT ?`
     )
     .all(limit) as Array<ChatMessage & { imagesJson?: string | null }>
 
@@ -91,6 +92,8 @@ export function getRecentMessages(limit = 80): ChatMessage[] {
 
 export function clearMessages(): void {
   getDb().prepare('DELETE FROM messages').run()
+  // An explicit purge must not leave a hidden provider thread replaying the deleted chat.
+  setSettings({ codexThreadId: '', codexContextStartAt: Date.now() })
 }
 
 /** Phone-facing chat row (no tool messages / images). */
@@ -406,24 +409,43 @@ export function logActivity(
     args: entry.args,
     result: entry.result,
     ok: entry.ok,
-    createdAt: entry.createdAt ?? Date.now()
+    createdAt: entry.createdAt ?? Date.now(),
+    appName: entry.appName,
+    approvalRequired: entry.approvalRequired
   }
   getDb()
     .prepare(
-      `INSERT INTO activity (id, tool_name, args, result, ok, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO activity (id, tool_name, args, result, ok, created_at, app_name, approval_required)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(row.id, row.toolName, JSON.stringify(row.args), row.result, row.ok ? 1 : 0, row.createdAt)
+    .run(
+      row.id,
+      row.toolName,
+      JSON.stringify(row.args),
+      row.result,
+      row.ok ? 1 : 0,
+      row.createdAt,
+      row.appName ?? null,
+      row.approvalRequired ? 1 : 0
+    )
   return row
 }
 
 export function listActivity(limit = 100): ActivityEntry[] {
   const rows = getDb()
     .prepare(
-      `SELECT id, tool_name as toolName, args, result, ok, created_at as createdAt
+      `SELECT id, tool_name as toolName, args, result, ok, created_at as createdAt,
+              app_name as appName, approval_required as approvalRequired
        FROM activity ORDER BY created_at DESC LIMIT ?`
     )
-    .all(limit) as Array<Omit<ActivityEntry, 'args' | 'ok'> & { args: string; ok: number }>
+    .all(limit) as Array<
+      Omit<ActivityEntry, 'args' | 'ok' | 'approvalRequired'> & {
+        args: string
+        ok: number
+        appName: string | null
+        approvalRequired: number | null
+      }
+    >
 
   return rows.map((r) => ({
     id: r.id,
@@ -431,7 +453,9 @@ export function listActivity(limit = 100): ActivityEntry[] {
     args: JSON.parse(r.args) as Record<string, unknown>,
     result: r.result,
     ok: !!r.ok,
-    createdAt: r.createdAt
+    createdAt: r.createdAt,
+    appName: r.appName || undefined,
+    approvalRequired: Boolean(r.approvalRequired)
   }))
 }
 

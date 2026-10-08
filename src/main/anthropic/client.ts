@@ -8,14 +8,14 @@ export function createAnthropic(): Anthropic {
 /** @deprecated prefer selectModelTier / powerModel */
 export function getChatModel(): string {
   const s = getSettings()
-  return s.powerModel || s.model || 'claude-opus-5'
+  return s.powerModel || s.model || 'claude-opus-5-5'
 }
 
 export function getFastModel(): string {
-  return getSettings().fastModel || 'claude-haiku-4-5'
+  return getSettings().fastModel || 'claude-haiku-5-5'
 }
 
 export function getPowerModel(): string {
   const s = getSettings()
-  return s.powerModel || s.model || 'claude-opus-5'
+  return s.powerModel || s.model || 'claude-opus-5-5'
 }
